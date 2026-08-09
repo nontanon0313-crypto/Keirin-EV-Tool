@@ -49,3 +49,14 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
         ],
         "odds_count": len(race.odds_list),
     }
+
+
+@router.delete("/{race_id}")
+def delete_race(race_id: int, db: Session = Depends(get_db)):
+    """レースを削除する(選手・オッズ・期待値結果も連動して削除される)。誤って作成したレースのやり直し用。"""
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+    db.delete(race)
+    db.commit()
+    return {"deleted": True, "race_id": race_id}

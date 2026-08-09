@@ -87,6 +87,28 @@ async function loadRaces() {
 }
 document.getElementById("loadRacesBtn").addEventListener("click", loadRaces);
 
+document.getElementById("deleteRaceBtn").addEventListener("click", async () => {
+  const raceId = document.getElementById("raceSelect").value;
+  if (!raceId) {
+    alert("削除するレースを選択してください");
+    return;
+  }
+  const select = document.getElementById("raceSelect");
+  const label = select.options[select.selectedIndex] ? select.options[select.selectedIndex].text : raceId;
+  if (!confirm(`「${label}」を削除します。よろしいですか？(元に戻せません)`)) {
+    return;
+  }
+  try {
+    const res = await fetch(apiUrl(`/races/${raceId}`), { method: "DELETE" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    alert("削除しました");
+    await loadRaces();
+  } catch (e) {
+    alert("削除エラー: " + e.message);
+  }
+});
+
 document.getElementById("calcEvBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   const resultBox = document.getElementById("evResult");
