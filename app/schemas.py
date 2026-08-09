@@ -47,7 +47,7 @@ class SimulationRequest(BaseModel):
 
 class EvCalcRequest(BaseModel):
     race_id: int
-    bankroll: float
+    bankroll: Optional[float] = None  # 未指定なら証拠金残高を自動使用
     fractional_coefficient: float = 0.25
     max_bet_pct_per_bet: float = 0.05
     min_win_prob: float = 0.05
@@ -56,9 +56,13 @@ class EvCalcRequest(BaseModel):
 
 class RacePlanRequest(BaseModel):
     race_id: int
-    bankroll: float
+    bankroll: Optional[float] = None  # 未指定なら証拠金残高を自動使用
     fractional_coefficient: float = 0.25
     max_bet_pct_per_bet: float = 0.05  # 1点あたりの上限比率
-    max_race_pct: float = 0.10  # 1レース合計の上限比率
+    max_race_pct: float = 0.10  # 1レース合計の上限比率(証拠金残高に対して)
     min_win_prob: float = 0.05
     min_ev_pct: float = 5.0
+
+
+class BankrollSet(BaseModel):
+    initial_balance: float

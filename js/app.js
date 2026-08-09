@@ -5,6 +5,43 @@ function apiUrl(path) {
   return API_BASE_URL + path;
 }
 
+// ---------- 💰 証拠金管理 ----------
+async function refreshBankrollDisplay() {
+  const box = document.getElementById("bankrollDisplay");
+  box.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/bankroll/"));
+    const data = await res.json();
+    if (!data.initialized) {
+      box.textContent = "未設定です。下から初期額を設定してください。";
+      return;
+    }
+    box.textContent = `現在の残高: ${data.current_balance}円 (初期設定額: ${data.initial_balance}円)`;
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+}
+
+document.getElementById("bankrollSetBtn").addEventListener("click", async () => {
+  const val = parseFloat(document.getElementById("bankrollSetInput").value);
+  if (!val || val <= 0) {
+    alert("正しい金額を入力してください");
+    return;
+  }
+  if (!confirm(`証拠金を${val}円に設定(上書き)します。よろしいですか？`)) return;
+  try {
+    const res = await fetch(apiUrl("/bankroll/set"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial_balance: val }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    await refreshBankrollDisplay();
+  } catch (e) {
+    alert("エラー: " + e.message);
+  }
+});
+
 // Renderの無料プランはアクセスが無いと自動スリープし、次のアクセスで起動に約1分かかる。
 // 起動完了を待ってから本処理を送るためのウォームアップ関数。
 async function wakeUpBackend(statusCallback) {
@@ -150,6 +187,13 @@ document.getElementById("checkRaceBtn").addEventListener("click", async () => {
   }
 });
 
+function getBankrollOverride() {
+  const raw = document.getElementById("bankrollInput").value;
+  if (raw === "" || raw === null) return null;
+  const v = parseFloat(raw);
+  return isNaN(v) ? null : v;
+}
+
 document.getElementById("calcEvBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   const resultBox = document.getElementById("evResult");
@@ -157,7 +201,7 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
     alert("レースを選択してください");
     return;
   }
-  const bankroll = parseFloat(document.getElementById("bankrollInput").value);
+  const bankroll = getBankrollOverride();
   const kellyCoef = parseFloat(document.getElementById("kellyCoefInput").value);
   const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
   const minEvPct = parseFloat(document.getElementById("minEvInput").value);
@@ -204,7 +248,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     alert("レースを選択してください");
     return;
   }
-  const bankroll = parseFloat(document.getElementById("bankrollInput").value);
+  const bankroll = getBankrollOverride();
   const kellyCoef = parseFloat(document.getElementById("kellyCoefInput").value);
   const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
   const minEvPct = parseFloat(document.getElementById("minEvInput").value);
@@ -220,6 +264,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         fractional_coefficient: kellyCoef,
         min_win_prob: minProb,
         min_ev_pct: minEvPct,
+        max_race_pct: parseFloat(document.getElementById("maxRacePctInput").value) / 100,
       }),
     });
     const data = await res.json();
@@ -270,6 +315,7 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
     resultBox.textContent = `記録しました(ID:${data.id})。結果が分かったら別途更新してください。`;
+    await refreshBankrollDisplay();
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
@@ -323,3 +369,4 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
 
 // 初回ロード
 loadRaces();
+refreshBankrollDisplay();

@@ -6,6 +6,7 @@ from typing import List
 from ..database import get_db
 from .. import models, schemas
 from .. import ev_calculator as calc
+from . import bankroll as bankroll_router
 
 router = APIRouter(prefix="/ev", tags=["ev"])
 
@@ -46,6 +47,8 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             f"{len(entries)}名中{missing_count}名の勝率データが未取得です。全員分揃うまでレース詳細で確認してください"
         )
 
+    bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
+
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
         raise HTTPException(400, "オッズデータがありません。オッズ画面(全券種)のスクショを読み込ませてください")
@@ -78,7 +81,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
 
         stake_info = calc.recommend_stake(
-            req.bankroll, est_prob, o.odds_value, req.fractional_coefficient, req.max_bet_pct_per_bet
+            bankroll, est_prob, o.odds_value, req.fractional_coefficient, req.max_bet_pct_per_bet
         )
 
         ev_result = models.EvResult(
@@ -108,7 +111,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
 
     return {
         "race_id": race_id,
-        "bankroll": req.bankroll,
+        "bankroll": bankroll,
         "total_combinations": len(results),
         "results": [
             {
@@ -144,6 +147,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     if not win_probs:
         raise HTTPException(400, "選手の勝率データが揃っていません")
 
+    bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
+
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
         raise HTTPException(400, "オッズデータがありません")
@@ -161,7 +166,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
         f = calc.kelly_fraction(est_prob, o.odds_value, req.fractional_coefficient)
         f_capped = min(f, req.max_bet_pct_per_bet)
-        raw_stake = req.bankroll * f_capped
+        raw_stake = bankroll * f_capped
         candidates.append({
             "bet_type": o.bet_type,
             "combination": o.combination,
@@ -181,7 +186,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         }
 
     total_raw_stake = sum(c["raw_stake"] for c in candidates)
-    race_cap = req.bankroll * req.max_race_pct
+    race_cap = bankroll * req.max_race_pct
     scale = min(1.0, race_cap / total_raw_stake) if total_raw_stake > 0 else 1.0
 
     items = []

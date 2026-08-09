@@ -4,6 +4,7 @@ from typing import Optional
 
 from ..database import get_db
 from .. import models, schemas
+from . import bankroll as bankroll_router
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -14,6 +15,8 @@ def create_purchase(purchase: schemas.PurchaseCreate, db: Session = Depends(get_
     db.add(obj)
     db.commit()
     db.refresh(obj)
+    # 購入した分だけ証拠金残高を減算する
+    bankroll_router.adjust_balance(db, -purchase.stake_amount)
     return obj
 
 
@@ -22,9 +25,13 @@ def update_purchase_result(purchase_id: int, update: schemas.PurchaseResultUpdat
     obj = db.query(models.Purchase).get(purchase_id)
     if not obj:
         raise HTTPException(404, "購入履歴が見つかりません")
+    if obj.result != "pending":
+        raise HTTPException(400, "この購入履歴はすでに結果が確定しています(二重加算を防ぐため再更新できません)")
     obj.result = update.result
     obj.payout_amount = update.payout_amount
     db.commit()
+    # 払戻があれば証拠金残高に加算する(負けの場合はpayout_amount=0なので変化なし)
+    bankroll_router.adjust_balance(db, update.payout_amount)
     return obj
 
 

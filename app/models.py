@@ -151,6 +151,20 @@ class Purchase(Base):
     purchased_at = Column(DateTime, default=datetime.utcnow)
 
 
+class BankrollState(Base):
+    """
+    証拠金の残高を管理する(常に1行のみ)。
+    購入記録時に自動で減算し、結果登録時に払戻分を自動で加算する。
+    これにより「1レースに全額投票してしまう」ことを構造的に防ぐ。
+    """
+    __tablename__ = "bankroll_state"
+
+    id = Column(Integer, primary_key=True, default=1)
+    current_balance = Column(Float, nullable=False)
+    initial_balance = Column(Float, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SkippedBet(Base):
     """見送った買い目の記録(後から検証するため)"""
     __tablename__ = "skipped_bets"
