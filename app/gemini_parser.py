@@ -19,9 +19,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# 2026/6/1にgemini-2.0-flashが提供終了となったため、現在も無料枠で使えるモデルに変更。
-# 必ず無料枠内で運用する方針のため、Flash/Flash-Lite系(課金不要枠が用意されているモデル)のみを使うこと。
-MODEL_NAME = "gemini-2.5-flash"
+# gemini-2.0-flash(2026/6廃止)→gemini-2.5-flash(新規ユーザー利用不可)と立て続けに使えなくなったため、
+# 2026年8月時点で新規ユーザーも無料枠で使える正式版モデルに変更。
+# 無料枠: 30 RPM / 1500 RPD、課金不要、画像入力対応(2026年8月確認)
+MODEL_NAME = "gemini-3.1-flash-lite"
 
 # 無料枠のレート制限(1分あたりのリクエスト数)に達した場合の自動リトライ設定
 MAX_RETRIES = 3
