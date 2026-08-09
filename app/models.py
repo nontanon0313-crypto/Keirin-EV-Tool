@@ -97,6 +97,7 @@ class Odds(Base):
     combination = Column(String(20), nullable=False)  # 例: "1-2-3"
     odds_value = Column(Float, nullable=False)
     popularity_rank = Column(Integer, nullable=True)
+    total_vote_amount = Column(Float, nullable=True)  # その買い目への投票総額(円)。画面に表示されていれば取得、無ければnull
     updated_at = Column(DateTime, default=datetime.utcnow)
 
     race = relationship("Race", back_populates="odds_list")

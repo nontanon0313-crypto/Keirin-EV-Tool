@@ -106,6 +106,8 @@ def _upsert_odds(db: Session, race: models.Race, odds_list: list):
         if existing:
             existing.odds_value = odds_value
             existing.popularity_rank = o.get("popularity_rank")
+            if o.get("total_vote_amount") is not None:
+                existing.total_vote_amount = o.get("total_vote_amount")
             existing.updated_at = datetime.utcnow()
         else:
             db.add(
@@ -115,6 +117,7 @@ def _upsert_odds(db: Session, race: models.Race, odds_list: list):
                     combination=combination,
                     odds_value=odds_value,
                     popularity_rank=o.get("popularity_rank"),
+                    total_vote_amount=o.get("total_vote_amount"),
                 )
             )
     db.commit()

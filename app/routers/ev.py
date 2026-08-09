@@ -103,31 +103,42 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
 
     db.commit()
 
+    odds_lookup = {(o.bet_type, o.combination): o.total_vote_amount for o in odds_rows}
+
     # 買い示唆を最優先、その中で期待値が高い順に並べる。次に見送りを末尾に回す。
     results = sorted(
         created,
         key=lambda r: (not r.is_recommended, r.is_skip, -r.ev_pct),
     )
 
+    output_results = []
+    for r in results:
+        total_vote = odds_lookup.get((r.bet_type, r.combination))
+        stake = r.recommended_stake or 0
+        if total_vote is not None and total_vote > 0:
+            self_impact_pct = round(stake / (total_vote + stake) * 100, 2)
+        else:
+            self_impact_pct = None
+        output_results.append({
+            "bet_type": r.bet_type,
+            "combination": r.combination,
+            "estimated_win_prob_pct": round(r.estimated_win_prob * 100, 2),
+            "market_prob_pct": round(r.market_prob * 100, 2),
+            "odds_value": r.odds_value,
+            "ev_pct": round(r.ev_pct, 2),
+            "recommended_stake": r.recommended_stake,
+            "is_skip": r.is_skip,
+            "skip_reason": r.skip_reason,
+            "is_recommended": r.is_recommended,
+            "self_impact_pct": self_impact_pct,
+            "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
+        })
+
     return {
         "race_id": race_id,
         "bankroll": bankroll,
         "total_combinations": len(results),
-        "results": [
-            {
-                "bet_type": r.bet_type,
-                "combination": r.combination,
-                "estimated_win_prob_pct": round(r.estimated_win_prob * 100, 2),
-                "market_prob_pct": round(r.market_prob * 100, 2),
-                "odds_value": r.odds_value,
-                "ev_pct": round(r.ev_pct, 2),
-                "recommended_stake": r.recommended_stake,
-                "is_skip": r.is_skip,
-                "skip_reason": r.skip_reason,
-                "is_recommended": r.is_recommended,
-            }
-            for r in results
-        ],
+        "results": output_results,
     }
 
 
@@ -175,6 +186,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "ev_pct": round(ev_pct, 2),
             "raw_stake": raw_stake,
             "win_prob": est_prob,
+            "total_vote_amount": o.total_vote_amount,
         })
 
     if not candidates:
@@ -197,6 +209,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         expected_profit = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         total_stake += stake
         total_expected_profit += expected_profit
+        total_vote = c["total_vote_amount"]
+        if total_vote is not None and total_vote > 0:
+            self_impact_pct = round(stake / (total_vote + stake) * 100, 2)
+        else:
+            self_impact_pct = None
         items.append({
             "bet_type": c["bet_type"],
             "combination": c["combination"],
@@ -204,6 +221,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "odds_value": c["odds_value"],
             "ev_pct": c["ev_pct"],
             "stake": stake,
+            "self_impact_pct": self_impact_pct,
+            "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
         })
 
     return {
