@@ -1,18 +1,8 @@
-// APIベースURLはlocalStorageに保存(ブラウザ内のみ、サーバー送信なし)
-function getApiBase() {
-  return (localStorage.getItem("apiBaseUrl") || "").trim().replace(/\/$/, "");
-}
-
-document.getElementById("apiBaseUrl").value = getApiBase();
-
-document.getElementById("saveConfigBtn").addEventListener("click", () => {
-  const url = document.getElementById("apiBaseUrl").value.trim().replace(/\/$/, "");
-  localStorage.setItem("apiBaseUrl", url);
-  alert("保存しました: " + url);
-});
+// バックエンドのURLは固定(このプロジェクト専用のRenderデプロイ先)
+const API_BASE_URL = "https://keirin-ev-tool.onrender.com";
 
 function apiUrl(path) {
-  return getApiBase() + path;
+  return API_BASE_URL + path;
 }
 
 // Renderの無料プランはアクセスが無いと自動スリープし、次のアクセスで起動に約1分かかる。
@@ -20,11 +10,6 @@ function apiUrl(path) {
 async function wakeUpBackend(statusCallback) {
   const maxAttempts = 20; // 約60秒待つ(3秒間隔×20回)
   let lastError = null;
-  const base = getApiBase();
-  if (!base) {
-    if (statusCallback) statusCallback("APIベースURLが未設定です。上の「API設定」に入力して保存してください。");
-    return false;
-  }
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(apiUrl("/health"), { cache: "no-store" });
@@ -45,7 +30,7 @@ async function wakeUpBackend(statusCallback) {
     await new Promise((r) => setTimeout(r, 3000));
   }
   if (statusCallback) {
-    statusCallback(`サーバーが応答しません。\nAPIベースURL: ${base}\n直近のエラー: ${lastError || "不明"}`);
+    statusCallback(`サーバーが応答しません。\nAPIベースURL: ${API_BASE_URL}\n直近のエラー: ${lastError || "不明"}`);
   }
   return false;
 }
