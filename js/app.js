@@ -285,10 +285,51 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     }
     html += "</table>";
     resultBox.innerHTML = html;
+
+    // 「まとめて購入記録する」ボタンを動的に追加(このプランの内容を保持しておく)
+    lastRacePlan = { raceId: parseInt(raceId), items: data.items };
+    const bulkBtn = document.createElement("button");
+    bulkBtn.textContent = `この${data.items.length}点をまとめて購入記録する`;
+    bulkBtn.style.background = "#f59e0b";
+    bulkBtn.addEventListener("click", recordRacePlanAsPurchases);
+    resultBox.appendChild(bulkBtn);
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
 });
+
+let lastRacePlan = null;
+
+async function recordRacePlanAsPurchases() {
+  if (!lastRacePlan || !lastRacePlan.items.length) return;
+  if (!confirm(`${lastRacePlan.items.length}点をまとめて購入記録します。実際に投票操作をした後に押してください。よろしいですか？`)) return;
+
+  let successCount = 0;
+  const errors = [];
+  for (const it of lastRacePlan.items) {
+    if (!it.stake || it.stake <= 0) continue;
+    try {
+      const res = await fetch(apiUrl("/purchases/"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          race_id: lastRacePlan.raceId,
+          bet_type: it.bet_type,
+          combination: it.combination,
+          stake_amount: it.stake,
+          odds_at_purchase: it.odds_value,
+          ev_pct_at_purchase: it.ev_pct,
+        }),
+      });
+      if (res.ok) successCount++;
+      else errors.push(it.combination);
+    } catch (e) {
+      errors.push(it.combination);
+    }
+  }
+  alert(`${successCount}件を記録しました。${errors.length ? "失敗: " + errors.join(", ") : ""}`);
+  await refreshBankrollDisplay();
+}
 
 // ---------- ③ 購入記録 ----------
 document.getElementById("recordPurchaseBtn").addEventListener("click", async () => {
