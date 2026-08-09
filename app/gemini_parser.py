@@ -9,15 +9,46 @@ Gemini APIを使い、競輪アプリのスクリーンショットから構造�
 
 import os
 import json
+import time
 import base64
 from typing import Optional
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = "gemini-2.0-flash"
+# 2026/6/1にgemini-2.0-flashが提供終了となったため、現在も無料枠で使えるモデルに変更。
+# 必ず無料枠内で運用する方針のため、Flash/Flash-Lite系(課金不要枠が用意されているモデル)のみを使うこと。
+MODEL_NAME = "gemini-2.5-flash"
+
+# 無料枠のレート制限(1分あたりのリクエスト数)に達した場合の自動リトライ設定
+MAX_RETRIES = 3
+DEFAULT_RETRY_WAIT_SECONDS = 20
+
+
+def _call_with_retry(model, contents, generation_config):
+    """無料枠のレート制限(429)に達した場合、少し待って自動リトライする。"""
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return model.generate_content(contents, generation_config=generation_config)
+        except ResourceExhausted as e:
+            last_error = e
+            wait_seconds = DEFAULT_RETRY_WAIT_SECONDS
+            # エラーメッセージにretry_delayが含まれていれば、その秒数を優先して待つ
+            try:
+                if hasattr(e, "retry_delay") and e.retry_delay:
+                    wait_seconds = e.retry_delay.seconds + 1
+            except Exception:
+                pass
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(wait_seconds)
+    raise RuntimeError(
+        f"Gemini APIの無料枠レート制限に達し、{MAX_RETRIES}回リトライしても失敗しました。"
+        f"時間を空けて再度お試しください。詳細: {last_error}"
+    )
 
 # 画面の種類ごとに抽出してほしい項目を指示する共通プロンプト
 EXTRACTION_PROMPT = """
@@ -95,7 +126,8 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
         raise RuntimeError("GEMINI_API_KEY が設定されていません(Renderの環境変数を確認してください)")
 
     model = genai.GenerativeModel(MODEL_NAME)
-    response = model.generate_content(
+    response = _call_with_retry(
+        model,
         [EXTRACTION_PROMPT, _image_to_part(image_bytes, mime_type)],
         generation_config={"response_mime_type": "application/json"},
     )
@@ -130,7 +162,8 @@ def estimate_ai_win_probabilities(entries: list) -> dict:
 {json.dumps(entries, ensure_ascii=False, indent=2)}
 """
     model = genai.GenerativeModel(MODEL_NAME)
-    response = model.generate_content(
+    response = _call_with_retry(
+        model,
         prompt,
         generation_config={"response_mime_type": "application/json"},
     )
