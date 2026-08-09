@@ -1,6 +1,6 @@
 // APIベースURLはlocalStorageに保存(ブラウザ内のみ、サーバー送信なし)
 function getApiBase() {
-  return localStorage.getItem("apiBaseUrl") || "";
+  return (localStorage.getItem("apiBaseUrl") || "").trim().replace(/\/$/, "");
 }
 
 document.getElementById("apiBaseUrl").value = getApiBase();
@@ -19,6 +19,12 @@ function apiUrl(path) {
 // 起動完了を待ってから本処理を送るためのウォームアップ関数。
 async function wakeUpBackend(statusCallback) {
   const maxAttempts = 20; // 約60秒待つ(3秒間隔×20回)
+  let lastError = null;
+  const base = getApiBase();
+  if (!base) {
+    if (statusCallback) statusCallback("APIベースURLが未設定です。上の「API設定」に入力して保存してください。");
+    return false;
+  }
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(apiUrl("/health"), { cache: "no-store" });
@@ -27,14 +33,19 @@ async function wakeUpBackend(statusCallback) {
         if (data && data.status === "healthy") {
           return true;
         }
+      } else {
+        lastError = `HTTPステータス ${res.status}`;
       }
     } catch (e) {
-      // 起動中はネットワークエラーになることもあるので無視して待つ
+      lastError = e.message || String(e);
     }
     if (statusCallback) {
-      statusCallback(`サーバー起動待ち...(${i + 1}/${maxAttempts})\n無料プランはアクセスが無いとスリープするため、初回は最大1分ほどかかります。`);
+      statusCallback(`サーバー起動待ち...(${i + 1}/${maxAttempts})\n無料プランはアクセスが無いとスリープするため、初回は最大1分ほどかかります。${lastError ? "\n直近のエラー: " + lastError : ""}`);
     }
     await new Promise((r) => setTimeout(r, 3000));
+  }
+  if (statusCallback) {
+    statusCallback(`サーバーが応答しません。\nAPIベースURL: ${base}\n直近のエラー: ${lastError || "不明"}`);
   }
   return false;
 }
@@ -51,7 +62,6 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
   resultBox.textContent = "サーバーの状態を確認中...";
   const awake = await wakeUpBackend((msg) => { resultBox.textContent = msg; });
   if (!awake) {
-    resultBox.textContent = "サーバーが応答しません。APIベースURLが正しいか確認するか、時間を置いて再度お試しください。";
     return;
   }
 
@@ -106,7 +116,6 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
   resultBox.textContent = "サーバーの状態を確認中...";
   const awake = await wakeUpBackend((msg) => { resultBox.textContent = msg; });
   if (!awake) {
-    resultBox.textContent = "サーバーが応答しません。時間を置いて再度お試しください。";
     return;
   }
 

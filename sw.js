@@ -1,5 +1,5 @@
 // フロントエンド修正のたびに必ずこのバージョン文字列を更新すること(開発ルール)
-const CACHE_NAME = "keirin-ev-v2";
+const CACHE_NAME = "keirin-ev-v3";
 
 const ASSETS = [
   "./",
@@ -28,10 +28,13 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
-  // APIリクエストはキャッシュせず常にネットワークから取得する
-  if (event.request.url.includes("/analyze") || event.request.url.includes("/ev") ||
-      event.request.url.includes("/purchases") || event.request.url.includes("/simulation") ||
-      event.request.url.includes("/races") || event.request.url.includes("/bank")) {
+  // APIリクエスト(ヘルスチェック含む)はキャッシュせず常にネットワークから取得する
+  const url = event.request.url;
+  const isApiRequest = url.includes("/analyze") || url.includes("/ev") ||
+      url.includes("/purchases") || url.includes("/simulation") ||
+      url.includes("/races") || url.includes("/bank") || url.includes("/health") ||
+      !url.includes(self.location.origin); // 自分のオリジン以外(=Render等の外部API)は常にスルー
+  if (isApiRequest) {
     return;
   }
   event.respondWith(
