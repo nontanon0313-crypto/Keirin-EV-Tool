@@ -160,6 +160,7 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
   const bankroll = parseFloat(document.getElementById("bankrollInput").value);
   const kellyCoef = parseFloat(document.getElementById("kellyCoefInput").value);
   const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
+  const minEvPct = parseFloat(document.getElementById("minEvInput").value);
 
   resultBox.textContent = "サーバーの状態を確認中...";
   const awake = await wakeUpBackend((msg) => { resultBox.textContent = msg; });
@@ -177,6 +178,7 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
         bankroll,
         fractional_coefficient: kellyCoef,
         min_win_prob: minProb,
+        min_ev_pct: minEvPct,
       }),
     });
     const data = await res.json();

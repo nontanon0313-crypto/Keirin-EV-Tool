@@ -51,3 +51,4 @@ class EvCalcRequest(BaseModel):
     fractional_coefficient: float = 0.25
     max_bet_pct_per_bet: float = 0.05
     min_win_prob: float = 0.05
+    min_ev_pct: float = 5.0  # 買い示唆の閾値(オッズ変動への安全マージン)。デフォルトは期待値5%以上

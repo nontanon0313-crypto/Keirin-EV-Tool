@@ -74,8 +74,8 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
 
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value)
         is_skip, skip_reason = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
-        # 100円ベット換算で期待値1円以上(=EV% 1%以上)を「買い示唆」とする
-        is_recommended = (not is_skip) and (ev_pct >= 1.0)
+        # 100円ベット換算で、安全マージン(オッズ変動対策)を考慮した閾値以上を「買い示唆」とする
+        is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
 
         stake_info = calc.recommend_stake(
             req.bankroll, est_prob, o.odds_value, req.fractional_coefficient, req.max_bet_pct_per_bet
