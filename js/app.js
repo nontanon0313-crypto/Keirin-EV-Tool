@@ -15,6 +15,30 @@ function apiUrl(path) {
   return getApiBase() + path;
 }
 
+// Renderの無料プランはアクセスが無いと自動スリープし、次のアクセスで起動に約1分かかる。
+// 起動完了を待ってから本処理を送るためのウォームアップ関数。
+async function wakeUpBackend(statusCallback) {
+  const maxAttempts = 20; // 約60秒待つ(3秒間隔×20回)
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const res = await fetch(apiUrl("/health"), { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.status === "healthy") {
+          return true;
+        }
+      }
+    } catch (e) {
+      // 起動中はネットワークエラーになることもあるので無視して待つ
+    }
+    if (statusCallback) {
+      statusCallback(`サーバー起動待ち...(${i + 1}/${maxAttempts})\n無料プランはアクセスが無いとスリープするため、初回は最大1分ほどかかります。`);
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return false;
+}
+
 // ---------- ① スクショ解析 ----------
 document.getElementById("uploadBtn").addEventListener("click", async () => {
   const input = document.getElementById("screenshotInput");
@@ -23,6 +47,14 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
     alert("画像を選択してください");
     return;
   }
+
+  resultBox.textContent = "サーバーの状態を確認中...";
+  const awake = await wakeUpBackend((msg) => { resultBox.textContent = msg; });
+  if (!awake) {
+    resultBox.textContent = "サーバーが応答しません。APIベースURLが正しいか確認するか、時間を置いて再度お試しください。";
+    return;
+  }
+
   resultBox.textContent = "解析中...(画像枚数によっては数十秒かかります)";
 
   const formData = new FormData();
@@ -70,6 +102,13 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
   const bankroll = parseFloat(document.getElementById("bankrollInput").value);
   const kellyCoef = parseFloat(document.getElementById("kellyCoefInput").value);
   const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
+
+  resultBox.textContent = "サーバーの状態を確認中...";
+  const awake = await wakeUpBackend((msg) => { resultBox.textContent = msg; });
+  if (!awake) {
+    resultBox.textContent = "サーバーが応答しません。時間を置いて再度お試しください。";
+    return;
+  }
 
   resultBox.textContent = "計算中...";
   try {
