@@ -52,3 +52,13 @@ class EvCalcRequest(BaseModel):
     max_bet_pct_per_bet: float = 0.05
     min_win_prob: float = 0.05
     min_ev_pct: float = 5.0  # 買い示唆の閾値(オッズ変動への安全マージン)。デフォルトは期待値5%以上
+
+
+class RacePlanRequest(BaseModel):
+    race_id: int
+    bankroll: float
+    fractional_coefficient: float = 0.25
+    max_bet_pct_per_bet: float = 0.05  # 1点あたりの上限比率
+    max_race_pct: float = 0.10  # 1レース合計の上限比率
+    min_win_prob: float = 0.05
+    min_ev_pct: float = 5.0

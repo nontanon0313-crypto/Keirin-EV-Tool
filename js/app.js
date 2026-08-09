@@ -197,6 +197,52 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
   }
 });
 
+document.getElementById("racePlanBtn").addEventListener("click", async () => {
+  const raceId = document.getElementById("raceSelect").value;
+  const resultBox = document.getElementById("evResult");
+  if (!raceId) {
+    alert("レースを選択してください");
+    return;
+  }
+  const bankroll = parseFloat(document.getElementById("bankrollInput").value);
+  const kellyCoef = parseFloat(document.getElementById("kellyCoefInput").value);
+  const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
+  const minEvPct = parseFloat(document.getElementById("minEvInput").value);
+
+  resultBox.textContent = "プラン作成中...";
+  try {
+    const res = await fetch(apiUrl(`/ev/race-plan/${raceId}`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        race_id: parseInt(raceId),
+        bankroll,
+        fractional_coefficient: kellyCoef,
+        min_win_prob: minProb,
+        min_ev_pct: minEvPct,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    if (!data.items || data.items.length === 0) {
+      resultBox.textContent = data.message || "買い示唆がありませんでした(見送り推奨)";
+      return;
+    }
+
+    let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円${data.was_scaled_down ? "・上限に合わせて按分済み" : ""})</p>`;
+    html += `<p>レース全体の期待値: ${data.race_ev_pct}%(期待利益 約${data.total_expected_profit}円)</p>`;
+    html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>期待値%</th><th>投票額</th></tr>`;
+    for (const it of data.items) {
+      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.estimated_win_prob_pct}%</td><td>${it.odds_value}</td><td>${it.ev_pct}%</td><td>${it.stake}円</td></tr>`;
+    }
+    html += "</table>";
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 // ---------- ③ 購入記録 ----------
 document.getElementById("recordPurchaseBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;

@@ -128,6 +128,91 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     }
 
 
+@router.post("/race-plan/{race_id}")
+def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(get_db)):
+    """
+    1レース全体で、期待値プラス(安全マージン込み)の買い目をまとめて拾い、
+    証拠金・1レース上限比率の範囲内に収まるよう自動で配分する「投票プラン」を返す。
+    複数の買い目は互いに同時的中しない(排反)とみなして単純合算する簡易モデル。
+    """
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+
+    entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
+    win_probs = _build_win_probs(entries)
+    if not win_probs:
+        raise HTTPException(400, "選手の勝率データが揃っていません")
+
+    odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
+    if not odds_rows:
+        raise HTTPException(400, "オッズデータがありません")
+
+    candidates = []
+    for o in odds_rows:
+        cars = tuple(int(x) for x in o.combination.split("-"))
+        ordered = o.bet_type in calc.ORDERED_BET_TYPES
+        est_prob = calc.combination_prob(win_probs, cars, ordered)
+        ev_pct = calc.calc_ev_pct(est_prob, o.odds_value)
+        is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
+        is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
+        if not is_recommended:
+            continue
+
+        f = calc.kelly_fraction(est_prob, o.odds_value, req.fractional_coefficient)
+        f_capped = min(f, req.max_bet_pct_per_bet)
+        raw_stake = req.bankroll * f_capped
+        candidates.append({
+            "bet_type": o.bet_type,
+            "combination": o.combination,
+            "estimated_win_prob_pct": round(est_prob * 100, 2),
+            "odds_value": o.odds_value,
+            "ev_pct": round(ev_pct, 2),
+            "raw_stake": raw_stake,
+            "win_prob": est_prob,
+        })
+
+    if not candidates:
+        return {
+            "race_id": race_id,
+            "message": "安全マージンを満たす買い示唆がありませんでした(見送り推奨)",
+            "items": [],
+            "total_stake": 0,
+        }
+
+    total_raw_stake = sum(c["raw_stake"] for c in candidates)
+    race_cap = req.bankroll * req.max_race_pct
+    scale = min(1.0, race_cap / total_raw_stake) if total_raw_stake > 0 else 1.0
+
+    items = []
+    total_stake = 0.0
+    total_expected_profit = 0.0
+    for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
+        stake = round(c["raw_stake"] * scale, 0)
+        expected_profit = stake * (c["win_prob"] * c["odds_value"] - 1.0)
+        total_stake += stake
+        total_expected_profit += expected_profit
+        items.append({
+            "bet_type": c["bet_type"],
+            "combination": c["combination"],
+            "estimated_win_prob_pct": c["estimated_win_prob_pct"],
+            "odds_value": c["odds_value"],
+            "ev_pct": c["ev_pct"],
+            "stake": stake,
+        })
+
+    return {
+        "race_id": race_id,
+        "num_bets": len(items),
+        "total_stake": round(total_stake, 0),
+        "race_budget_cap": round(race_cap, 0),
+        "was_scaled_down": scale < 1.0,
+        "total_expected_profit": round(total_expected_profit, 0),
+        "race_ev_pct": round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0,
+        "items": items,
+    }
+
+
 @router.post("/box-suggestion/{race_id}")
 def box_suggestion(
     race_id: int,
