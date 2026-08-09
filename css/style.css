@@ -1,0 +1,103 @@
+:root {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --text: #e2e8f0;
+  --accent: #22c55e;
+  --danger: #ef4444;
+  --muted: #94a3b8;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", sans-serif;
+  padding-bottom: 40px;
+}
+
+header {
+  padding: 16px;
+  text-align: center;
+  border-bottom: 1px solid #334155;
+}
+
+header h1 { font-size: 1.2rem; margin: 0; }
+
+main {
+  padding: 12px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.card {
+  background: var(--card);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.card h2 {
+  font-size: 1rem;
+  margin-top: 0;
+  color: var(--accent);
+}
+
+.note {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 10px;
+}
+
+input, select {
+  width: 100%;
+  padding: 8px;
+  margin-top: 4px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: #0b1220;
+  color: var(--text);
+}
+
+button {
+  width: 100%;
+  padding: 10px;
+  margin-top: 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0f172a;
+  font-weight: bold;
+}
+
+button:active { opacity: 0.8; }
+
+.result-box {
+  margin-top: 12px;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  font-size: 0.8rem;
+}
+
+th, td {
+  border-bottom: 1px solid #334155;
+  padding: 6px 4px;
+  text-align: left;
+}
+
+.ev-positive { color: var(--accent); font-weight: bold; }
+.ev-skip { color: var(--muted); }
