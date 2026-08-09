@@ -121,6 +121,7 @@ class EvResult(Base):
     recommended_stake = Column(Float, nullable=True)  # 推奨購入金額(円)
     is_skip = Column(Boolean, default=False)  # 見送り判定
     skip_reason = Column(String(200), nullable=True)
+    is_recommended = Column(Boolean, default=False)  # 買い示唆(期待値100円あたり1円以上、かつ見送り対象でない)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -29,11 +29,26 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
         raise HTTPException(404, "レースが見つかりません")
 
     entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
+    if not entries:
+        raise HTTPException(400, "選手データがありません。出走表のスクショを読み込ませてください")
+
     win_probs = _build_win_probs(entries)
     if not win_probs:
-        raise HTTPException(400, "選手の勝率データがありません。先にスクショ解析を実行してください")
+        raise HTTPException(
+            400,
+            "選手の勝率データが1件も揃っていません。「勝率」画面(tipstar等)のスクショを追加で読み込ませるか、"
+            "解析処理でAI推定に失敗している可能性があります"
+        )
+    missing_count = len(entries) - len(win_probs)
+    if missing_count > 0:
+        raise HTTPException(
+            400,
+            f"{len(entries)}名中{missing_count}名の勝率データが未取得です。全員分揃うまでレース詳細で確認してください"
+        )
 
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
+    if not odds_rows:
+        raise HTTPException(400, "オッズデータがありません。オッズ画面(全券種)のスクショを読み込ませてください")
 
     # 券種ごとにオッズをまとめ、正規化した市場確率を使えるようにする
     by_bet_type = {}
@@ -59,6 +74,8 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
 
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value)
         is_skip, skip_reason = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
+        # 100円ベット換算で期待値1円以上(=EV% 1%以上)を「買い示唆」とする
+        is_recommended = (not is_skip) and (ev_pct >= 1.0)
 
         stake_info = calc.recommend_stake(
             req.bankroll, est_prob, o.odds_value, req.fractional_coefficient, req.max_bet_pct_per_bet
@@ -76,16 +93,17 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             recommended_stake=0 if is_skip else stake_info["recommended_stake"],
             is_skip=is_skip,
             skip_reason=skip_reason,
+            is_recommended=is_recommended,
         )
         db.add(ev_result)
         created.append(ev_result)
 
     db.commit()
 
-    # 期待値が高い順に整列して返す(見送りは末尾)
+    # 買い示唆を最優先、その中で期待値が高い順に並べる。次に見送りを末尾に回す。
     results = sorted(
         created,
-        key=lambda r: (r.is_skip, -r.ev_pct),
+        key=lambda r: (not r.is_recommended, r.is_skip, -r.ev_pct),
     )
 
     return {
@@ -103,6 +121,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
                 "recommended_stake": r.recommended_stake,
                 "is_skip": r.is_skip,
                 "skip_reason": r.skip_reason,
+                "is_recommended": r.is_recommended,
             }
             for r in results
         ],

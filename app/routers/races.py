@@ -29,6 +29,11 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
     race = db.query(models.Race).get(race_id)
     if not race:
         raise HTTPException(404, "レースが見つかりません")
+
+    odds_by_type = {}
+    for o in race.odds_list:
+        odds_by_type[o.bet_type] = odds_by_type.get(o.bet_type, 0) + 1
+
     return {
         "id": race.id,
         "venue_name": race.venue_name,
@@ -44,10 +49,17 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
                 "app_win_rate": e.app_win_rate,
                 "ai_win_prob": round(e.ai_win_prob * 100, 2) if e.ai_win_prob is not None else None,
                 "blended_win_prob": round(e.blended_win_prob * 100, 2) if e.blended_win_prob is not None else None,
+                "ready_for_ev": e.blended_win_prob is not None,
             }
             for e in race.entries
         ],
         "odds_count": len(race.odds_list),
+        "odds_by_type": odds_by_type,
+        "ready_for_ev_calc": (
+            len(race.entries) > 0
+            and all(e.blended_win_prob is not None for e in race.entries)
+            and len(race.odds_list) > 0
+        ),
     }
 
 

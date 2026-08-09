@@ -109,6 +109,47 @@ document.getElementById("deleteRaceBtn").addEventListener("click", async () => {
   }
 });
 
+document.getElementById("checkRaceBtn").addEventListener("click", async () => {
+  const raceId = document.getElementById("raceSelect").value;
+  const box = document.getElementById("raceDetailResult");
+  if (!raceId) {
+    alert("レースを選択してください");
+    return;
+  }
+  box.textContent = "確認中...";
+  try {
+    const res = await fetch(apiUrl(`/races/${raceId}`));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    let html = `<p><strong>${data.venue_name} ${data.race_number}R</strong> - `;
+    html += data.ready_for_ev_calc
+      ? `<span class="ev-positive">期待値計算に必要なデータは揃っています</span></p>`
+      : `<span style="color:#ef4444;">まだ不足しているデータがあります</span></p>`;
+
+    html += `<table><tr><th>車番</th><th>選手名</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
+    for (const e of data.entries) {
+      const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';
+      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.leg_style ?? "-"}</td><td>${e.app_win_rate ?? "-"}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
+    }
+    html += `</table>`;
+
+    html += `<p>オッズ件数: ${data.odds_count}件</p><ul>`;
+    if (Object.keys(data.odds_by_type).length === 0) {
+      html += `<li style="color:#ef4444;">オッズが1件も読み込まれていません</li>`;
+    } else {
+      for (const [betType, count] of Object.entries(data.odds_by_type)) {
+        html += `<li>${betType}: ${count}件</li>`;
+      }
+    }
+    html += `</ul>`;
+
+    box.innerHTML = html;
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("calcEvBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   const resultBox = document.getElementById("evResult");
@@ -141,10 +182,11 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    let html = `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>期待値%</th><th>推奨額</th></tr>`;
+    let html = `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>期待値%</th><th>推奨額</th><th>判定</th></tr>`;
     for (const r of data.results) {
-      const cls = r.is_skip ? "ev-skip" : (r.ev_pct > 0 ? "ev-positive" : "");
-      html += `<tr class="${cls}"><td>${r.bet_type}</td><td>${r.combination}</td><td>${r.estimated_win_prob_pct}%</td><td>${r.odds_value}</td><td>${r.ev_pct}%</td><td>${r.is_skip ? "見送り" : r.recommended_stake + "円"}</td></tr>`;
+      const cls = r.is_skip ? "ev-skip" : (r.is_recommended ? "ev-positive" : "");
+      const judge = r.is_skip ? "見送り" : (r.is_recommended ? "🟢買い" : "△");
+      html += `<tr class="${cls}"><td>${r.bet_type}</td><td>${r.combination}</td><td>${r.estimated_win_prob_pct}%</td><td>${r.odds_value}</td><td>${r.ev_pct}%</td><td>${r.is_skip ? "-" : r.recommended_stake + "円"}</td><td>${judge}</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;

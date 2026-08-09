@@ -25,6 +25,22 @@ def get_db():
 
 
 def init_db():
-    """テーブルが無ければ作成する。起動時に呼び出す。"""
-    if engine is not None:
-        Base.metadata.create_all(bind=engine)
+    """テーブルが無ければ作成する。起動時に呼び出す。
+    また、後から追加したカラムを既存DBにも反映する簡易マイグレーションを実行する
+    (本格的なAlembic等は導入せず、ADD COLUMN IF NOT EXISTSで都度対応する運用)。
+    """
+    if engine is None:
+        return
+    Base.metadata.create_all(bind=engine)
+
+    migrations = [
+        "ALTER TABLE ev_results ADD COLUMN IF NOT EXISTS is_recommended BOOLEAN DEFAULT FALSE",
+    ]
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for stmt in migrations:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+            except Exception:
+                conn.rollback()
