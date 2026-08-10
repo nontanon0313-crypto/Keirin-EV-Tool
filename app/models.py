@@ -29,10 +29,14 @@ class Race(Base):
     bank_id = Column(Integer, ForeignKey("bank_master.id"), nullable=True)
     race_number = Column(Integer, nullable=False)  # 例: 4 (4R)
     grade = Column(String(10), nullable=True)  # GI/GII/GIII/F1/F2等
+    race_stage = Column(String(30), nullable=True)  # 初日特選/予選/準決勝/決勝等(同一グレード内のステージ差)
     event_title = Column(String(200), nullable=True)
     lines_data = Column(JSON, nullable=True)  # ライン構成 例: [[1,2],[3],[4,5,6],[7]] (各配列が1ライン、並び順=先行→番手→3番手)
     race_date = Column(DateTime, nullable=True)
     deadline_time = Column(DateTime, nullable=True)
+    weather = Column(String(20), nullable=True)  # 晴/曇/雨/雪等。画面に表示があれば取得
+    temperature_c = Column(Float, nullable=True)  # 気温(℃)。画面に表示があれば取得
+    season = Column(String(10), nullable=True)  # 春/夏/秋/冬。解析時の日付から自動算出
     source_app = Column(String(50), nullable=True)  # 読み取り元アプリ(分かれば)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -81,6 +85,7 @@ class Entry(Base):
 
     line_group = Column(String(50), nullable=True)  # ライン構成(例: "1-2" "単騎"等)
     is_local = Column(Boolean, nullable=True)  # 開催地の地元選手か(判定不能ならnull)
+    pre_race_comment = Column(Text, nullable=True)  # 前検コメント等、選手の直前コメント(あれば)
 
     # AI独自推定
     ai_win_prob = Column(Float, nullable=True)  # 0-1

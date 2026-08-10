@@ -177,6 +177,9 @@ document.getElementById("checkRaceBtn").addEventListener("click", async () => {
       html += `<p style="color:#94a3b8;">バンク特性: データなし</p>`;
     }
 
+    html += `<p>グレード: ${data.grade ?? "不明"} / ステージ: ${data.race_stage ?? "不明"}</p>`;
+    html += `<p>季節: ${data.season ?? "不明"} / 天候: ${data.weather ?? "データなし"}${data.temperature_c !== null ? ` / 気温${data.temperature_c}℃` : ""}</p>`;
+
     html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>地元</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
     for (const e of data.entries) {
       const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';

@@ -129,6 +129,18 @@ def purchase_stats(db: Session = Depends(get_db)):
         else:
             return "差し有利バンク(直線長め)"
 
+    def race_stage_bucket(p):
+        race = db.query(models.Race).get(p.race_id)
+        if not race or not race.race_stage:
+            return "不明"
+        return race.race_stage
+
+    def season_bucket(p):
+        race = db.query(models.Race).get(p.race_id)
+        if not race or not race.season:
+            return "不明"
+        return race.season
+
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "total_bets": len(purchases),
@@ -137,6 +149,8 @@ def purchase_stats(db: Session = Depends(get_db)):
         "by_bank": bucket_stats(lambda p: (p.tags or {}).get("bank", "不明")),
         "by_line_match": bucket_stats(line_bucket),
         "by_bank_lead_advantage": bucket_stats(bank_lead_bucket),
+        "by_race_stage": bucket_stats(race_stage_bucket),
+        "by_season": bucket_stats(season_bucket),
         "odds_drift": _odds_drift_stats(purchases),
     }
 

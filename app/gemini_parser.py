@@ -64,13 +64,17 @@ EXTRACTION_PROMPT = """
 
 出力するJSONスキーマ:
 {
-  "screen_type": "出走表基本情報 | 出走表直近成績 | 出走表勝率 | 並び予想 | オッズ | 投票シート | 不明 のいずれか",
+  "screen_type": "出走表基本情報 | 出走表直近成績 | 出走表勝率 | 前検コメント | 並び予想 | オッズ | 投票シート | 不明 のいずれか",
   "source_app": "アプリ名が推測できれば(例: tipstar)。不明ならnull",
   "venue_name": "競輪場名。不明ならnull",
   "race_number": "レース番号(整数)。不明ならnull",
   "grade": "GI/GII/GIII/F1/F2等。不明ならnull",
+  "race_stage": "初日特選 | 予選 | 二次予選 | 選抜 | 準々決勝 | 準決勝 | 決勝 | オッズなど、同じグレード内での
+    ステージ(格)。レース名・見出し・タグ等から読み取れれば入れる。読み取れなければnull",
   "event_title": "開催名。不明ならnull",
   "deadline_time": "締切時刻の文字列(例: 16:54)。不明ならnull",
+  "weather": "天候(晴/曇/雨/雪等)。画面に表示があれば。無ければnull",
+  "temperature_c": "気温(℃、float)。画面に表示があれば。無ければnull",
   "lines": "ライン(連携)構成。「並び予想」等の欄に、車番のグループが「・」等の区切り記号で
     区切られて表示されていることが多い(例:「537・42・1・6」なら[5,3,7]が1ライン、[4,2]が1ライン、
     [1]が単騎、[6]が単騎)。各グループ内の並び順は先行→番手→3番手を表す。
@@ -102,7 +106,8 @@ EXTRACTION_PROMPT = """
       "app_2nd_rate": "2連対率%(float)",
       "app_3rd_rate": "3連対率%(float)",
       "gear_ratio": "ギア倍数(float)",
-      "line_group": "ライン構成に関する情報があれば(参考情報、主要な取得先は上記linesフィールド)"
+      "line_group": "ライン構成に関する情報があれば(参考情報、主要な取得先は上記linesフィールド)",
+      "pre_race_comment": "選手の前検コメント・直前コメント等があれば、その内容をそのまま(要約せず)。無ければnull"
     }
   ],
   "odds_list": [
@@ -148,12 +153,16 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
         return json.loads(cleaned)
 
 
-def estimate_ai_win_probabilities(entries: list, lines: list = None, bank_info: dict = None) -> dict:
+def estimate_ai_win_probabilities(
+    entries: list, lines: list = None, bank_info: dict = None,
+    race_stage: str = None, grade: str = None,
+) -> dict:
     """
     選手データ一覧(競走得点・脚質・決まり手・着順分布・ライン構成等)をもとに、
     GeminiにAI独自の勝率推定をさせる。
     lines: [[1,2],[3],[4,5,6],[7]]形式のライン構成(分かれば)。
     bank_info: {"lap_length_m":..,"home_stretch_length_m":..,"lead_advantage_score":..}形式のバンク特性(分かれば)。
+    race_stage: 予選/準決勝/決勝等のステージ(分かれば)。grade: GI/GII等(分かれば)。
     戻り値: {car_number: win_prob(0-1)} で、合計が1になるよう正規化されたもの。
     """
     if not GEMINI_API_KEY:
@@ -181,10 +190,22 @@ def estimate_ai_win_probabilities(entries: list, lines: list = None, bank_info: 
             "脚質がバンク特性に合っている選手を評価に反映してください)\n"
         )
 
+    stage_text = ""
+    if race_stage or grade:
+        stage_text = (
+            f"このレースの格: グレード={grade or '不明'}、ステージ={race_stage or '不明'}。\n"
+            "(予選・二次予選等の早い段階のレースでは、上位進出さえできればよいため、選手が"
+            "無理に勝ちを狙わず着順だけを意識した保守的な走りをすることがあります。"
+            "一方、準決勝・決勝や、初日特選のような格の高いレースほど、全員が全力で"
+            "勝ちを狙う「ガチ度」が上がる傾向があります。過去の着順・決まり手の実績が"
+            "どのステージで記録されたものかは分からない前提で、この点は参考程度に留めてください)\n"
+        )
+
     prompt = f"""
 以下は競輪レースの出走選手データです。各選手が1着になる確率を推定してください。
 競走得点・脚質・S/H/B回数・決まり手の傾向・着順分布を総合的に考慮してください。
-{lines_text}{bank_text}"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
+"pre_race_comment"に前検コメント等があれば、調子や仕上がり具合の参考情報として考慮してください。
+{lines_text}{bank_text}{stage_text}"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
 好走しやすい傾向が一般に知られているため、他条件が拮抗している場合のプラス要因として考慮してください
 (ただし地元であること単体を過大評価せず、あくまで複数要素の一つとして扱ってください)。
 単一の要素(例:得点だけ)で機械的に決めず、複数の要素を組み合わせて判断してください。

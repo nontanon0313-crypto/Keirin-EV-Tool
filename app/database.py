@@ -39,6 +39,11 @@ def init_db():
         "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS final_odds FLOAT",
         "ALTER TABLE entries ADD COLUMN IF NOT EXISTS is_local BOOLEAN",
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS lines_data JSON",
+        "ALTER TABLE races ADD COLUMN IF NOT EXISTS race_stage VARCHAR(30)",
+        "ALTER TABLE races ADD COLUMN IF NOT EXISTS weather VARCHAR(20)",
+        "ALTER TABLE races ADD COLUMN IF NOT EXISTS temperature_c FLOAT",
+        "ALTER TABLE races ADD COLUMN IF NOT EXISTS season VARCHAR(10)",
+        "ALTER TABLE entries ADD COLUMN IF NOT EXISTS pre_race_comment TEXT",
     ]
     from sqlalchemy import text
     with engine.connect() as conn:

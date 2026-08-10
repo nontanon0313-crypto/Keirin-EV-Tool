@@ -39,6 +39,10 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
         "venue_name": race.venue_name,
         "race_number": race.race_number,
         "grade": race.grade,
+        "race_stage": race.race_stage,
+        "weather": race.weather,
+        "temperature_c": race.temperature_c,
+        "season": race.season,
         "event_title": race.event_title,
         "lines_data": race.lines_data,
         "bank_info": (
@@ -61,6 +65,7 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
                 "ai_win_prob": round(e.ai_win_prob * 100, 2) if e.ai_win_prob is not None else None,
                 "blended_win_prob": round(e.blended_win_prob * 100, 2) if e.blended_win_prob is not None else None,
                 "ready_for_ev": e.blended_win_prob is not None,
+                "pre_race_comment": e.pre_race_comment,
             }
             for e in race.entries
         ],

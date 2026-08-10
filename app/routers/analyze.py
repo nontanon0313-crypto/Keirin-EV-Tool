@@ -11,6 +11,20 @@ from ..keirin_data import is_local_player
 router = APIRouter(prefix="/analyze", tags=["analyze"])
 
 
+def _current_season_jst() -> str:
+    """現在時刻(UTC+9換算)の月から季節を判定する。"""
+    jst_hour_offset = 9
+    now = datetime.utcnow().timestamp() + jst_hour_offset * 3600
+    month = datetime.utcfromtimestamp(now).month
+    if month in (3, 4, 5):
+        return "春"
+    if month in (6, 7, 8):
+        return "夏"
+    if month in (9, 10, 11):
+        return "秋"
+    return "冬"
+
+
 def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
     venue = parsed.get("venue_name")
     race_number = parsed.get("race_number")
@@ -27,6 +41,16 @@ def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
             if bank:
                 existing.bank_id = bank.id
                 db.commit()
+        # race_stageが未取得で、今回の画像から読み取れていれば補完する
+        if existing.race_stage is None and parsed.get("race_stage"):
+            existing.race_stage = parsed.get("race_stage")
+            db.commit()
+        if existing.weather is None and parsed.get("weather"):
+            existing.weather = parsed.get("weather")
+            db.commit()
+        if existing.temperature_c is None and parsed.get("temperature_c") is not None:
+            existing.temperature_c = parsed.get("temperature_c")
+            db.commit()
         return existing
 
     bank = None
@@ -38,8 +62,12 @@ def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
         bank_id=bank.id if bank else None,
         race_number=race_number or 0,
         grade=parsed.get("grade"),
+        race_stage=parsed.get("race_stage"),
         event_title=parsed.get("event_title"),
         source_app=parsed.get("source_app"),
+        weather=parsed.get("weather"),
+        temperature_c=parsed.get("temperature_c"),
+        season=_current_season_jst(),
     )
     db.add(race)
     db.commit()
@@ -82,6 +110,7 @@ def _upsert_entries(db: Session, race: models.Race, entries: list):
             "app_3rd_rate": e.get("app_3rd_rate"),
             "gear_ratio": e.get("gear_ratio"),
             "line_group": e.get("line_group"),
+            "pre_race_comment": e.get("pre_race_comment"),
         }
         region = e.get("region")
         if region:
@@ -191,6 +220,7 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                 "line_group": e.line_group,
                 "app_win_rate": e.app_win_rate,
                 "is_local": e.is_local,
+                "pre_race_comment": e.pre_race_comment,
             }
             for e in entries
         ]
@@ -203,7 +233,10 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                     "home_stretch_length_m": bank.home_stretch_length_m,
                     "lead_advantage_score": bank.lead_advantage_score,
                 }
-            ai_probs = estimate_ai_win_probabilities(entries_payload, lines=race.lines_data, bank_info=bank_info)
+            ai_probs = estimate_ai_win_probabilities(
+                entries_payload, lines=race.lines_data, bank_info=bank_info,
+                race_stage=race.race_stage, grade=race.grade,
+            )
         except Exception:
             ai_probs = {}
 
