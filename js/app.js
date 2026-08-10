@@ -164,10 +164,11 @@ document.getElementById("checkRaceBtn").addEventListener("click", async () => {
       ? `<span class="ev-positive">期待値計算に必要なデータは揃っています</span></p>`
       : `<span style="color:#ef4444;">まだ不足しているデータがあります</span></p>`;
 
-    html += `<table><tr><th>車番</th><th>選手名</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
+    html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>地元</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
     for (const e of data.entries) {
       const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';
-      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.leg_style ?? "-"}</td><td>${e.app_win_rate ?? "-"}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
+      const localMark = e.is_local === true ? "🏠地元" : (e.is_local === false ? "-" : "不明");
+      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.region ?? "-"}</td><td>${localMark}</td><td>${e.leg_style ?? "-"}</td><td>${e.app_win_rate ?? "-"}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
     }
     html += `</table>`;
 

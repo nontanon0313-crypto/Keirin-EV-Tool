@@ -44,6 +44,8 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
             {
                 "car_number": e.car_number,
                 "player_name": e.player_name,
+                "region": e.region,
+                "is_local": e.is_local,
                 "leg_style": e.leg_style,
                 "race_score": e.race_score,
                 "app_win_rate": e.app_win_rate,

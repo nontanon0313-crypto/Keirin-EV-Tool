@@ -79,6 +79,7 @@ class Entry(Base):
     gear_ratio = Column(Float, nullable=True)
 
     line_group = Column(String(50), nullable=True)  # ライン構成(例: "1-2" "単騎"等)
+    is_local = Column(Boolean, nullable=True)  # 開催地の地元選手か(判定不能ならnull)
 
     # AI独自推定
     ai_win_prob = Column(Float, nullable=True)  # 0-1

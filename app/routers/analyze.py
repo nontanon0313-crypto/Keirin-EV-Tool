@@ -6,6 +6,7 @@ from datetime import datetime
 from ..database import get_db
 from .. import models
 from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities
+from ..keirin_data import is_local_player
 
 router = APIRouter(prefix="/analyze", tags=["analyze"])
 
@@ -76,6 +77,9 @@ def _upsert_entries(db: Session, race: models.Race, entries: list):
             "gear_ratio": e.get("gear_ratio"),
             "line_group": e.get("line_group"),
         }
+        region = e.get("region")
+        if region:
+            fields["is_local"] = is_local_player(race.venue_name, region)
         # Noneで既存の値を上書きしないようにする(複数画像から段階的に情報を埋めるため)
         if existing:
             for k, v in fields.items():
@@ -177,6 +181,7 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                 "finish_3rd": e.finish_3rd,
                 "line_group": e.line_group,
                 "app_win_rate": e.app_win_rate,
+                "is_local": e.is_local,
             }
             for e in entries
         ]
