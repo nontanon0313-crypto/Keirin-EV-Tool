@@ -32,6 +32,7 @@ class Race(Base):
     race_stage = Column(String(30), nullable=True)  # 初日特選/予選/準決勝/決勝等(同一グレード内のステージ差)
     event_title = Column(String(200), nullable=True)
     lines_data = Column(JSON, nullable=True)  # ライン構成 例: [[1,2],[3],[4,5,6],[7]] (各配列が1ライン、並び順=先行→番手→3番手)
+    development_simulation = Column(Text, nullable=True)  # AIによる展開予想(誰が先行/番手/追込か、展開のポイント等)
     race_date = Column(DateTime, nullable=True)
     deadline_time = Column(DateTime, nullable=True)
     weather = Column(String(20), nullable=True)  # 晴/曇/雨/雪等。画面に表示があれば取得

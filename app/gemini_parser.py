@@ -153,9 +153,53 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
         return json.loads(cleaned)
 
 
-def estimate_ai_win_probabilities(
+def simulate_race_development(
     entries: list, lines: list = None, bank_info: dict = None,
     race_stage: str = None, grade: str = None,
+) -> str:
+    """
+    レース展開を予想する(1段階目)。
+    「誰が先行し、誰が番手・追い込みに回るか」「どのラインが主導権を握るか」
+    「展開のポイント」を、AIに文章として言語化させる。
+    数値シミュレーションではなく、言語による展開予想にすることで、
+    AIが根拠を持って一貫した推論をしやすくし、かつ人間にも読める形で残す。
+    戻り値: 展開予想の文章(そのままDBに保存し、後段の勝率推定にも渡す)。
+    """
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY が設定されていません")
+
+    lines_text = f"ライン構成: {json.dumps(lines, ensure_ascii=False)}\n(各配列が1ライン、先行→番手→3番手の順)\n" if lines else "ライン情報: 不明\n"
+    bank_text = ""
+    if bank_info and bank_info.get("lead_advantage_score") is not None:
+        bank_text = (
+            f"バンク特性: 周長{bank_info.get('lap_length_m')}m、みなし直線{bank_info.get('home_stretch_length_m')}m、"
+            f"先行有利度{bank_info.get('lead_advantage_score')}(0=差し有利〜1=先行絶対有利)\n"
+        )
+    stage_text = f"グレード:{grade or '不明'} / ステージ:{race_stage or '不明'}\n" if (race_stage or grade) else ""
+
+    prompt = f"""
+あなたは競輪の展開予想の専門家です。以下の情報から、このレースがどのように展開するかを予想してください。
+
+{lines_text}{bank_text}{stage_text}
+選手データ:
+{json.dumps(entries, ensure_ascii=False, indent=2)}
+
+以下の観点を含めて、300字程度で予想してください:
+- どのライン(先行選手)が主導権を握りそうか
+- 各ラインの位置取り(先行/番手/差し/後方)の予想
+- 展開のポイント(誰かが仕掛けるタイミング、警戒される選手等)
+- この展開の場合、有利になりやすい選手・不利になりやすい選手
+
+出力は予想文章のみ。JSON形式にせず、日本語の文章でそのまま出力してください。
+"""
+    model = genai.GenerativeModel(MODEL_NAME)
+    response = _call_with_retry(model, prompt, generation_config={})
+    return response.text.strip()
+
+
+def estimate_ai_win_probabilities(
+    entries: list, lines: list = None, bank_info: dict = None,
+    race_stage: str = None, grade: str = None, development_simulation: str = None,
 ) -> dict:
     """
     選手データ一覧(競走得点・脚質・決まり手・着順分布・ライン構成等)をもとに、
@@ -163,6 +207,7 @@ def estimate_ai_win_probabilities(
     lines: [[1,2],[3],[4,5,6],[7]]形式のライン構成(分かれば)。
     bank_info: {"lap_length_m":..,"home_stretch_length_m":..,"lead_advantage_score":..}形式のバンク特性(分かれば)。
     race_stage: 予選/準決勝/決勝等のステージ(分かれば)。grade: GI/GII等(分かれば)。
+    development_simulation: simulate_race_developmentで生成した展開予想の文章(分かれば)。
     戻り値: {car_number: win_prob(0-1)} で、合計が1になるよう正規化されたもの。
     """
     if not GEMINI_API_KEY:
@@ -201,11 +246,19 @@ def estimate_ai_win_probabilities(
             "どのステージで記録されたものかは分からない前提で、この点は参考程度に留めてください)\n"
         )
 
+    development_text = (
+        f"展開予想(事前に別途生成したもの): {development_simulation}\n"
+        "(この展開予想を踏まえて、実際に上位に来やすい選手を評価してください。"
+        "展開予想と矛盾する確率(例:番手に回る予想の選手を、先行選手より高く評価する等)を"
+        "つけないよう注意してください)\n"
+        if development_simulation else ""
+    )
+
     prompt = f"""
 以下は競輪レースの出走選手データです。各選手が1着になる確率を推定してください。
 競走得点・脚質・S/H/B回数・決まり手の傾向・着順分布を総合的に考慮してください。
 "pre_race_comment"に前検コメント等があれば、調子や仕上がり具合の参考情報として考慮してください。
-{lines_text}{bank_text}{stage_text}"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
+{lines_text}{bank_text}{stage_text}{development_text}"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
 好走しやすい傾向が一般に知られているため、他条件が拮抗している場合のプラス要因として考慮してください
 (ただし地元であること単体を過大評価せず、あくまで複数要素の一つとして扱ってください)。
 単一の要素(例:得点だけ)で機械的に決めず、複数の要素を組み合わせて判断してください。

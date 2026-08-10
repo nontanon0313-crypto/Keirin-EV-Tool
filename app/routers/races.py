@@ -43,6 +43,7 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
         "weather": race.weather,
         "temperature_c": race.temperature_c,
         "season": race.season,
+        "development_simulation": race.development_simulation,
         "event_title": race.event_title,
         "lines_data": race.lines_data,
         "bank_info": (

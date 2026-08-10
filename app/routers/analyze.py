@@ -5,7 +5,7 @@ from datetime import datetime
 
 from ..database import get_db
 from .. import models
-from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities
+from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities, simulate_race_development
 from ..keirin_data import is_local_player
 
 router = APIRouter(prefix="/analyze", tags=["analyze"])
@@ -233,9 +233,23 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                     "home_stretch_length_m": bank.home_stretch_length_m,
                     "lead_advantage_score": bank.lead_advantage_score,
                 }
+
+            # 1段階目: 展開予想を先に生成する(選手構成が変わった可能性があるので毎回更新する)
+            try:
+                development = simulate_race_development(
+                    entries_payload, lines=race.lines_data, bank_info=bank_info,
+                    race_stage=race.race_stage, grade=race.grade,
+                )
+                race.development_simulation = development
+                db.commit()
+            except Exception:
+                development = race.development_simulation  # 失敗時は前回分があればそれを使う
+
+            # 2段階目: 展開予想を踏まえて勝率を推定する
             ai_probs = estimate_ai_win_probabilities(
                 entries_payload, lines=race.lines_data, bank_info=bank_info,
                 race_stage=race.race_stage, grade=race.grade,
+                development_simulation=development,
             )
         except Exception:
             ai_probs = {}
