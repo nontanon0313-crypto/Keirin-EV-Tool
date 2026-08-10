@@ -185,6 +185,45 @@ def calc_ev_pct(estimated_prob: float, odds_value: float) -> float:
     return (estimated_prob * odds_value - 1.0) * 100.0
 
 
+# 勝率帯の区切り(購入統計・自動補正で共通して使う)
+PROB_BUCKETS = [
+    (0.0, 0.05, "0-5%(大穴)", 0.025),
+    (0.05, 0.15, "5-15%", 0.10),
+    (0.15, 0.30, "15-30%", 0.225),
+    (0.30, 1.01, "30%以上(本命)", 0.40),
+]
+
+
+def get_prob_bucket(prob: float) -> tuple:
+    """確率(0-1)がどの勝率帯に属するかを返す。(帯名, 帯の代表確率)のタプル。"""
+    for lo, hi, name, mid in PROB_BUCKETS:
+        if lo <= prob < hi:
+            return name, mid
+    return PROB_BUCKETS[-1][2], PROB_BUCKETS[-1][3]
+
+
+def required_sample_size(bucket_mid_prob: float, target_expected_hits: int = 200) -> int:
+    """
+    その勝率帯を信頼して補正に使うために必要な試行数。
+    目安: 期待的中数がtarget_expected_hits(デフォルト200)件に達する試行数。
+    確率が低い帯ほど、同じ信頼度を得るのに多くの試行が必要になる。
+    """
+    if bucket_mid_prob <= 0:
+        return 10 ** 9  # 実質無限大(絶対に信頼できるとみなさない)
+    return int(target_expected_hits / bucket_mid_prob)
+
+
+def compute_calibration_factor(actual_win_rate: float, predicted_avg_prob: float) -> float:
+    """
+    実績的中率 ÷ AI推定確率の平均、を補正係数として返す。
+    極端な値で暴走しないよう、0.3〜3.0の範囲にクリップする。
+    """
+    if predicted_avg_prob <= 0:
+        return 1.0
+    factor = actual_win_rate / predicted_avg_prob
+    return max(0.3, min(3.0, factor))
+
+
 def kelly_fraction(win_prob: float, odds_value: float, fractional_coefficient: float = 0.25) -> float:
     """
     フラクショナルケリー基準による推奨賭け比率(資金に対する割合)を返す。

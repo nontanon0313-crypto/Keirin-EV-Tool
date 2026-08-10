@@ -5,6 +5,7 @@ from typing import Optional
 from ..database import get_db
 from .. import models, schemas
 from . import bankroll as bankroll_router
+from .. import ev_calculator as calc
 
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
@@ -34,6 +35,49 @@ def update_purchase_result(purchase_id: int, update: schemas.PurchaseResultUpdat
     # 払戻があれば証拠金残高に加算する(負けの場合はpayout_amount=0なので変化なし)
     bankroll_router.adjust_balance(db, update.payout_amount)
     return obj
+
+
+def get_calibration_factors(db: Session) -> dict:
+    """
+    勝率帯ごとの自動補正係数を計算する。
+    試行数が「200÷帯の代表確率」に達した帯だけ、実績に基づく補正係数を返す。
+    達していない帯はfactor=1.0(補正なし)のまま。
+    """
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    result = {}
+    for lo, hi, name, mid in calc.PROB_BUCKETS:
+        bucket_purchases = [p for p in purchases if p.win_prob_at_purchase is not None and lo <= p.win_prob_at_purchase < hi]
+        count = len(bucket_purchases)
+        required = calc.required_sample_size(mid)
+        is_reliable = count >= required
+
+        if count > 0:
+            wins = sum(1 for p in bucket_purchases if p.result == "win")
+            actual_win_rate = wins / count
+            predicted_avg = sum(p.win_prob_at_purchase for p in bucket_purchases) / count
+        else:
+            actual_win_rate = None
+            predicted_avg = None
+
+        factor = 1.0
+        if is_reliable and predicted_avg:
+            factor = calc.compute_calibration_factor(actual_win_rate, predicted_avg)
+
+        result[name] = {
+            "sample_count": count,
+            "required_sample_count": required,
+            "is_reliable": is_reliable,
+            "actual_win_rate_pct": round(actual_win_rate * 100, 2) if actual_win_rate is not None else None,
+            "predicted_avg_prob_pct": round(predicted_avg * 100, 2) if predicted_avg is not None else None,
+            "calibration_factor": round(factor, 3),
+        }
+    return result
+
+
+@router.get("/calibration")
+def calibration_status(db: Session = Depends(get_db)):
+    """勝率帯ごとの自動補正の状態(補正係数・信頼できるか・必要試行数)を返す。"""
+    return get_calibration_factors(db)
 
 
 @router.get("/pending")
@@ -90,15 +134,9 @@ def purchase_stats(db: Session = Depends(get_db)):
         return out
 
     def prob_bucket(p):
-        prob = (p.win_prob_at_purchase or 0) * 100
-        if prob < 5:
-            return "0-5%(大穴)"
-        elif prob < 15:
-            return "5-15%"
-        elif prob < 30:
-            return "15-30%"
-        else:
-            return "30%以上(本命)"
+        prob = p.win_prob_at_purchase or 0
+        name, _ = calc.get_prob_bucket(prob)
+        return name
 
     def line_bucket(p):
         race = db.query(models.Race).get(p.race_id)

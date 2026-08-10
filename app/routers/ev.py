@@ -7,6 +7,7 @@ from ..database import get_db
 from .. import models, schemas
 from .. import ev_calculator as calc
 from . import bankroll as bankroll_router
+from . import purchases as purchases_router
 
 router = APIRouter(prefix="/ev", tags=["ev"])
 
@@ -31,6 +32,19 @@ def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict =
         return calc.wide_prob(win_probs, cars[0], cars[1], line_map, line_boost)
     ordered = bet_type in calc.ORDERED_BET_TYPES
     return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost)
+
+
+def _apply_calibration(est_prob: float, calibration_factors: dict) -> float:
+    """
+    購入実績に基づく自動補正係数を適用する。
+    該当する勝率帯の試行数が十分(200÷帯の代表確率)でなければ、補正せずそのまま返す。
+    """
+    bucket_name, _ = calc.get_prob_bucket(est_prob)
+    info = calibration_factors.get(bucket_name)
+    if not info or not info["is_reliable"]:
+        return est_prob
+    calibrated = est_prob * info["calibration_factor"]
+    return max(0.0, min(1.0, calibrated))
 
 
 @router.post("/calculate/{race_id}")
@@ -74,10 +88,13 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     # 既存の未反映ev_resultsは作り直す
     db.query(models.EvResult).filter(models.EvResult.race_id == race_id).delete()
 
+    calibration_factors = purchases_router.get_calibration_factors(db)
+
     created = []
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
+        est_prob = _apply_calibration(est_prob, calibration_factors)
 
         market_prob = normalized_market.get(o.bet_type, {}).get(
             o.combination, calc.market_prob_from_odds(o.odds_value, o.bet_type)
@@ -172,9 +189,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         raise HTTPException(400, "オッズデータがありません")
 
     candidates = []
+    calibration_factors = purchases_router.get_calibration_factors(db)
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
+        est_prob = _apply_calibration(est_prob, calibration_factors)
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)

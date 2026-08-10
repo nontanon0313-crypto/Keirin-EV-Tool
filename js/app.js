@@ -485,6 +485,25 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
   }
 });
 
+document.getElementById("loadCalibrationBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/calibration"));
+    const data = await res.json();
+    let html = "<p>各勝率帯の自動補正の状態です。試行数が必要数に達すると、以降の期待値計算に自動で反映されます。</p>";
+    html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>AI推定平均</th><th>補正係数</th></tr>`;
+    for (const [bucket, info] of Object.entries(data)) {
+      const status = info.is_reliable ? '<span class="ev-positive">適用中</span>' : "未達(補正なし)";
+      html += `<tr><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${info.calibration_factor}倍</td></tr>`;
+    }
+    html += "</table>";
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 // 初回ロード
 loadRaces();
 refreshBankrollDisplay();
