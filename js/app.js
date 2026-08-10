@@ -321,6 +321,36 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
 
 let lastRacePlan = null;
 
+document.getElementById("thresholdTableBtn").addEventListener("click", async () => {
+  const raceId = document.getElementById("raceSelect").value;
+  const resultBox = document.getElementById("evResult");
+  if (!raceId) {
+    alert("レースを選択してください");
+    return;
+  }
+  const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
+  const minEvPct = parseFloat(document.getElementById("minEvInput").value);
+
+  resultBox.textContent = "閾値表を作成中...";
+  try {
+    const res = await fetch(apiUrl(`/ev/threshold-table/${raceId}?min_ev_pct=${minEvPct}&min_win_prob=${minProb}`), {
+      method: "POST",
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    let html = `<p>${data.message}<br>並び順: 閾値オッズが低い(=買いやすい)順</p>`;
+    html += `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>閾値オッズ</th></tr>`;
+    for (const r of data.results) {
+      html += `<tr><td>${r.bet_type}</td><td>${r.combination}</td><td>${r.estimated_win_prob_pct}%</td><td><strong>${r.threshold_odds}倍以上</strong></td></tr>`;
+    }
+    html += "</table>";
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 async function recordRacePlanAsPurchases() {
   if (!lastRacePlan || !lastRacePlan.items.length) return;
   if (!confirm(`${lastRacePlan.items.length}点をまとめて購入記録します。実際に投票操作をした後に押してください。よろしいですか？`)) return;

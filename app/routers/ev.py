@@ -167,6 +167,67 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     }
 
 
+@router.post("/threshold-table/{race_id}")
+def threshold_table(
+    race_id: int,
+    min_ev_pct: float = 5.0,
+    min_win_prob: float = 0.05,
+    db: Session = Depends(get_db),
+):
+    """
+    オッズが無くても、選手データ(勝率推定)だけから「このオッズ以上なら買い」という
+    閾値オッズ表を作成する。出走表は締切まで変わらないため、これを先に作っておけば、
+    投票直前はオッズ画面と見比べるだけで判断できる(オッズのスクショ解析が不要になる)。
+
+    閾値オッズ = (1 + 安全マージン%/100) ÷ 推定的中確率
+    """
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+
+    entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
+    win_probs = _build_win_probs(entries)
+    if not win_probs:
+        raise HTTPException(400, "選手の勝率データが揃っていません")
+
+    car_numbers = list(win_probs.keys())
+    calibration_factors = purchases_router.get_calibration_factors(db)
+
+    results = []
+    for bet_type, arity in calc.BET_TYPE_ARITY.items():
+        if len(car_numbers) < arity:
+            continue
+        ordered = bet_type in calc.ORDERED_BET_TYPES
+        combos = (
+            itertools.permutations(car_numbers, arity)
+            if ordered
+            else itertools.combinations(car_numbers, arity)
+        )
+        for combo in combos:
+            est_prob = _estimate_prob(win_probs, bet_type, combo)
+            est_prob = _apply_calibration(est_prob, calibration_factors)
+            is_skip, _ = calc.apply_min_prob_filter(est_prob, 100, min_win_prob)  # 勝率フィルターのみ判定
+            if is_skip or est_prob <= 0:
+                continue
+            threshold_odds = (1 + min_ev_pct / 100) / est_prob
+            results.append({
+                "bet_type": bet_type,
+                "combination": "-".join(str(c) for c in combo),
+                "estimated_win_prob_pct": round(est_prob * 100, 2),
+                "threshold_odds": round(threshold_odds, 2),
+            })
+
+    results.sort(key=lambda r: r["threshold_odds"])
+
+    return {
+        "race_id": race_id,
+        "min_ev_pct": min_ev_pct,
+        "min_win_prob_pct": min_win_prob * 100,
+        "message": "表示されているオッズが「閾値オッズ」以上なら買い示唆です。",
+        "results": results,
+    }
+
+
 @router.post("/race-plan/{race_id}")
 def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(get_db)):
     """
