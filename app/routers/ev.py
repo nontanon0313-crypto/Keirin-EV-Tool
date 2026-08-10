@@ -23,6 +23,16 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
     return probs
 
 
+def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple) -> float:
+    """券種ごとに正しい的中確率の計算方法を呼び分ける。"""
+    if bet_type == "複勝":
+        return calc.fukusho_prob(win_probs, cars[0])
+    if bet_type == "ワイド":
+        return calc.wide_prob(win_probs, cars[0], cars[1])
+    ordered = bet_type in calc.ORDERED_BET_TYPES
+    return calc.combination_prob(win_probs, cars, ordered)
+
+
 @router.post("/calculate/{race_id}")
 def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends(get_db)):
     race = db.query(models.Race).get(race_id)
@@ -68,8 +78,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     created = []
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
-        ordered = o.bet_type in calc.ORDERED_BET_TYPES
-        est_prob = calc.combination_prob(win_probs, cars, ordered)
+        est_prob = _estimate_prob(win_probs, o.bet_type, cars)
 
         market_prob = normalized_market.get(o.bet_type, {}).get(
             o.combination, calc.market_prob_from_odds(o.odds_value, o.bet_type)
@@ -167,8 +176,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     candidates = []
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
-        ordered = o.bet_type in calc.ORDERED_BET_TYPES
-        est_prob = calc.combination_prob(win_probs, cars, ordered)
+        est_prob = _estimate_prob(win_probs, o.bet_type, cars)
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
@@ -286,7 +294,7 @@ def box_suggestion(
         odds_value = odds_rows.get(combo_str)
         if odds_value is None:
             continue
-        est_prob = calc.combination_prob(win_probs, combo, ordered)
+        est_prob = _estimate_prob(win_probs, bet_type, combo)
         ev_pct = calc.calc_ev_pct(est_prob, odds_value)
         f = calc.kelly_fraction(est_prob, odds_value, fractional_coefficient)
         box_items.append({

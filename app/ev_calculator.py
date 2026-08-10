@@ -83,6 +83,24 @@ def combination_prob(win_probs: Dict[int, float], cars: Tuple[int, ...], ordered
         return total
 
 
+def fukusho_prob(win_probs: Dict[int, float], car: int) -> float:
+    """
+    複勝: 指定した1車が2着以内(上位2着)に入る確率。
+    「対象車+他の1車」が上位2着の組(順不同)になるケースを、他の全車について合算する。
+    """
+    others = [c for c in win_probs if c != car]
+    return sum(combination_prob(win_probs, (car, o), ordered=False) for o in others)
+
+
+def wide_prob(win_probs: Dict[int, float], car_a: int, car_b: int) -> float:
+    """
+    ワイド: 指定した2車が両方とも3着以内に入る確率。
+    「対象2車+他の1車」が上位3着の組(順不同)になるケースを、他の全車について合算する。
+    """
+    others = [c for c in win_probs if c not in (car_a, car_b)]
+    return sum(combination_prob(win_probs, (car_a, car_b, o), ordered=False) for o in others)
+
+
 def market_prob_from_odds(odds_value: float, bet_type: str, use_takeout_fallback: bool = True) -> float:
     """
     単一のオッズ値から市場確率を概算する(簡易版)。
