@@ -38,6 +38,7 @@ def init_db():
         "ALTER TABLE odds ADD COLUMN IF NOT EXISTS total_vote_amount FLOAT",
         "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS final_odds FLOAT",
         "ALTER TABLE entries ADD COLUMN IF NOT EXISTS is_local BOOLEAN",
+        "ALTER TABLE races ADD COLUMN IF NOT EXISTS lines_data JSON",
     ]
     from sqlalchemy import text
     with engine.connect() as conn:
@@ -47,3 +48,27 @@ def init_db():
                 conn.commit()
             except Exception:
                 conn.rollback()
+
+    _seed_bank_master()
+
+
+def _seed_bank_master():
+    """
+    bank_masterテーブルが空の場合のみ、全国43場のマスタデータを自動投入する。
+    既にデータがある場合は上書きしない(手動で調整した値を保護するため)。
+    """
+    from . import models
+    from .keirin_data import get_bank_seed_data
+
+    db = SessionLocal()
+    try:
+        existing_count = db.query(models.BankMaster).count()
+        if existing_count > 0:
+            return
+        for row in get_bank_seed_data():
+            db.add(models.BankMaster(**row))
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()

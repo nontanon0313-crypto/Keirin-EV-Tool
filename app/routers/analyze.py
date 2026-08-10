@@ -21,6 +21,12 @@ def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
         query = query.filter(models.Race.race_number == race_number)
     existing = query.order_by(models.Race.id.desc()).first()
     if existing:
+        # 過去に作成されたレースでbank_masterが未紐付けの場合、ここで backfill する
+        if existing.bank_id is None and existing.venue_name:
+            bank = db.query(models.BankMaster).filter(models.BankMaster.name == existing.venue_name).first()
+            if bank:
+                existing.bank_id = bank.id
+                db.commit()
         return existing
 
     bank = None
@@ -147,6 +153,9 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
             _upsert_entries(db, race, parsed["entries"])
         if parsed.get("odds_list"):
             _upsert_odds(db, race, parsed["odds_list"])
+        if parsed.get("lines"):
+            race.lines_data = parsed["lines"]
+            db.commit()
 
         results.append({
             "filename": f.filename,
@@ -186,7 +195,15 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
             for e in entries
         ]
         try:
-            ai_probs = estimate_ai_win_probabilities(entries_payload)
+            bank = race.bank
+            bank_info = None
+            if bank:
+                bank_info = {
+                    "lap_length_m": bank.lap_length_m,
+                    "home_stretch_length_m": bank.home_stretch_length_m,
+                    "lead_advantage_score": bank.lead_advantage_score,
+                }
+            ai_probs = estimate_ai_win_probabilities(entries_payload, lines=race.lines_data, bank_info=bank_info)
         except Exception:
             ai_probs = {}
 

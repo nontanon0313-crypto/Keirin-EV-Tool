@@ -64,13 +64,18 @@ EXTRACTION_PROMPT = """
 
 出力するJSONスキーマ:
 {
-  "screen_type": "出走表基本情報 | 出走表直近成績 | 出走表勝率 | オッズ | 投票シート | 不明 のいずれか",
+  "screen_type": "出走表基本情報 | 出走表直近成績 | 出走表勝率 | 並び予想 | オッズ | 投票シート | 不明 のいずれか",
   "source_app": "アプリ名が推測できれば(例: tipstar)。不明ならnull",
   "venue_name": "競輪場名。不明ならnull",
   "race_number": "レース番号(整数)。不明ならnull",
   "grade": "GI/GII/GIII/F1/F2等。不明ならnull",
   "event_title": "開催名。不明ならnull",
   "deadline_time": "締切時刻の文字列(例: 16:54)。不明ならnull",
+  "lines": "ライン(連携)構成。「並び予想」等の欄に、車番のグループが「・」等の区切り記号で
+    区切られて表示されていることが多い(例:「537・42・1・6」なら[5,3,7]が1ライン、[4,2]が1ライン、
+    [1]が単騎、[6]が単騎)。各グループ内の並び順は先行→番手→3番手を表す。
+    これを読み取り、車番の配列のリストに変換する。例: [[5,3,7],[4,2],[1],[6]]。
+    該当する表示が画面に無ければnull(空配列ではなくnullにする)",
   "entries": [
     {
       "waku_number": "枠番(整数)",
@@ -97,7 +102,7 @@ EXTRACTION_PROMPT = """
       "app_2nd_rate": "2連対率%(float)",
       "app_3rd_rate": "3連対率%(float)",
       "gear_ratio": "ギア倍数(float)",
-      "line_group": "ライン構成に関する情報があれば"
+      "line_group": "ライン構成に関する情報があれば(参考情報、主要な取得先は上記linesフィールド)"
     }
   ],
   "odds_list": [
@@ -143,19 +148,43 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
         return json.loads(cleaned)
 
 
-def estimate_ai_win_probabilities(entries: list) -> dict:
+def estimate_ai_win_probabilities(entries: list, lines: list = None, bank_info: dict = None) -> dict:
     """
     選手データ一覧(競走得点・脚質・決まり手・着順分布・ライン構成等)をもとに、
     GeminiにAI独自の勝率推定をさせる。
+    lines: [[1,2],[3],[4,5,6],[7]]形式のライン構成(分かれば)。
+    bank_info: {"lap_length_m":..,"home_stretch_length_m":..,"lead_advantage_score":..}形式のバンク特性(分かれば)。
     戻り値: {car_number: win_prob(0-1)} で、合計が1になるよう正規化されたもの。
     """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が設定されていません")
 
+    lines_text = (
+        f"ライン構成: {json.dumps(lines, ensure_ascii=False)}\n"
+        "(各配列が1ライン。配列内は先行→番手→3番手の順。競輪では同ラインの選手同士が"
+        "連携して走り、先行選手が番手の選手のために展開を作るため、同ラインの選手が"
+        "上位を占めやすい傾向があります。ただし、これは「同ラインなら誰でも一律に有利」という"
+        "単純な話ではなく、そのライン内の先行選手(特に1番手)の実力が高いほど、"
+        "ライン全体が上位に来る可能性が上がります。ライン構成と各選手の実力(競走得点・脚質等)を"
+        "掛け合わせて判断してください。弱いライン(先行選手の実力が低い)を過大評価しないでください)\n"
+        if lines else ""
+    )
+
+    bank_text = ""
+    if bank_info and bank_info.get("lead_advantage_score") is not None:
+        bank_text = (
+            f"開催バンクの特性: 周長{bank_info.get('lap_length_m')}m、"
+            f"みなし直線{bank_info.get('home_stretch_length_m')}m、"
+            f"先行有利度スコア{bank_info.get('lead_advantage_score')}(0=差し有利〜1=先行絶対有利)。\n"
+            "(直線が短いバンクほど先行選手が残りやすく、直線が長いバンクほど差し・追い込みが決まりやすい"
+            "傾向があります。この先行有利度スコアと、各選手の脚質(逃/追込/両)を掛け合わせて、"
+            "脚質がバンク特性に合っている選手を評価に反映してください)\n"
+        )
+
     prompt = f"""
 以下は競輪レースの出走選手データです。各選手が1着になる確率を推定してください。
-競走得点・脚質・S/H/B回数・決まり手の傾向・着順分布・ライン構成(分かれば)を総合的に考慮してください。
-"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
+競走得点・脚質・S/H/B回数・決まり手の傾向・着順分布を総合的に考慮してください。
+{lines_text}{bank_text}"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
 好走しやすい傾向が一般に知られているため、他条件が拮抗している場合のプラス要因として考慮してください
 (ただし地元であること単体を過大評価せず、あくまで複数要素の一つとして扱ってください)。
 単一の要素(例:得点だけ)で機械的に決めず、複数の要素を組み合わせて判断してください。

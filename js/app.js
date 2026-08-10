@@ -164,6 +164,19 @@ document.getElementById("checkRaceBtn").addEventListener("click", async () => {
       ? `<span class="ev-positive">期待値計算に必要なデータは揃っています</span></p>`
       : `<span style="color:#ef4444;">まだ不足しているデータがあります</span></p>`;
 
+    if (data.lines_data && data.lines_data.length) {
+      html += `<p>ライン構成: ${data.lines_data.map(l => l.join("-")).join(" / ")}</p>`;
+    } else {
+      html += `<p style="color:#94a3b8;">ライン構成: 未取得(「並び予想」画面等を読み込ませると反映されます)</p>`;
+    }
+
+    if (data.bank_info && data.bank_info.lead_advantage_score !== null) {
+      const b = data.bank_info;
+      html += `<p>バンク特性: 周長${b.lap_length_m}m / みなし直線${b.home_stretch_length_m}m / 先行有利度${b.lead_advantage_score}(0=差し有利〜1=先行絶対有利)</p>`;
+    } else {
+      html += `<p style="color:#94a3b8;">バンク特性: データなし</p>`;
+    }
+
     html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>地元</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
     for (const e of data.entries) {
       const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';

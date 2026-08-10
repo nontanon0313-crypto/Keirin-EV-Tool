@@ -23,14 +23,14 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
     return probs
 
 
-def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple) -> float:
+def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict = None, line_boost: float = 1.0) -> float:
     """券種ごとに正しい的中確率の計算方法を呼び分ける。"""
     if bet_type == "複勝":
-        return calc.fukusho_prob(win_probs, cars[0])
+        return calc.fukusho_prob(win_probs, cars[0], line_map, line_boost)
     if bet_type == "ワイド":
-        return calc.wide_prob(win_probs, cars[0], cars[1])
+        return calc.wide_prob(win_probs, cars[0], cars[1], line_map, line_boost)
     ordered = bet_type in calc.ORDERED_BET_TYPES
-    return calc.combination_prob(win_probs, cars, ordered)
+    return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost)
 
 
 @router.post("/calculate/{race_id}")
@@ -58,7 +58,6 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
         )
 
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
-
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
         raise HTTPException(400, "オッズデータがありません。オッズ画面(全券種)のスクショを読み込ませてください")
@@ -168,7 +167,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         raise HTTPException(400, "選手の勝率データが揃っていません")
 
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
-
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
         raise HTTPException(400, "オッズデータがありません")

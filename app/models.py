@@ -30,6 +30,7 @@ class Race(Base):
     race_number = Column(Integer, nullable=False)  # 例: 4 (4R)
     grade = Column(String(10), nullable=True)  # GI/GII/GIII/F1/F2等
     event_title = Column(String(200), nullable=True)
+    lines_data = Column(JSON, nullable=True)  # ライン構成 例: [[1,2],[3],[4,5,6],[7]] (各配列が1ライン、並び順=先行→番手→3番手)
     race_date = Column(DateTime, nullable=True)
     deadline_time = Column(DateTime, nullable=True)
     source_app = Column(String(50), nullable=True)  # 読み取り元アプリ(分かれば)

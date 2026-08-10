@@ -100,12 +100,43 @@ def purchase_stats(db: Session = Depends(get_db)):
         else:
             return "30%以上(本命)"
 
+    def line_bucket(p):
+        race = db.query(models.Race).get(p.race_id)
+        if not race or not race.lines_data:
+            return "ライン情報なし"
+        line_map = {}
+        for idx, line in enumerate(race.lines_data):
+            for car in line:
+                line_map[int(car)] = idx
+        try:
+            cars = [int(x) for x in p.combination.split("-")]
+        except ValueError:
+            return "ライン情報なし"
+        line_ids = [line_map.get(c) for c in cars]
+        if any(lid is None for lid in line_ids):
+            return "ライン情報なし"
+        return "同ライン絡み" if len(set(line_ids)) == 1 else "異なるライン混在"
+
+    def bank_lead_bucket(p):
+        race = db.query(models.Race).get(p.race_id)
+        if not race or not race.bank or race.bank.lead_advantage_score is None:
+            return "バンク情報なし"
+        score = race.bank.lead_advantage_score
+        if score >= 0.66:
+            return "先行有利バンク(直線短め)"
+        elif score >= 0.33:
+            return "標準的なバンク"
+        else:
+            return "差し有利バンク(直線長め)"
+
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "total_bets": len(purchases),
         "by_bet_type": bucket_stats(lambda p: p.bet_type),
         "by_win_prob_bucket": bucket_stats(prob_bucket),
         "by_bank": bucket_stats(lambda p: (p.tags or {}).get("bank", "不明")),
+        "by_line_match": bucket_stats(line_bucket),
+        "by_bank_lead_advantage": bucket_stats(bank_lead_bucket),
         "odds_drift": _odds_drift_stats(purchases),
     }
 

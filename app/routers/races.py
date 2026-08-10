@@ -40,6 +40,15 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
         "race_number": race.race_number,
         "grade": race.grade,
         "event_title": race.event_title,
+        "lines_data": race.lines_data,
+        "bank_info": (
+            {
+                "lap_length_m": race.bank.lap_length_m,
+                "home_stretch_length_m": race.bank.home_stretch_length_m,
+                "lead_advantage_score": race.bank.lead_advantage_score,
+            }
+            if race.bank else None
+        ),
         "entries": [
             {
                 "car_number": e.car_number,

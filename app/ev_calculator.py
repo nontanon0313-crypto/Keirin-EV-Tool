@@ -44,61 +44,112 @@ BET_TYPE_ARITY = {
 ORDERED_BET_TYPES = {"単勝", "2車単", "2枠単", "3連単"}
 
 
-def harville_prob(win_probs: Dict[int, float], order: Tuple[int, ...]) -> float:
+def harville_prob(
+    win_probs: Dict[int, float],
+    order: Tuple[int, ...],
+    line_map: Dict[int, int] = None,
+    line_boost: float = 1.0,
+) -> float:
     """
     Harville式で「orderで指定した順に着順が決まる確率」を計算する。
     win_probs: {車番: 1着になる確率}
     order: 例 (1,2,3) -> 車番1が1着、2が2着、3が3着になる確率
 
+    line_map: {車番: ライン番号} を渡すと、直前に確定した車と同ラインの車の
+    条件付き確率をline_boost倍してから正規化する(同ラインが連続して上位に来やすい
+    競輪特有の力学を反映する簡易補正)。line_boost=1.0(初期値)なら補正なし。
+    この倍率は実績データに基づく検証待ちの暫定パラメータであり、確定的な数値ではない。
+
     P(1着=a) = p_a
-    P(2着=b | 1着=a) = p_b / (1 - p_a)
-    P(3着=c | 1着=a,2着=b) = p_c / (1 - p_a - p_b)
+    P(2着=b | 1着=a) = p_b / (1 - p_a)  ※同ラインならp_bをline_boost倍してから正規化
+    P(3着=c | 1着=a,2着=b) = 同様
     """
-    remaining = 1.0
+    remaining_probs = dict(win_probs)
     prob = 1.0
-    used = []
+    prev_car = None
     for car in order:
-        p = win_probs.get(car, 0.0)
-        denom = remaining
-        if denom <= 1e-9:
+        p = remaining_probs.get(car, 0.0)
+        if line_map and line_boost != 1.0 and prev_car is not None:
+            same_line = line_map.get(car) is not None and line_map.get(car) == line_map.get(prev_car)
+            if same_line:
+                # 残っている車の中で、同ラインの車だけをブーストしてから正規化する
+                boosted = {
+                    c: (v * line_boost if line_map.get(c) == line_map.get(prev_car) else v)
+                    for c, v in remaining_probs.items()
+                }
+                denom = sum(boosted.values())
+                p_adj = boosted.get(car, 0.0)
+                cond_p = (p_adj / denom) if denom > 1e-9 else 0.0
+            else:
+                denom = sum(remaining_probs.values())
+                cond_p = (p / denom) if denom > 1e-9 else 0.0
+        else:
+            denom = sum(remaining_probs.values())
+            cond_p = (p / denom) if denom > 1e-9 else 0.0
+
+        if cond_p <= 0:
             return 0.0
-        prob *= p / denom
-        remaining -= p
-        used.append(car)
+        prob *= cond_p
+        remaining_probs.pop(car, None)
+        prev_car = car
     return max(prob, 0.0)
 
 
-def combination_prob(win_probs: Dict[int, float], cars: Tuple[int, ...], ordered: bool) -> float:
+def combination_prob(
+    win_probs: Dict[int, float],
+    cars: Tuple[int, ...],
+    ordered: bool,
+    line_map: Dict[int, int] = None,
+    line_boost: float = 1.0,
+) -> float:
     """
     指定した車番の組み合わせが「その通りに」または「着順不問(複)で」決まる確率。
     ordered=True: 3連単/2車単等、着順通りの確率のみ
     ordered=False: 3連複/2車複/ワイド等、順不同で合算
     """
     if ordered:
-        return harville_prob(win_probs, cars)
+        return harville_prob(win_probs, cars, line_map, line_boost)
     else:
         total = 0.0
         for perm in itertools.permutations(cars):
-            total += harville_prob(win_probs, perm)
+            total += harville_prob(win_probs, perm, line_map, line_boost)
         return total
 
 
-def fukusho_prob(win_probs: Dict[int, float], car: int) -> float:
+def build_line_map(lines_data) -> Dict[int, int]:
+    """[[1,2],[3],[4,5,6]]形式のライン構成を、{車番: ライン番号}の辞書に変換する。"""
+    if not lines_data:
+        return {}
+    line_map = {}
+    for idx, line in enumerate(lines_data):
+        for car in line:
+            line_map[int(car)] = idx
+    return line_map
+
+
+def fukusho_prob(
+    win_probs: Dict[int, float], car: int, line_map: Dict[int, int] = None, line_boost: float = 1.0
+) -> float:
     """
     複勝: 指定した1車が2着以内(上位2着)に入る確率。
     「対象車+他の1車」が上位2着の組(順不同)になるケースを、他の全車について合算する。
     """
     others = [c for c in win_probs if c != car]
-    return sum(combination_prob(win_probs, (car, o), ordered=False) for o in others)
+    return sum(combination_prob(win_probs, (car, o), ordered=False, line_map=line_map, line_boost=line_boost) for o in others)
 
 
-def wide_prob(win_probs: Dict[int, float], car_a: int, car_b: int) -> float:
+def wide_prob(
+    win_probs: Dict[int, float], car_a: int, car_b: int, line_map: Dict[int, int] = None, line_boost: float = 1.0
+) -> float:
     """
     ワイド: 指定した2車が両方とも3着以内に入る確率。
     「対象2車+他の1車」が上位3着の組(順不同)になるケースを、他の全車について合算する。
     """
     others = [c for c in win_probs if c not in (car_a, car_b)]
-    return sum(combination_prob(win_probs, (car_a, car_b, o), ordered=False) for o in others)
+    return sum(
+        combination_prob(win_probs, (car_a, car_b, o), ordered=False, line_map=line_map, line_boost=line_boost)
+        for o in others
+    )
 
 
 def market_prob_from_odds(odds_value: float, bet_type: str, use_takeout_fallback: bool = True) -> float:
