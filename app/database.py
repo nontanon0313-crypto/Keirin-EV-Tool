@@ -36,6 +36,7 @@ def init_db():
     migrations = [
         "ALTER TABLE ev_results ADD COLUMN IF NOT EXISTS is_recommended BOOLEAN DEFAULT FALSE",
         "ALTER TABLE odds ADD COLUMN IF NOT EXISTS total_vote_amount FLOAT",
+        "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS final_odds FLOAT",
     ]
     from sqlalchemy import text
     with engine.connect() as conn:

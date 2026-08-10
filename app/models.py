@@ -146,6 +146,7 @@ class Purchase(Base):
 
     result = Column(String(20), default="pending")  # pending/win/lose
     payout_amount = Column(Float, default=0)
+    final_odds = Column(Float, nullable=True)  # 締切時の最終オッズ(清算オッズ)。オッズ変動の検証用
 
     tags = Column(JSON, nullable=True)  # {"bank":..,"leg_style":..,"line_config":..,"prob_bucket":..}
 

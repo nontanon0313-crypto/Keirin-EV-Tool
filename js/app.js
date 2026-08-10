@@ -364,6 +364,64 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
   }
 });
 
+// ---------- ③-2 結果確定 ----------
+document.getElementById("loadPendingBtn").addEventListener("click", async () => {
+  const box = document.getElementById("pendingList");
+  box.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/pending"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    if (!data.length) {
+      box.textContent = "未確定の購入はありません。";
+      return;
+    }
+
+    box.innerHTML = "";
+    for (const p of data) {
+      const row = document.createElement("div");
+      row.style.borderBottom = "1px solid #334155";
+      row.style.padding = "8px 0";
+      row.innerHTML = `
+        <p>ID:${p.id} ${p.bet_type} ${p.combination} / 購入額${p.stake_amount}円 / 購入時オッズ${p.odds_at_purchase ?? "-"}</p>
+        <input type="number" placeholder="最終オッズ(任意)" id="finalOdds_${p.id}" style="width:48%;display:inline-block;">
+        <input type="number" placeholder="払戻額(円、外れなら0)" id="payout_${p.id}" style="width:48%;display:inline-block;">
+        <button data-id="${p.id}" data-result="win" class="resultBtn" style="background:#22c55e;width:48%;display:inline-block;">的中</button>
+        <button data-id="${p.id}" data-result="lose" class="resultBtn" style="background:#ef4444;width:48%;display:inline-block;">不的中</button>
+      `;
+      box.appendChild(row);
+    }
+
+    document.querySelectorAll(".resultBtn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        const result = btn.dataset.result;
+        const payoutInput = document.getElementById(`payout_${id}`).value;
+        const finalOddsInput = document.getElementById(`finalOdds_${id}`).value;
+        const payout = result === "win" ? (parseFloat(payoutInput) || 0) : 0;
+        const finalOdds = finalOddsInput === "" ? null : parseFloat(finalOddsInput);
+
+        try {
+          const res = await fetch(apiUrl(`/purchases/${id}/result`), {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ result, payout_amount: payout, final_odds: finalOdds }),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          alert("記録しました");
+          await refreshBankrollDisplay();
+          document.getElementById("loadPendingBtn").click();
+        } catch (e) {
+          alert("エラー: " + e.message);
+        }
+      });
+    });
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+});
+
 // ---------- ④ 資金管理シミュレーション ----------
 document.getElementById("runSimBtn").addEventListener("click", async () => {
   const bankroll = parseFloat(document.getElementById("bankrollInput").value);

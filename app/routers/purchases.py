@@ -29,10 +29,22 @@ def update_purchase_result(purchase_id: int, update: schemas.PurchaseResultUpdat
         raise HTTPException(400, "この購入履歴はすでに結果が確定しています(二重加算を防ぐため再更新できません)")
     obj.result = update.result
     obj.payout_amount = update.payout_amount
+    obj.final_odds = update.final_odds
     db.commit()
     # 払戻があれば証拠金残高に加算する(負けの場合はpayout_amount=0なので変化なし)
     bankroll_router.adjust_balance(db, update.payout_amount)
     return obj
+
+
+@router.get("/pending")
+def list_pending_purchases(db: Session = Depends(get_db)):
+    """まだ結果未確定の購入履歴一覧(結果入力画面用)。"""
+    return (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result == "pending")
+        .order_by(models.Purchase.purchased_at.desc())
+        .all()
+    )
 
 
 @router.get("/")
@@ -94,6 +106,31 @@ def purchase_stats(db: Session = Depends(get_db)):
         "by_bet_type": bucket_stats(lambda p: p.bet_type),
         "by_win_prob_bucket": bucket_stats(prob_bucket),
         "by_bank": bucket_stats(lambda p: (p.tags or {}).get("bank", "不明")),
+        "odds_drift": _odds_drift_stats(purchases),
+    }
+
+
+def _odds_drift_stats(purchases):
+    """
+    ①的中率の精度とは別に、②投票時オッズ→最終オッズのズレだけを検証する。
+    (最終オッズが未記録の購入は対象外)
+    """
+    with_final = [p for p in purchases if p.final_odds is not None and p.odds_at_purchase]
+    if not with_final:
+        return {"message": "最終オッズが記録された購入がまだありません"}
+
+    drifts = [
+        (p.final_odds - p.odds_at_purchase) / p.odds_at_purchase * 100
+        for p in with_final
+    ]
+    avg_drift_pct = sum(drifts) / len(drifts)
+    worsened_count = sum(1 for d in drifts if d < 0)  # オッズが下がる=自分に不利な方向
+
+    return {
+        "sample_count": len(with_final),
+        "avg_odds_drift_pct": round(avg_drift_pct, 2),
+        "worsened_ratio_pct": round(worsened_count / len(with_final) * 100, 1),
+        "note": "マイナスは投票時より最終オッズが下がった(不利な方向に動いた)ことを意味します",
     }
 
 

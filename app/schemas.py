@@ -33,6 +33,7 @@ class PurchaseCreate(BaseModel):
 class PurchaseResultUpdate(BaseModel):
     result: str  # win / lose
     payout_amount: float = 0
+    final_odds: Optional[float] = None  # 締切時の最終オッズ(分かれば)
 
 
 class SimulationRequest(BaseModel):

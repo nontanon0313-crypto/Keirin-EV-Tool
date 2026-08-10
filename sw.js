@@ -1,5 +1,5 @@
 // フロントエンド修正のたびに必ずこのバージョン文字列を更新すること(開発ルール)
-const CACHE_NAME = "keirin-ev-v12";
+const CACHE_NAME = "keirin-ev-v13";
 
 const ASSETS = [
   "./",
