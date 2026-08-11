@@ -98,13 +98,13 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             o.combination, calc.market_prob_from_odds(o.odds_value, o.bet_type)
         )
 
-        ev_pct = calc.calc_ev_pct(est_prob, o.odds_value)
+        ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, skip_reason = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         # 100円ベット換算で、安全マージン(オッズ変動対策)を考慮した閾値以上を「買い示唆」とする
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
 
         stake_info = calc.recommend_stake(
-            bankroll, est_prob, o.odds_value, req.fractional_coefficient, req.max_bet_pct_per_bet
+            bankroll, est_prob, o.odds_value, req.fractional_coefficient, req.max_bet_pct_per_bet, req.rebate_pct
         )
 
         ev_result = models.EvResult(
@@ -171,6 +171,7 @@ def threshold_table(
     min_ev_pct: float = 5.0,
     min_win_prob: float = 0.05,
     limit: int = 15,
+    rebate_pct: float = 0.0,
     db: Session = Depends(get_db),
 ):
     """
@@ -211,7 +212,7 @@ def threshold_table(
             is_skip, _ = calc.apply_min_prob_filter(est_prob, 100, min_win_prob)  # 勝率フィルターのみ判定
             if is_skip or est_prob <= 0:
                 continue
-            threshold_odds = (1 + min_ev_pct / 100) / est_prob
+            threshold_odds = (1 + min_ev_pct / 100 - rebate_pct) / est_prob
             results.append({
                 "bet_type": bet_type,
                 "combination": "-".join(str(c) for c in combo),
@@ -264,13 +265,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
         est_prob = _apply_calibration(est_prob, calibration_factors)
-        ev_pct = calc.calc_ev_pct(est_prob, o.odds_value)
+        ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
         if not is_recommended:
             continue
 
-        f = calc.kelly_fraction(est_prob, o.odds_value, req.fractional_coefficient)
+        f = calc.kelly_fraction(est_prob, o.odds_value, req.fractional_coefficient, req.rebate_pct)
         f_capped = min(f, req.max_bet_pct_per_bet)
         raw_stake = bankroll * f_capped
         candidates.append({

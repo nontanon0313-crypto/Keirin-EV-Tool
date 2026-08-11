@@ -1,8 +1,20 @@
 // バックエンドのURLは固定(このプロジェクト専用のRenderデプロイ先)
 const API_BASE_URL = "https://keirin-ev-tool.onrender.com";
+// フラクショナルケリー係数は固定運用(通常変更不要)
+const FIXED_KELLY_COEFFICIENT = 0.25;
 
 function apiUrl(path) {
   return API_BASE_URL + path;
+}
+
+document.getElementById("rebateCheckbox").addEventListener("change", (e) => {
+  document.getElementById("rebatePctWrapper").style.display = e.target.checked ? "block" : "none";
+});
+
+function getRebatePct() {
+  const checked = document.getElementById("rebateCheckbox").checked;
+  if (!checked) return 0;
+  return (parseFloat(document.getElementById("rebatePctInput").value) || 0) / 100;
 }
 
 // ---------- 💰 証拠金管理 ----------
@@ -222,7 +234,7 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
     return;
   }
   const bankroll = getBankrollOverride();
-  const kellyCoef = parseFloat(document.getElementById("kellyCoefInput").value);
+  const kellyCoef = FIXED_KELLY_COEFFICIENT;
   const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
   const minEvPct = parseFloat(document.getElementById("minEvInput").value);
 
@@ -243,6 +255,7 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
         fractional_coefficient: kellyCoef,
         min_win_prob: minProb,
         min_ev_pct: minEvPct,
+        rebate_pct: getRebatePct(),
       }),
     });
     const data = await res.json();
@@ -270,7 +283,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     return;
   }
   const bankroll = getBankrollOverride();
-  const kellyCoef = parseFloat(document.getElementById("kellyCoefInput").value);
+  const kellyCoef = FIXED_KELLY_COEFFICIENT;
   const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
   const minEvPct = parseFloat(document.getElementById("minEvInput").value);
 
@@ -286,6 +299,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         min_win_prob: minProb,
         min_ev_pct: minEvPct,
         max_race_pct: parseFloat(document.getElementById("maxRacePctInput").value) / 100,
+        rebate_pct: getRebatePct(),
       }),
     });
     const data = await res.json();
@@ -333,7 +347,7 @@ document.getElementById("thresholdTableBtn").addEventListener("click", async () 
 
   resultBox.textContent = "閾値表を作成中...";
   try {
-    const res = await fetch(apiUrl(`/ev/threshold-table/${raceId}?min_ev_pct=${minEvPct}&min_win_prob=${minProb}&limit=${limit}`), {
+    const res = await fetch(apiUrl(`/ev/threshold-table/${raceId}?min_ev_pct=${minEvPct}&min_win_prob=${minProb}&limit=${limit}&rebate_pct=${getRebatePct()}`), {
       method: "POST",
     });
     const data = await res.json();

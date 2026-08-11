@@ -166,9 +166,13 @@ def normalize_market_probs(odds_map: Dict[str, float]) -> Dict[str, float]:
     return {k: v / total for k, v in raw.items()}
 
 
-def calc_ev_pct(estimated_prob: float, odds_value: float) -> float:
-    """期待値%。 (推定確率 × オッズ - 1) × 100"""
-    return (estimated_prob * odds_value - 1.0) * 100.0
+def calc_ev_pct(estimated_prob: float, odds_value: float, rebate_pct: float = 0.0) -> float:
+    """
+    期待値%。 (推定確率 × オッズ + 還元率 - 1) × 100
+    rebate_pct: 勝敗に関わらずポイント還元されるレース(還元率0-1)の場合、還元分は
+    勝ち負けどちらでも戻ってくるため、期待値に加算する。
+    """
+    return (estimated_prob * odds_value + rebate_pct - 1.0) * 100.0
 
 
 # 勝率帯の区切り(購入統計・自動補正で共通して使う)
@@ -210,11 +214,19 @@ def compute_calibration_factor(actual_win_rate: float, predicted_avg_prob: float
     return max(0.3, min(3.0, factor))
 
 
-def kelly_fraction(win_prob: float, odds_value: float, fractional_coefficient: float = 0.25) -> float:
+def kelly_fraction(
+    win_prob: float, odds_value: float, fractional_coefficient: float = 0.25, rebate_pct: float = 0.0
+) -> float:
     """
     フラクショナルケリー基準による推奨賭け比率(資金に対する割合)を返す。
-    b = odds_value - 1 (純利益倍率)
-    f* = (b*p - q) / b   (q = 1-p)
+
+    通常(還元無し): b = odds_value - 1、f* = (b*p - q) / b
+    還元レース(勝敗に関わらずrebate_pct分が戻る)の場合、勝った時の実質倍率と
+    負けた時の実質損失率がどちらも変わるため、一般化した式を使う:
+      W(勝った時の純利得倍率) = (odds_value - 1) + rebate_pct
+      L(負けた時の純損失倍率) = 1 - rebate_pct
+      f* = (p*W - q*L) / (L*W)
+    rebate_pct=0の場合は通常の式と完全に一致する。
     マイナスになる場合(期待値マイナス)は0を返す。
     """
     b = odds_value - 1.0
@@ -222,7 +234,11 @@ def kelly_fraction(win_prob: float, odds_value: float, fractional_coefficient: f
         return 0.0
     p = win_prob
     q = 1.0 - p
-    f_full = (b * p - q) / b
+    W = b + rebate_pct
+    L = 1.0 - rebate_pct
+    if L <= 0 or W <= 0:
+        return 0.0
+    f_full = (p * W - q * L) / (L * W)
     if f_full <= 0:
         return 0.0
     return f_full * fractional_coefficient
@@ -246,12 +262,13 @@ def recommend_stake(
     odds_value: float,
     fractional_coefficient: float = 0.25,
     max_bet_pct_per_bet: float = 0.05,
+    rebate_pct: float = 0.0,
 ) -> Dict[str, float]:
     """
     推奨購入金額を計算する。100円単位に丸め、証拠金が少なくても最低100円は確保する。
     max_bet_pct_per_bet: 1点あたりの上限比率(資金に対する割合)。ケリー計算値がこれを超えたらキャップする。
     """
-    f = kelly_fraction(win_prob, odds_value, fractional_coefficient)
+    f = kelly_fraction(win_prob, odds_value, fractional_coefficient, rebate_pct)
     capped_f = min(f, max_bet_pct_per_bet)
     raw_stake = bankroll * capped_f
     return {
