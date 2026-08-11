@@ -112,7 +112,7 @@ EXTRACTION_PROMPT = """
   ],
   "odds_list": [
     {
-      "bet_type": "単勝 | 複勝 | 2車単 | 2車複 | 2枠単 | 2枠複 | ワイド | 3連単 | 3連複",
+      "bet_type": "2車単 | 2車複 | 2枠単 | 2枠複 | ワイド | 3連単 | 3連複",
       "combination": "車番の組み合わせ。着順ありは矢印区切りをハイフンに変換(例: 1→2→3 は 1-2-3)",
       "odds_value": "オッズ倍率(float)",
       "popularity_rank": "人気順位(整数)。分かれば",
@@ -122,6 +122,10 @@ EXTRACTION_PROMPT = """
 }
 
 画面に写っていない項目のセクション(例: オッズ画面ならentriesが空)は、空配列にしてください。
+
+重要: オッズ画面の場合、画面に写っている行を1行たりとも省略せず、見えている分は全て抽出してください。
+「代表的な数行だけ」のような要約や間引きは絶対にしないでください。
+数十〜100件以上の行が写っている場合でも、写っている全行をodds_listに含めてください。
 """
 
 
@@ -141,7 +145,7 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
     response = _call_with_retry(
         model,
         [EXTRACTION_PROMPT, _image_to_part(image_bytes, mime_type)],
-        generation_config={"response_mime_type": "application/json"},
+        generation_config={"response_mime_type": "application/json", "max_output_tokens": 8192},
     )
 
     text = response.text.strip()

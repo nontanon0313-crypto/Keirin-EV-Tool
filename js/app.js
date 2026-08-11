@@ -184,11 +184,10 @@ document.getElementById("checkRaceBtn").addEventListener("click", async () => {
       html += `<div style="background:#0b1220;border-radius:8px;padding:10px;margin-top:8px;"><strong>🎯AIによる展開予想</strong><p style="white-space:pre-wrap;margin-top:6px;">${data.development_simulation}</p></div>`;
     }
 
-    html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>地元</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
+    html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
     for (const e of data.entries) {
       const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';
-      const localMark = e.is_local === true ? "🏠地元" : (e.is_local === false ? "-" : "不明");
-      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.region ?? "-"}</td><td>${localMark}</td><td>${e.leg_style ?? "-"}</td><td>${e.app_win_rate ?? "-"}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
+      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.region ?? "-"}</td><td>${e.leg_style ?? "-"}</td><td>${e.app_win_rate ?? "-"}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
     }
     html += `</table>`;
 
@@ -508,13 +507,40 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
 });
 
 // ---------- ⑤ 実績検証 ----------
+function renderBucketTable(title, bucketObj) {
+  if (!bucketObj || Object.keys(bucketObj).length === 0) return "";
+  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>的中率</th><th>期待値実績</th></tr>`;
+  for (const [key, v] of Object.entries(bucketObj)) {
+    const cls = v.expectancy_pct > 0 ? "ev-positive" : "";
+    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.win_rate_pct}%</td><td>${v.expectancy_pct}%</td></tr>`;
+  }
+  html += "</table>";
+  return html;
+}
+
 document.getElementById("loadStatsBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "読み込み中...";
   try {
     const res = await fetch(apiUrl("/purchases/stats"));
     const data = await res.json();
-    resultBox.textContent = JSON.stringify(data, null, 2);
+    if (data.message) {
+      resultBox.textContent = data.message;
+      return;
+    }
+    let html = `<p><strong>総合期待値: ${data.overall_expectancy_pct}%</strong>(総ベット数: ${data.total_bets}件)</p>`;
+    html += renderBucketTable("券種別", data.by_bet_type);
+    html += renderBucketTable("勝率帯別", data.by_win_prob_bucket);
+    html += renderBucketTable("バンク別", data.by_bank);
+    html += renderBucketTable("ライン絡み別", data.by_line_match);
+    html += renderBucketTable("バンク先行有利度別", data.by_bank_lead_advantage);
+    html += renderBucketTable("レースステージ別", data.by_race_stage);
+    html += renderBucketTable("季節別", data.by_season);
+    if (data.odds_drift && !data.odds_drift.message) {
+      html += `<p style="margin-top:10px;"><strong>オッズ変動の影響</strong></p>`;
+      html += `<p>サンプル数: ${data.odds_drift.sample_count}件 / 平均乖離: ${data.odds_drift.avg_odds_drift_pct}% / 不利方向の割合: ${data.odds_drift.worsened_ratio_pct}%</p>`;
+    }
+    resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }

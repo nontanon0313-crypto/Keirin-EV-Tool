@@ -26,8 +26,6 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
 
 def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict = None, line_boost: float = 1.0) -> float:
     """券種ごとに正しい的中確率の計算方法を呼び分ける。"""
-    if bet_type == "複勝":
-        return calc.fukusho_prob(win_probs, cars[0], line_map, line_boost)
     if bet_type == "ワイド":
         return calc.wide_prob(win_probs, cars[0], cars[1], line_map, line_boost)
     ordered = bet_type in calc.ORDERED_BET_TYPES
@@ -302,7 +300,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     total_stake = 0.0
     total_expected_profit = 0.0
     for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
-        stake = round(c["raw_stake"] * scale, 0)
+        stake = calc.round_to_bet_unit(c["raw_stake"] * scale)
         expected_profit = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         total_stake += stake
         total_expected_profit += expected_profit

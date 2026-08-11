@@ -15,9 +15,8 @@ from typing import List, Dict, Tuple
 
 # 競輪の券種別 控除率(dev注: 実際の値は年度・券種で変わるため、確定情報がない場合の暫定値。
 # オッズが全買い目分揃っていれば正規化で代替できるためこの値はあくまでフォールバック)
+# 注意: 単勝・複勝は競馬(JRA)の券種であり、競輪には存在しないため対象外。
 DEFAULT_TAKEOUT_RATE = {
-    "単勝": 0.20,
-    "複勝": 0.20,
     "2車単": 0.25,
     "2車複": 0.25,
     "2枠単": 0.25,
@@ -29,8 +28,6 @@ DEFAULT_TAKEOUT_RATE = {
 
 # 券種ごとに何着分の車番が必要か
 BET_TYPE_ARITY = {
-    "単勝": 1,
-    "複勝": 1,
     "2車単": 2,
     "2車複": 2,
     "2枠単": 2,
@@ -41,7 +38,7 @@ BET_TYPE_ARITY = {
 }
 
 # 着順を区別するか(単/複で結果が変わるか)
-ORDERED_BET_TYPES = {"単勝", "2車単", "2枠単", "3連単"}
+ORDERED_BET_TYPES = {"2車単", "2枠単", "3連単"}
 
 
 def harville_prob(
@@ -125,17 +122,6 @@ def build_line_map(lines_data) -> Dict[int, int]:
         for car in line:
             line_map[int(car)] = idx
     return line_map
-
-
-def fukusho_prob(
-    win_probs: Dict[int, float], car: int, line_map: Dict[int, int] = None, line_boost: float = 1.0
-) -> float:
-    """
-    複勝: 指定した1車が2着以内(上位2着)に入る確率。
-    「対象車+他の1車」が上位2着の組(順不同)になるケースを、他の全車について合算する。
-    """
-    others = [c for c in win_probs if c != car]
-    return sum(combination_prob(win_probs, (car, o), ordered=False, line_map=line_map, line_boost=line_boost) for o in others)
 
 
 def wide_prob(
@@ -242,6 +228,18 @@ def kelly_fraction(win_prob: float, odds_value: float, fractional_coefficient: f
     return f_full * fractional_coefficient
 
 
+def round_to_bet_unit(amount: float, unit: int = 100) -> int:
+    """
+    競輪の投票は100円単位のため、金額を100円単位に丸める。
+    ケリー計算値が100円未満でも、期待値プラスの買い目である以上は
+    最低単位(100円)で購入する運用とする(証拠金が少なくても100円単位で賭ける)。
+    """
+    if amount <= 0:
+        return 0
+    rounded = round(amount / unit) * unit
+    return max(unit, int(rounded))
+
+
 def recommend_stake(
     bankroll: float,
     win_prob: float,
@@ -250,16 +248,16 @@ def recommend_stake(
     max_bet_pct_per_bet: float = 0.05,
 ) -> Dict[str, float]:
     """
-    推奨購入金額を計算する。
+    推奨購入金額を計算する。100円単位に丸め、証拠金が少なくても最低100円は確保する。
     max_bet_pct_per_bet: 1点あたりの上限比率(資金に対する割合)。ケリー計算値がこれを超えたらキャップする。
     """
     f = kelly_fraction(win_prob, odds_value, fractional_coefficient)
     capped_f = min(f, max_bet_pct_per_bet)
-    stake = bankroll * capped_f
+    raw_stake = bankroll * capped_f
     return {
         "kelly_fraction_raw": f,
         "kelly_fraction_capped": capped_f,
-        "recommended_stake": round(stake, 0),
+        "recommended_stake": round_to_bet_unit(raw_stake),
     }
 
 

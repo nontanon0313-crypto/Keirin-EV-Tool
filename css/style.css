@@ -25,6 +25,35 @@ header {
 
 header h1 { font-size: 1.2rem; margin: 0; }
 
+.tabbar {
+  display: flex;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid #334155;
+}
+
+.tab-btn {
+  flex: 1;
+  padding: 12px 4px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-weight: bold;
+  border-bottom: 3px solid transparent;
+  margin: 0;
+  border-radius: 0;
+}
+
+.tab-btn.active {
+  color: var(--accent);
+  border-bottom: 3px solid var(--accent);
+}
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
 main {
   padding: 12px;
   max-width: 600px;

@@ -13,15 +13,15 @@
   <h1>競輪 期待値検証ツール</h1>
 </header>
 
+<nav class="tabbar">
+  <button class="tab-btn active" data-tab="tab-vote">投票</button>
+  <button class="tab-btn" data-tab="tab-bankroll">証拠金</button>
+  <button class="tab-btn" data-tab="tab-verify">検証・設定</button>
+</nav>
+
 <main>
-  <section class="card">
-    <h2>💰 証拠金管理</h2>
-    <p class="note">購入記録・結果確定のたびに自動で増減します。1レースへの投票額は、この残高に対する上限比率で自動的に制限されます。</p>
-    <div id="bankrollDisplay" class="result-box">未設定です。下から初期額を設定してください。</div>
-    <label>初期設定 / 入金・出金後のリセット(円)</label>
-    <input type="number" id="bankrollSetInput" placeholder="例: 10000">
-    <button id="bankrollSetBtn">証拠金を設定する</button>
-  </section>
+
+<div id="tab-vote" class="tab-content active">
 
   <section class="card">
     <h2>① スクショ解析</h2>
@@ -38,16 +38,22 @@
     <button id="deleteRaceBtn" style="background:#ef4444;">選択中のレースを削除(やり直し用)</button>
     <button id="checkRaceBtn" style="background:#38bdf8;">このレースの詳細・不足データを確認</button>
     <div id="raceDetailResult" class="result-box"></div>
-    <label>証拠金の上書き(空欄なら上の自動残高を使用)</label>
+
+    <label>証拠金の上書き(空欄なら証拠金タブの残高を自動使用)</label>
     <input type="number" id="bankrollInput" placeholder="空欄でOK">
-    <label>フラクショナルケリー係数(0-1)</label>
+
+    <label>フラクショナルケリー係数(資金配分の積極度。0〜1で指定。1.0=理論上の最大額、0.25なら控えめに1/4だけ賭ける)</label>
     <input type="number" id="kellyCoefInput" value="0.25" step="0.05">
-    <label>最低勝率フィルター(%)</label>
-    <input type="number" id="minProbInput" value="5" step="1">
+
+    <label>最低勝率フィルター(%、これを下回る大穴頼みの買い目は見送り)</label>
+    <input type="number" id="minProbInput" value="0" step="1">
+
     <label>安全マージン(最低期待値%、オッズ変動対策)</label>
     <input type="number" id="minEvInput" value="5" step="1">
-    <label>1レースあたりの上限比率(%、証拠金に対して)</label>
-    <input type="number" id="maxRacePctInput" value="10" step="1">
+
+    <label>1レースあたりの上限比率(%、証拠金に対して。資金に余裕が出たら10%程度に絞る運用を推奨)</label>
+    <input type="number" id="maxRacePctInput" value="100" step="1">
+
     <button id="calcEvBtn">期待値を計算(一覧)</button>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>
@@ -61,7 +67,7 @@
     <p class="note">上の一覧で購入した買い目を手動で記録してください。</p>
     <input type="text" id="purchaseBetType" placeholder="券種(例: 3連単)">
     <input type="text" id="purchaseCombination" placeholder="買い目(例: 1-2-3)">
-    <input type="number" id="purchaseStake" placeholder="購入金額">
+    <input type="number" id="purchaseStake" placeholder="購入金額(100円単位)" step="100">
     <button id="recordPurchaseBtn">記録する</button>
     <div id="purchaseResult" class="result-box"></div>
   </section>
@@ -73,8 +79,23 @@
     <div id="pendingList" class="result-box"></div>
   </section>
 
+</div>
+
+<div id="tab-bankroll" class="tab-content">
   <section class="card">
-    <h2>④ 資金管理シミュレーション(破産確率)</h2>
+    <h2>💰 証拠金管理</h2>
+    <p class="note">購入記録・結果確定のたびに自動で増減します。1レースへの投票額は、この残高に対する上限比率で自動的に制限されます。</p>
+    <div id="bankrollDisplay" class="result-box">未設定です。下から初期額を設定してください。</div>
+    <label>初期設定 / 入金・出金後のリセット(円)</label>
+    <input type="number" id="bankrollSetInput" placeholder="例: 10000">
+    <button id="bankrollSetBtn">証拠金を設定する</button>
+  </section>
+</div>
+
+<div id="tab-verify" class="tab-content">
+
+  <section class="card">
+    <h2>資金管理シミュレーション(破産確率)</h2>
     <label>勝率(%)</label>
     <input type="number" id="simWinProb" value="30">
     <label>オッズ</label>
@@ -88,11 +109,14 @@
   </section>
 
   <section class="card">
-    <h2>⑤ 実績検証</h2>
+    <h2>実績検証</h2>
     <button id="loadStatsBtn">集計を表示</button>
     <button id="loadCalibrationBtn" style="background:#06b6d4;">自動補正の状態を確認</button>
     <div id="statsResult" class="result-box"></div>
   </section>
+
+</div>
+
 </main>
 
 <script src="js/app.js"></script>
@@ -102,6 +126,14 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("sw.js");
   });
 }
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById(btn.dataset.tab).classList.add("active");
+  });
+});
 </script>
 </body>
 </html>
