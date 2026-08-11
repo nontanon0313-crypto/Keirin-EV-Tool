@@ -623,6 +623,23 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
   }
 });
 
+document.getElementById("loadSourceWeightsBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/source-weights"));
+    const data = await res.json();
+    let html = `<p>${data.reason}</p>`;
+    html += `<table><tr><th>予想元</th><th>重み</th>${data.based_on_actual_data ? "<th>Brierスコア(低い方が精度高)</th>" : ""}</tr>`;
+    html += `<tr><td>tipstar勝率</td><td>${(data.app_weight * 100).toFixed(1)}%</td>${data.based_on_actual_data ? `<td>${data.app_brier_score}</td>` : ""}</tr>`;
+    html += `<tr><td>AI推定</td><td>${(data.ai_weight * 100).toFixed(1)}%</td>${data.based_on_actual_data ? `<td>${data.ai_brier_score}</td>` : ""}</tr>`;
+    html += "</table>";
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 // 初回ロード
 loadRaces();
 refreshBankrollDisplay();

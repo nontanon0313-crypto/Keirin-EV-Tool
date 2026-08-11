@@ -7,6 +7,7 @@ from ..database import get_db
 from .. import models
 from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities, simulate_race_development
 from ..keirin_data import is_local_player
+from . import purchases as purchases_router
 
 router = APIRouter(prefix="/analyze", tags=["analyze"])
 
@@ -254,13 +255,19 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
         except Exception:
             ai_probs = {}
 
+        # tipstar勝率とAI推定、どちらが実際に精度が高いかを実績から取得(データ不足時は1:1)
+        try:
+            weights = purchases_router.source_weights(db)
+        except Exception:
+            weights = {"app_weight": 0.5, "ai_weight": 0.5}
+
         for e in entries:
             ai_p = ai_probs.get(e.car_number)
             if ai_p is not None:
                 e.ai_win_prob = ai_p
             app_p = (e.app_win_rate / 100.0) if e.app_win_rate is not None else None
             if ai_p is not None and app_p is not None:
-                e.blended_win_prob = (ai_p + app_p) / 2.0
+                e.blended_win_prob = ai_p * weights["ai_weight"] + app_p * weights["app_weight"]
             elif ai_p is not None:
                 e.blended_win_prob = ai_p
             elif app_p is not None:

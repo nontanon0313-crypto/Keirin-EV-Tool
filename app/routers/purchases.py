@@ -74,6 +74,79 @@ def get_calibration_factors(db: Session) -> dict:
     return result
 
 
+@router.get("/source-weights")
+def source_weights(db: Session = Depends(get_db)):
+    """
+    tipstarの勝率とAI推定、どちらが実際に精度が高いかを、着順確定済みレースの
+    実績(Brierスコア: 予測確率と実際の結果の二乗誤差、低いほど精度が高い)から算出する。
+    サンプルが少ない場合はデフォルトの1:1のまま。
+    """
+    min_races_for_trust = 5
+
+    races = db.query(models.Race).filter(models.Race.actual_result.isnot(None)).all()
+
+    app_sq_error_sum = 0.0
+    ai_sq_error_sum = 0.0
+    sample_count = 0
+
+    for race in races:
+        try:
+            winner_car = int(race.actual_result.split("-")[0])
+        except (ValueError, IndexError):
+            continue
+
+        entries = db.query(models.Entry).filter(models.Entry.race_id == race.id).all()
+        app_probs = {e.car_number: e.app_win_rate for e in entries if e.app_win_rate is not None}
+        ai_probs = {e.car_number: e.ai_win_prob for e in entries if e.ai_win_prob is not None}
+
+        if not app_probs or not ai_probs:
+            continue
+
+        # レース内で正規化(tipstar値は%表記、AI推定は既に0-1の確率として保存されている)
+        app_total = sum(app_probs.values())
+        ai_total = sum(ai_probs.values())
+        if app_total <= 0 or ai_total <= 0:
+            continue
+
+        for car in set(app_probs) & set(ai_probs):
+            outcome = 1.0 if car == winner_car else 0.0
+            app_p = app_probs[car] / app_total
+            ai_p = ai_probs[car] / ai_total
+            app_sq_error_sum += (app_p - outcome) ** 2
+            ai_sq_error_sum += (ai_p - outcome) ** 2
+            sample_count += 1
+
+    if len(races) < min_races_for_trust or sample_count == 0:
+        return {
+            "app_weight": 0.5,
+            "ai_weight": 0.5,
+            "based_on_actual_data": False,
+            "resolved_race_count": len(races),
+            "reason": f"着順確定済みレースが{len(races)}件({min_races_for_trust}件以上で自動算出に切り替わります)。デフォルトの1:1のままです。",
+        }
+
+    app_brier = app_sq_error_sum / sample_count
+    ai_brier = ai_sq_error_sum / sample_count
+
+    # Brierスコアは低いほど精度が高いため、逆数を重みにする(0除算を避けるための下駄を履かせる)
+    app_inv = 1.0 / max(app_brier, 0.001)
+    ai_inv = 1.0 / max(ai_brier, 0.001)
+    total_inv = app_inv + ai_inv
+    app_weight = app_inv / total_inv
+    ai_weight = ai_inv / total_inv
+
+    return {
+        "app_weight": round(app_weight, 3),
+        "ai_weight": round(ai_weight, 3),
+        "based_on_actual_data": True,
+        "resolved_race_count": len(races),
+        "sample_count": sample_count,
+        "app_brier_score": round(app_brier, 4),
+        "ai_brier_score": round(ai_brier, 4),
+        "reason": f"着順確定済み{len(races)}レース分の実績から算出しました(値が低いほど精度が高いBrierスコア: tipstar={round(app_brier,4)} / AI={round(ai_brier,4)})。",
+    }
+
+
 @router.get("/suggested-margin")
 def suggested_margin(db: Session = Depends(get_db)):
     """
