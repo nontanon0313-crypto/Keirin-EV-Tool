@@ -330,10 +330,11 @@ document.getElementById("thresholdTableBtn").addEventListener("click", async () 
   }
   const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
   const minEvPct = parseFloat(document.getElementById("minEvInput").value);
+  const limit = parseInt(document.getElementById("thresholdLimitInput").value) || 15;
 
   resultBox.textContent = "閾値表を作成中...";
   try {
-    const res = await fetch(apiUrl(`/ev/threshold-table/${raceId}?min_ev_pct=${minEvPct}&min_win_prob=${minProb}`), {
+    const res = await fetch(apiUrl(`/ev/threshold-table/${raceId}?min_ev_pct=${minEvPct}&min_win_prob=${minProb}&limit=${limit}`), {
       method: "POST",
     });
     const data = await res.json();

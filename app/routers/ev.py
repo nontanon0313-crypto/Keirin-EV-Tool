@@ -172,6 +172,7 @@ def threshold_table(
     race_id: int,
     min_ev_pct: float = 5.0,
     min_win_prob: float = 0.05,
+    limit: int = 15,
     db: Session = Depends(get_db),
 ):
     """
@@ -179,6 +180,9 @@ def threshold_table(
     閾値オッズ表を作成する。出走表は締切まで変わらないため、これを先に作っておけば、
     投票直前はオッズ画面と見比べるだけで判断できる(オッズのスクショ解析が不要になる)。
 
+    閾値オッズが低い(=少しのオッズでも買い成立する)順に並べ、上位limit件に絞る。
+    全組み合わせは膨大なため、実際に投票直前のオッズ画面(人気順表示)でチェックすべき
+    「注目リスト」として使うことを想定している。
     閾値オッズ = (1 + 安全マージン%/100) ÷ 推定的中確率
     """
     race = db.query(models.Race).get(race_id)
@@ -218,12 +222,19 @@ def threshold_table(
             })
 
     results.sort(key=lambda r: r["threshold_odds"])
+    total_combinations = len(results)
+    results = results[:limit]
 
     return {
         "race_id": race_id,
         "min_ev_pct": min_ev_pct,
         "min_win_prob_pct": min_win_prob * 100,
-        "message": "表示されているオッズが「閾値オッズ」以上なら買い示唆です。",
+        "total_combinations": total_combinations,
+        "shown_count": len(results),
+        "message": (
+            f"全{total_combinations}通り中、閾値オッズが低い(=買いが成立しやすい)上位{len(results)}点を表示。"
+            "表示されているオッズが「閾値オッズ」以上なら買い示唆です。"
+        ),
         "results": results,
     }
 
