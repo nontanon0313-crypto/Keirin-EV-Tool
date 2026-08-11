@@ -74,6 +74,41 @@ def get_calibration_factors(db: Session) -> dict:
     return result
 
 
+@router.get("/suggested-margin")
+def suggested_margin(db: Session = Depends(get_db)):
+    """
+    実績のオッズ変動(投票時→最終オッズのズレ)から、安全マージンの目安を自動算出する。
+    データが少ない場合はデフォルト値(5%)を返す。
+    """
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    drift_info = _odds_drift_stats(purchases)
+
+    default_margin = 5.0
+    min_sample_for_trust = 10
+
+    if drift_info.get("message") or drift_info.get("sample_count", 0) < min_sample_for_trust:
+        return {
+            "suggested_margin_pct": default_margin,
+            "based_on_actual_data": False,
+            "reason": f"実績データが不足しています({drift_info.get('sample_count', 0)}件、{min_sample_for_trust}件以上で自動算出に切り替わります)。デフォルト値を使用してください。",
+        }
+
+    avg_drift = drift_info["avg_odds_drift_pct"]
+    # 不利方向(オッズが下がる)のブレ幅をそのまま安全マージンとして使う。有利方向のブレならデフォルト値を維持。
+    if avg_drift < 0:
+        suggested = max(default_margin, abs(avg_drift))
+    else:
+        suggested = default_margin
+
+    return {
+        "suggested_margin_pct": round(suggested, 1),
+        "based_on_actual_data": True,
+        "sample_count": drift_info["sample_count"],
+        "avg_odds_drift_pct": avg_drift,
+        "reason": f"実績{drift_info['sample_count']}件のオッズ変動(平均{avg_drift}%)から算出しました。",
+    }
+
+
 @router.get("/calibration")
 def calibration_status(db: Session = Depends(get_db)):
     """勝率帯ごとの自動補正の状態(補正係数・信頼できるか・必要試行数)を返す。"""
@@ -82,13 +117,27 @@ def calibration_status(db: Session = Depends(get_db)):
 
 @router.get("/pending")
 def list_pending_purchases(db: Session = Depends(get_db)):
-    """まだ結果未確定の購入履歴一覧(結果入力画面用)。"""
-    return (
+    """まだ結果未確定の購入履歴一覧(結果入力画面用)。レースごとにまとめられるよう、レース情報も付与する。"""
+    purchases = (
         db.query(models.Purchase)
         .filter(models.Purchase.result == "pending")
         .order_by(models.Purchase.purchased_at.desc())
         .all()
     )
+    result = []
+    for p in purchases:
+        race = db.query(models.Race).get(p.race_id)
+        result.append({
+            "id": p.id,
+            "race_id": p.race_id,
+            "venue_name": race.venue_name if race else "不明",
+            "race_number": race.race_number if race else None,
+            "bet_type": p.bet_type,
+            "combination": p.combination,
+            "stake_amount": p.stake_amount,
+            "odds_at_purchase": p.odds_at_purchase,
+        })
+    return result
 
 
 @router.get("/")
@@ -129,9 +178,12 @@ def purchase_stats(db: Session = Depends(get_db)):
             out[k] = {
                 "count": v["count"],
                 "win_rate_pct": round(v["wins"] / v["count"] * 100, 1),
+                # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
+                "roi_pct": round(expectancy + 100, 2),
                 "expectancy_pct": round(expectancy, 2),
             }
-        return out
+        # 期待値(実績)が高い順に並べ替える
+        return dict(sorted(out.items(), key=lambda item: -item[1]["expectancy_pct"]))
 
     def prob_bucket(p):
         prob = p.win_prob_at_purchase or 0
@@ -179,17 +231,58 @@ def purchase_stats(db: Session = Depends(get_db)):
             return "不明"
         return race.season
 
+    def grade_bucket(p):
+        race = db.query(models.Race).get(p.race_id)
+        if not race or not race.grade:
+            return "不明"
+        return race.grade
+
+    all_buckets = {
+        "券種別": bucket_stats(lambda p: p.bet_type),
+        "勝率帯別": bucket_stats(prob_bucket),
+        "バンク別": bucket_stats(lambda p: (p.tags or {}).get("bank", "不明")),
+        "ライン絡み別": bucket_stats(line_bucket),
+        "バンク先行有利度別": bucket_stats(bank_lead_bucket),
+        "レースステージ別": bucket_stats(race_stage_bucket),
+        "季節別": bucket_stats(season_bucket),
+        "グレード別": bucket_stats(grade_bucket),
+    }
+
+    # 全ての切り口を横断し、サンプル数が一定以上(ノイズ除け)で期待値実績が高い条件をランキング化する。
+    # これが「集計結果を見て予想を修正する」ための最初の手がかりになる。
+    min_sample_for_ranking = 5
+    ranking = []
+    for category, buckets in all_buckets.items():
+        for key, v in buckets.items():
+            if v["count"] >= min_sample_for_ranking:
+                ranking.append({
+                    "category": category,
+                    "condition": key,
+                    "count": v["count"],
+                    "win_rate_pct": v["win_rate_pct"],
+                    "expectancy_pct": v["expectancy_pct"],
+                })
+    ranking.sort(key=lambda x: -x["expectancy_pct"])
+
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
+        "overall_roi_pct": round(overall_expectancy_pct + 100, 2),
         "total_bets": len(purchases),
-        "by_bet_type": bucket_stats(lambda p: p.bet_type),
-        "by_win_prob_bucket": bucket_stats(prob_bucket),
-        "by_bank": bucket_stats(lambda p: (p.tags or {}).get("bank", "不明")),
-        "by_line_match": bucket_stats(line_bucket),
-        "by_bank_lead_advantage": bucket_stats(bank_lead_bucket),
-        "by_race_stage": bucket_stats(race_stage_bucket),
-        "by_season": bucket_stats(season_bucket),
+        "best_conditions_ranking": ranking[:10],
+        "worst_conditions_ranking": ranking[-10:][::-1] if len(ranking) > 10 else [],
+        "by_bet_type": all_buckets["券種別"],
+        "by_win_prob_bucket": all_buckets["勝率帯別"],
+        "by_bank": all_buckets["バンク別"],
+        "by_line_match": all_buckets["ライン絡み別"],
+        "by_bank_lead_advantage": all_buckets["バンク先行有利度別"],
+        "by_race_stage": all_buckets["レースステージ別"],
+        "by_season": all_buckets["季節別"],
+        "by_grade": all_buckets["グレード別"],
         "odds_drift": _odds_drift_stats(purchases),
+        "note": (
+            "expectancy_pctは0%が損益分岐点(roi_pctは100%が損益分岐点、同じ実績を別表現にしたもの)。"
+            f"件数{min_sample_for_ranking}件未満の条件はランキングから除外しています(判断が不安定なため)。"
+        ),
     }
 
 

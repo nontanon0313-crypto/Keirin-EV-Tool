@@ -135,7 +135,12 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     )
 
     output_results = []
+    hidden_count = 0
     for r in results:
+        # 期待値マイナス・見送り対象は一覧に出さない(ノイズになるため)
+        if r.is_skip or r.ev_pct < 0:
+            hidden_count += 1
+            continue
         total_vote = odds_lookup.get((r.bet_type, r.combination))
         stake = r.recommended_stake or 0
         if total_vote is not None and total_vote > 0:
@@ -160,6 +165,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     return {
         "race_id": race_id,
         "bankroll": bankroll,
+        "hidden_negative_count": hidden_count,
         "total_combinations": len(results),
         "results": output_results,
     }
@@ -293,18 +299,27 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "total_stake": 0,
         }
 
-    total_raw_stake = sum(c["raw_stake"] for c in candidates)
     race_cap = bankroll * req.max_race_pct
-    scale = min(1.0, race_cap / total_raw_stake) if total_raw_stake > 0 else 1.0
 
+    # 期待値が高い順に、100円単位で予算内に収まる分だけ採用する。
+    # (証拠金が少ない時、弱い候補まで一律100円で買ってしまい非効率になるのを防ぐ)
     items = []
     total_stake = 0.0
     total_expected_profit = 0.0
+    remaining_budget = race_cap
     for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
-        stake = calc.round_to_bet_unit(c["raw_stake"] * scale)
+        stake = calc.round_to_bet_unit(c["raw_stake"])
+        if stake > remaining_budget:
+            if remaining_budget < 100:
+                continue  # もう1点(最低100円)も買う余地が無い
+            stake = calc.round_to_bet_unit(remaining_budget) if remaining_budget >= 100 else 0
+            if stake <= 0 or stake > remaining_budget:
+                continue
+
         expected_profit = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         total_stake += stake
         total_expected_profit += expected_profit
+        remaining_budget -= stake
         total_vote = c["total_vote_amount"]
         if total_vote is not None and total_vote > 0:
             self_impact_pct = round(stake / (total_vote + stake) * 100, 2)
@@ -326,7 +341,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "num_bets": len(items),
         "total_stake": round(total_stake, 0),
         "race_budget_cap": round(race_cap, 0),
-        "was_scaled_down": scale < 1.0,
+        "excluded_by_budget_count": len(candidates) - len(items),
         "total_expected_profit": round(total_expected_profit, 0),
         "race_ev_pct": round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0,
         "items": items,

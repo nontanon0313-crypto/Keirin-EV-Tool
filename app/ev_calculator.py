@@ -113,7 +113,24 @@ def combination_prob(
         return total
 
 
-def build_line_map(lines_data) -> Dict[int, int]:
+def judge_purchase_result(bet_type: str, combination: str, actual_top3: list) -> bool:
+    """
+    実際の上位3着(例: [2,5,1] = 1着2番,2着5番,3着1番)から、
+    ある購入(券種+買い目)が的中したかどうかを機械的に判定する。
+    """
+    cars = [int(x) for x in combination.split("-")]
+
+    if bet_type in ("3連単",):
+        return cars == actual_top3[:3]
+    if bet_type in ("3連複",):
+        return set(cars) == set(actual_top3[:3])
+    if bet_type in ("2車単", "2枠単"):
+        return cars == actual_top3[:2]
+    if bet_type in ("2車複", "2枠複"):
+        return set(cars) == set(actual_top3[:2])
+    if bet_type == "ワイド":
+        return set(cars).issubset(set(actual_top3[:3])) and len(cars) == 2
+    return False
     """[[1,2],[3],[4,5,6]]形式のライン構成を、{車番: ライン番号}の辞書に変換する。"""
     if not lines_data:
         return {}

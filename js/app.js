@@ -11,6 +11,17 @@ document.getElementById("rebateCheckbox").addEventListener("change", (e) => {
   document.getElementById("rebatePctWrapper").style.display = e.target.checked ? "block" : "none";
 });
 
+document.getElementById("suggestMarginBtn").addEventListener("click", async () => {
+  try {
+    const res = await fetch(apiUrl("/purchases/suggested-margin"));
+    const data = await res.json();
+    document.getElementById("minEvInput").value = data.suggested_margin_pct;
+    alert(data.reason);
+  } catch (e) {
+    alert("エラー: " + e.message);
+  }
+});
+
 function getRebatePct() {
   const checked = document.getElementById("rebateCheckbox").checked;
   if (!checked) return 0;
@@ -261,7 +272,8 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    let html = `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>期待値%</th><th>推奨額</th><th>判定</th><th>自己影響</th></tr>`;
+    let html = `<p class="note">期待値マイナス・見送り対象(${data.hidden_negative_count}件)は非表示にしています。期待値0%が収支トントン(回収率100%相当)の基準です。</p>`;
+    html += `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>期待値%</th><th>推奨額</th><th>判定</th><th>自己影響</th></tr>`;
     for (const r of data.results) {
       const cls = r.is_skip ? "ev-skip" : (r.is_recommended ? "ev-positive" : "");
       const judge = r.is_skip ? "見送り" : (r.is_recommended ? "🟢買い" : "△");
@@ -310,7 +322,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
       return;
     }
 
-    let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円${data.was_scaled_down ? "・上限に合わせて按分済み" : ""})</p>`;
+    let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円)${data.excluded_by_budget_count > 0 ? `<br>予算の都合で${data.excluded_by_budget_count}件は見送りました(期待値が低い順に除外)` : ""}</p>`;
     html += `<p>レース全体の期待値: ${data.race_ev_pct}%(期待利益 約${data.total_expected_profit}円)</p>`;
     html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>期待値%</th><th>投票額</th><th>自己影響</th></tr>`;
     for (const it of data.items) {
@@ -443,42 +455,53 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
       return;
     }
 
-    box.innerHTML = "";
+    // レースごとにグループ化
+    const byRace = {};
     for (const p of data) {
-      const row = document.createElement("div");
-      row.style.borderBottom = "1px solid #334155";
-      row.style.padding = "8px 0";
-      row.innerHTML = `
-        <p>ID:${p.id} ${p.bet_type} ${p.combination} / 購入額${p.stake_amount}円 / 購入時オッズ${p.odds_at_purchase ?? "-"}</p>
-        <input type="number" placeholder="最終オッズ(任意)" id="finalOdds_${p.id}" style="width:48%;display:inline-block;">
-        <input type="number" placeholder="払戻額(円、外れなら0)" id="payout_${p.id}" style="width:48%;display:inline-block;">
-        <button data-id="${p.id}" data-result="win" class="resultBtn" style="background:#22c55e;width:48%;display:inline-block;">的中</button>
-        <button data-id="${p.id}" data-result="lose" class="resultBtn" style="background:#ef4444;width:48%;display:inline-block;">不的中</button>
-      `;
-      box.appendChild(row);
+      if (!byRace[p.race_id]) {
+        byRace[p.race_id] = { venue_name: p.venue_name, race_number: p.race_number, items: [] };
+      }
+      byRace[p.race_id].items.push(p);
     }
 
-    document.querySelectorAll(".resultBtn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.dataset.id;
-        const result = btn.dataset.result;
-        const payoutInput = document.getElementById(`payout_${id}`).value;
-        const finalOddsInput = document.getElementById(`finalOdds_${id}`).value;
-        const payout = result === "win" ? (parseFloat(payoutInput) || 0) : 0;
-        const finalOdds = finalOddsInput === "" ? null : parseFloat(finalOddsInput);
+    box.innerHTML = "";
+    for (const [raceId, group] of Object.entries(byRace)) {
+      const div = document.createElement("div");
+      div.style.borderBottom = "1px solid #334155";
+      div.style.padding = "10px 0";
+      let itemsHtml = group.items.map(p => `${p.bet_type} ${p.combination}(${p.stake_amount}円)`).join(" / ");
+      div.innerHTML = `
+        <p><strong>${group.venue_name} ${group.race_number}R</strong><br>未確定: ${itemsHtml}</p>
+        <label>実際の着順(例: 2-5-1 = 1着2番,2着5番,3着1番)</label>
+        <input type="text" placeholder="2-5-1" id="result_${raceId}">
+        <button data-race="${raceId}" class="confirmResultBtn">この着順で一括確定する</button>
+        <div id="confirmMsg_${raceId}" class="result-box"></div>
+      `;
+      box.appendChild(div);
+    }
 
+    document.querySelectorAll(".confirmResultBtn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const raceId = btn.dataset.race;
+        const actualResult = document.getElementById(`result_${raceId}`).value.trim();
+        const msgBox = document.getElementById(`confirmMsg_${raceId}`);
+        if (!actualResult) {
+          alert("着順を入力してください(例: 2-5-1)");
+          return;
+        }
+        msgBox.textContent = "確定中...";
         try {
-          const res = await fetch(apiUrl(`/purchases/${id}/result`), {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ result, payout_amount: payout, final_odds: finalOdds }),
-          });
-          if (!res.ok) throw new Error(await res.text());
-          alert("記録しました");
+          const res = await fetch(
+            apiUrl(`/races/${raceId}/confirm-result?actual_result=${encodeURIComponent(actualResult)}`),
+            { method: "POST" }
+          );
+          const result = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(result));
+          const winCount = result.updated.filter(u => u.result === "win").length;
+          msgBox.textContent = `${result.updated_count}件を確定しました(的中${winCount}件)。払戻額は最終オッズが未入力の場合、購入時オッズで概算しています。`;
           await refreshBankrollDisplay();
-          document.getElementById("loadPendingBtn").click();
         } catch (e) {
-          alert("エラー: " + e.message);
+          msgBox.textContent = "エラー: " + e.message;
         }
       });
     });
@@ -542,7 +565,27 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       resultBox.textContent = data.message;
       return;
     }
-    let html = `<p><strong>総合期待値: ${data.overall_expectancy_pct}%</strong>(総ベット数: ${data.total_bets}件)</p>`;
+    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(100%が損益分岐点。総ベット数: ${data.total_bets}件)</p>`;
+    html += `<p class="note">${data.note}</p>`;
+
+    if (data.best_conditions_ranking && data.best_conditions_ranking.length) {
+      html += `<p style="margin-top:12px;"><strong>🏆 好調な条件(期待値実績が高い順)</strong></p>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待値実績</th></tr>`;
+      for (const r of data.best_conditions_ranking) {
+        html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expectancy_pct}%</td></tr>`;
+      }
+      html += `</table>`;
+    }
+    if (data.worst_conditions_ranking && data.worst_conditions_ranking.length) {
+      html += `<p style="margin-top:12px;"><strong>⚠️ 不調な条件(見直しの手がかり)</strong></p>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待値実績</th></tr>`;
+      for (const r of data.worst_conditions_ranking) {
+        html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expectancy_pct}%</td></tr>`;
+      }
+      html += `</table>`;
+    }
+
+    html += `<p style="margin-top:14px;"><strong>詳細(切り口別の全内訳)</strong></p>`;
     html += renderBucketTable("券種別", data.by_bet_type);
     html += renderBucketTable("勝率帯別", data.by_win_prob_bucket);
     html += renderBucketTable("バンク別", data.by_bank);
@@ -550,6 +593,7 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     html += renderBucketTable("バンク先行有利度別", data.by_bank_lead_advantage);
     html += renderBucketTable("レースステージ別", data.by_race_stage);
     html += renderBucketTable("季節別", data.by_season);
+    html += renderBucketTable("グレード別", data.by_grade);
     if (data.odds_drift && !data.odds_drift.message) {
       html += `<p style="margin-top:10px;"><strong>オッズ変動の影響</strong></p>`;
       html += `<p>サンプル数: ${data.odds_drift.sample_count}件 / 平均乖離: ${data.odds_drift.avg_odds_drift_pct}% / 不利方向の割合: ${data.odds_drift.worsened_ratio_pct}%</p>`;

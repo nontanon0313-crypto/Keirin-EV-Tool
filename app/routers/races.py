@@ -7,6 +7,62 @@ from .. import models
 router = APIRouter(prefix="/races", tags=["races"])
 
 
+@router.post("/{race_id}/confirm-result")
+def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(get_db)):
+    """
+    レースの実際の着順を1回入力するだけで、そのレースに紐づく全ての未確定購入を
+    自動で的中/不的中判定し、証拠金にも反映する。
+    actual_result: 例 "2-5-1" (1着2番、2着5番、3着1番)
+    """
+    from .. import ev_calculator as calc
+    from . import bankroll as bankroll_router
+
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+
+    try:
+        actual_top3 = [int(x) for x in actual_result.split("-")]
+    except ValueError:
+        raise HTTPException(400, "着順の形式が正しくありません(例: 2-5-1)")
+
+    race.actual_result = actual_result
+    db.commit()
+
+    pending = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.race_id == race_id, models.Purchase.result == "pending")
+        .all()
+    )
+
+    updated = []
+    for p in pending:
+        is_win = calc.judge_purchase_result(p.bet_type, p.combination, actual_top3)
+        settlement_odds = p.final_odds if p.final_odds is not None else p.odds_at_purchase
+        payout = round(p.stake_amount * settlement_odds) if (is_win and settlement_odds) else 0
+
+        p.result = "win" if is_win else "lose"
+        p.payout_amount = payout
+        db.commit()
+        bankroll_router.adjust_balance(db, payout)
+
+        updated.append({
+            "purchase_id": p.id,
+            "bet_type": p.bet_type,
+            "combination": p.combination,
+            "result": p.result,
+            "payout_amount": payout,
+            "payout_is_estimated": p.final_odds is None,
+        })
+
+    return {
+        "race_id": race_id,
+        "actual_result": actual_result,
+        "updated_count": len(updated),
+        "updated": updated,
+    }
+
+
 @router.get("/")
 def list_races(db: Session = Depends(get_db)):
     races = db.query(models.Race).order_by(models.Race.id.desc()).limit(50).all()

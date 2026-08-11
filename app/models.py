@@ -30,6 +30,7 @@ class Race(Base):
     race_number = Column(Integer, nullable=False)  # 例: 4 (4R)
     grade = Column(String(10), nullable=True)  # GI/GII/GIII/F1/F2等
     race_stage = Column(String(30), nullable=True)  # 初日特選/予選/準決勝/決勝等(同一グレード内のステージ差)
+    actual_result = Column(String(30), nullable=True)  # 実際の着順(例: "2-5-1" = 1着2番,2着5番,3着1番)
     event_title = Column(String(200), nullable=True)
     lines_data = Column(JSON, nullable=True)  # ライン構成 例: [[1,2],[3],[4,5,6],[7]] (各配列が1ライン、並び順=先行→番手→3番手)
     development_simulation = Column(Text, nullable=True)  # AIによる展開予想(誰が先行/番手/追込か、展開のポイント等)
