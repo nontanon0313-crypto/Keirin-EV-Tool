@@ -184,9 +184,16 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
         file_infos.append((f.filename, content, mime))
 
     # 複数枚のGemini解析を並列実行(1枚ずつの逐次待ちをなくす)。
-    # 1枚が失敗しても他の枚の処理は続けられるよう、例外は個別に受け取る。
+    # ただし無料枠のレート制限(30回/分)に一斉に引っかかると、まとめて20秒待ちが
+    # 発生し逆効果になるため、同時実行数に上限を設けて少しずつずらして送る。
+    semaphore = asyncio.Semaphore(8)
+
+    async def _parse_with_limit(content: bytes, mime: str):
+        async with semaphore:
+            return await asyncio.to_thread(parse_screenshot, content, mime)
+
     parsed_list = await asyncio.gather(
-        *[asyncio.to_thread(parse_screenshot, content, mime) for (_, content, mime) in file_infos],
+        *[_parse_with_limit(content, mime) for (_, content, mime) in file_infos],
         return_exceptions=True,
     )
 

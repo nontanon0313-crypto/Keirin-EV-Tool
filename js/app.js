@@ -313,6 +313,8 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         min_ev_pct: minEvPct,
         max_race_pct: parseFloat(document.getElementById("maxRacePctInput").value) / 100,
         rebate_pct: getRebatePct(),
+        max_items: parseInt(document.getElementById("maxItemsInput").value) || 20,
+        exclude_low_prob_warning: document.getElementById("excludeLowProbCheckbox").checked,
       }),
     });
     const data = await res.json();
@@ -323,7 +325,11 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
       return;
     }
 
-    let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円)${data.excluded_by_budget_count > 0 ? `<br>予算の都合で${data.excluded_by_budget_count}件は見送りました(期待値が低い順に除外)` : ""}</p>`;
+    let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円)`;
+    if (data.excluded_low_prob_count > 0) html += `<br>大穴帯(未補正)のため${data.excluded_low_prob_count}件を除外しました`;
+    if (data.excluded_by_max_items_count > 0) html += `<br>最大件数の都合で${data.excluded_by_max_items_count}件を除外しました(期待値が低い順)`;
+    if (data.excluded_by_budget_count > 0) html += `<br>予算の都合で${data.excluded_by_budget_count}件は見送りました(期待値が低い順に除外)`;
+    html += `</p>`;
     html += `<p>レース全体の回収率: ${data.race_roi_pct}%(期待利益 約${data.total_expected_profit}円) / レース全体の的中率: 約${data.race_hit_prob_pct}%</p>`;
     html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th><th>自己影響</th></tr>`;
     for (const it of data.items) {
@@ -383,31 +389,32 @@ async function recordRacePlanAsPurchases() {
   if (!lastRacePlan || !lastRacePlan.items.length) return;
   if (!confirm(`${lastRacePlan.items.length}点をまとめて購入記録します。実際に投票操作をした後に押してください。よろしいですか？`)) return;
 
-  let successCount = 0;
-  const errors = [];
-  for (const it of lastRacePlan.items) {
-    if (!it.stake || it.stake <= 0) continue;
-    try {
-      const res = await fetch(apiUrl("/purchases/"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          race_id: lastRacePlan.raceId,
-          bet_type: it.bet_type,
-          combination: it.combination,
-          stake_amount: it.stake,
-          odds_at_purchase: it.odds_value,
-          ev_pct_at_purchase: it.ev_pct,
-        }),
-      });
-      if (res.ok) successCount++;
-      else errors.push(it.combination);
-    } catch (e) {
-      errors.push(it.combination);
-    }
+  const items = lastRacePlan.items
+    .filter((it) => it.stake && it.stake > 0)
+    .map((it) => ({
+      race_id: lastRacePlan.raceId,
+      bet_type: it.bet_type,
+      combination: it.combination,
+      stake_amount: it.stake,
+      odds_at_purchase: it.odds_value,
+      ev_pct_at_purchase: it.ev_pct,
+    }));
+
+  try {
+    // 以前は1件ずつ/purchases/を呼んでいたため、件数が多いと時間がかかり、画面遷移で
+    // 途中のFetchが切れる不具合があった。1回のリクエストでまとめて記録する。
+    const res = await fetch(apiUrl("/purchases/bulk"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    alert(`${data.created_count}件を記録しました。`);
+    await refreshBankrollDisplay();
+  } catch (e) {
+    alert("記録に失敗しました: " + e.message);
   }
-  alert(`${successCount}件を記録しました。${errors.length ? "失敗: " + errors.join(", ") : ""}`);
-  await refreshBankrollDisplay();
 }
 
 // ---------- ③ 購入記録 ----------

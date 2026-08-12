@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from typing import Optional
 
 from ..database import get_db
@@ -19,6 +19,29 @@ def create_purchase(purchase: schemas.PurchaseCreate, db: Session = Depends(get_
     # 購入した分だけ証拠金残高を減算する
     bankroll_router.adjust_balance(db, -purchase.stake_amount)
     return obj
+
+
+@router.post("/bulk")
+def create_purchases_bulk(payload: schemas.PurchaseBulkCreate, db: Session = Depends(get_db)):
+    """
+    証拠金プランの結果などをまとめて購入記録する。
+    以前はフロント側で1件ずつ/purchases/を呼んでいたため、件数が多いと
+    (通信+DB commitが件数分×2回発生し)極端に時間がかかり、画面遷移で
+    途中のFetchが切れる不具合もあった。1回のリクエスト・1回のcommitで済ませる。
+    """
+    if not payload.items:
+        return {"created_count": 0, "purchase_ids": []}
+
+    objs = [models.Purchase(**item.model_dump()) for item in payload.items]
+    db.add_all(objs)
+    db.commit()
+    for obj in objs:
+        db.refresh(obj)
+
+    total_stake = sum(item.stake_amount for item in payload.items)
+    bankroll_router.adjust_balance(db, -total_stake)
+
+    return {"created_count": len(objs), "purchase_ids": [o.id for o in objs]}
 
 
 @router.put("/{purchase_id}/result")
@@ -197,9 +220,13 @@ def list_pending_purchases(db: Session = Depends(get_db)):
         .order_by(models.Purchase.purchased_at.desc())
         .all()
     )
+    race_ids = {p.race_id for p in purchases}
+    races_by_id = {
+        r.id: r for r in db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()
+    } if race_ids else {}
     result = []
     for p in purchases:
-        race = db.query(models.Race).get(p.race_id)
+        race = races_by_id.get(p.race_id)
         result.append({
             "id": p.id,
             "race_id": p.race_id,
@@ -235,6 +262,22 @@ def purchase_stats(db: Session = Depends(get_db)):
     total_payout = sum(p.payout_amount for p in purchases)
     overall_expectancy_pct = ((total_payout - total_stake) / total_stake * 100) if total_stake else 0
 
+    # 以前は切り口(バンク別・季節別...)ごとに、購入1件ごとDBへ都度Race/Entryを問い合わせて
+    # いたため、購入件数が増えるほど(切り口数×購入件数のクエリが飛ぶため)極端に遅くなっていた。
+    # ここで対象レースのRace/Entryを1回だけ一括取得してキャッシュし、以降は辞書参照にする。
+    race_ids = {p.race_id for p in purchases}
+    races_by_id = {
+        r.id: r
+        for r in db.query(models.Race)
+        .options(joinedload(models.Race.bank))
+        .filter(models.Race.id.in_(race_ids))
+        .all()
+    }
+    entries_by_race_id = {}
+    if race_ids:
+        for e in db.query(models.Entry).filter(models.Entry.race_id.in_(race_ids)).all():
+            entries_by_race_id.setdefault(e.race_id, []).append(e)
+
     def bucket_stats(key_fn):
         buckets = {}
         for p in purchases:
@@ -264,7 +307,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         return name
 
     def line_bucket(p):
-        race = db.query(models.Race).get(p.race_id)
+        race = races_by_id.get(p.race_id)
         if not race or not race.lines_data:
             return "ライン情報なし"
         line_map = {}
@@ -281,7 +324,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         return "同ライン絡み" if len(set(line_ids)) == 1 else "異なるライン混在"
 
     def bank_lead_bucket(p):
-        race = db.query(models.Race).get(p.race_id)
+        race = races_by_id.get(p.race_id)
         if not race or not race.bank or race.bank.lead_advantage_score is None:
             return "バンク情報なし"
         score = race.bank.lead_advantage_score
@@ -293,19 +336,19 @@ def purchase_stats(db: Session = Depends(get_db)):
             return "差し有利バンク(直線長め)"
 
     def race_stage_bucket(p):
-        race = db.query(models.Race).get(p.race_id)
+        race = races_by_id.get(p.race_id)
         if not race or not race.race_stage:
             return "不明"
         return race.race_stage
 
     def season_bucket(p):
-        race = db.query(models.Race).get(p.race_id)
+        race = races_by_id.get(p.race_id)
         if not race or not race.season:
             return "不明"
         return race.season
 
     def grade_bucket(p):
-        race = db.query(models.Race).get(p.race_id)
+        race = races_by_id.get(p.race_id)
         if not race or not race.grade:
             return "不明"
         return race.grade
@@ -313,7 +356,7 @@ def purchase_stats(db: Session = Depends(get_db)):
     def bank_bucket(p):
         # 旧実装はp.tags["bank"]を参照していたが、tagsはどこからも書き込まれておらず
         # 常に「不明」になっていた不具合があったため、race.venue_nameから直接取得するよう修正。
-        race = db.query(models.Race).get(p.race_id)
+        race = races_by_id.get(p.race_id)
         if not race or not race.venue_name:
             return "不明"
         return race.venue_name
@@ -336,11 +379,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         cars = _combination_cars(p)
         if not cars:
             return "得点情報なし"
-        entries = (
-            db.query(models.Entry)
-            .filter(models.Entry.race_id == p.race_id, models.Entry.car_number.in_(cars))
-            .all()
-        )
+        entries = [e for e in entries_by_race_id.get(p.race_id, []) if e.car_number in cars]
         scores = [e.race_score for e in entries if e.race_score is not None]
         if not scores:
             return "得点情報なし"
@@ -354,11 +393,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         cars = _combination_cars(p)
         if not cars:
             return "脚質情報なし"
-        entries = (
-            db.query(models.Entry)
-            .filter(models.Entry.race_id == p.race_id, models.Entry.car_number.in_(cars))
-            .all()
-        )
+        entries = [e for e in entries_by_race_id.get(p.race_id, []) if e.car_number in cars]
         styles = [e.leg_style for e in entries if e.leg_style]
         if not styles:
             return "脚質情報なし"

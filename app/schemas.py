@@ -30,6 +30,10 @@ class PurchaseCreate(BaseModel):
     tags: Optional[dict] = None
 
 
+class PurchaseBulkCreate(BaseModel):
+    items: List[PurchaseCreate]
+
+
 class PurchaseResultUpdate(BaseModel):
     result: str  # win / lose
     payout_amount: float = 0
@@ -65,6 +69,8 @@ class RacePlanRequest(BaseModel):
     min_win_prob: float = 0.05
     min_ev_pct: float = 5.0
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
+    max_items: int = 20  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
+    exclude_low_prob_warning: bool = True  # 大穴帯(0-5%・実績未検証)の買い目を自動プランから除外するか
 
 
 class BankrollSet(BaseModel):

@@ -61,6 +61,14 @@
     <label>1レースあたりの上限比率(%、証拠金に対して。資金に余裕が出たら10%程度に絞る運用を推奨)</label>
     <input type="number" id="maxRacePctInput" value="100" step="1">
 
+    <label>自動投票プランの最大件数(投票アプリへの手入力にかかる時間の目安。多すぎると締切に間に合わない)</label>
+    <input type="number" id="maxItemsInput" value="20" step="1">
+
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
+      <input type="checkbox" id="excludeLowProbCheckbox" checked style="width:auto;margin:0;">
+      自動投票プランから大穴帯(推定勝率0-5%・実績未検証)を除外する(推奨)
+    </label>
+
     <button id="calcEvBtn">期待値を計算(一覧)</button>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>

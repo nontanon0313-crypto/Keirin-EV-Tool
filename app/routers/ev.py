@@ -303,6 +303,20 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "low_prob_warning": low_prob_warning,
         })
 
+    excluded_low_prob_count = 0
+    if req.exclude_low_prob_warning:
+        before_count = len(candidates)
+        candidates = [c for c in candidates if not c["low_prob_warning"]]
+        excluded_low_prob_count = before_count - len(candidates)
+
+    # 投票アプリへの手入力で現実的に処理できる件数に絞る(期待値が高い順)。
+    # ここで絞ってから予算配分するため、以降の「予算の都合で見送り」件数はこの絞り込み後の件数が基準になる。
+    excluded_by_max_items_count = 0
+    if req.max_items and len(candidates) > req.max_items:
+        candidates.sort(key=lambda x: -x["ev_pct"])
+        excluded_by_max_items_count = len(candidates) - req.max_items
+        candidates = candidates[: req.max_items]
+
     if not candidates:
         return {
             "race_id": race_id,
@@ -360,12 +374,15 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "total_stake": round(total_stake, 0),
         "race_budget_cap": round(race_cap, 0),
         "excluded_by_budget_count": len(candidates) - len(items),
+        "excluded_by_max_items_count": excluded_by_max_items_count,
+        "excluded_low_prob_count": excluded_low_prob_count,
         "total_expected_profit": round(total_expected_profit, 0),
         "race_ev_pct": race_ev_pct,
         "race_roi_pct": round(race_ev_pct + 100, 2),
         # 排反前提(このレースで買い目のどれか1つでも当たる確率)の簡易合算。券種が同じ的中を
         # 複数拾っている場合など厳密には排反でないケースもあるが、race_ev_pct算出と同じ
-        # 簡易モデルに合わせている。
+        # 簡易モデルに合わせている。低確率帯(未補正)を除外している場合、この的中率も
+        # 除外後の集合のみで計算しているため、除外前より低く出るのが正常。
         "race_hit_prob_pct": round(min(total_hit_prob, 1.0) * 100, 2),
         "items": items,
     }

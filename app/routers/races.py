@@ -35,7 +35,11 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         .all()
     )
 
+    # 以前はここで購入1件ごとにdb.commit()+adjust_balance(内部でも1回commit)していたため、
+    # 未確定件数が多いレースほど極端に時間がかかっていた。ここでは全件の更新を1回のcommitに
+    # まとめ、証拠金の増減も合計してまとめて1回だけ反映する。
     updated = []
+    total_payout_delta = 0.0
     for p in pending:
         is_win = calc.judge_purchase_result(p.bet_type, p.combination, actual_top3)
         settlement_odds = p.final_odds if p.final_odds is not None else p.odds_at_purchase
@@ -43,8 +47,7 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
 
         p.result = "win" if is_win else "lose"
         p.payout_amount = payout
-        db.commit()
-        bankroll_router.adjust_balance(db, payout)
+        total_payout_delta += payout
 
         updated.append({
             "purchase_id": p.id,
@@ -54,6 +57,10 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
             "payout_amount": payout,
             "payout_is_estimated": p.final_odds is None,
         })
+
+    db.commit()
+    if total_payout_delta:
+        bankroll_router.adjust_balance(db, total_payout_delta)
 
     return {
         "race_id": race_id,
