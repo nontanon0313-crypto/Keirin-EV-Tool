@@ -32,17 +32,23 @@ def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict =
     return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost)
 
 
-def _apply_calibration(est_prob: float, calibration_factors: dict) -> float:
+def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
     """
     購入実績に基づく自動補正係数を適用する。
     該当する勝率帯の試行数が十分(200÷帯の代表確率)でなければ、補正せずそのまま返す。
+    戻り値: (補正後確率, その勝率帯の低確率帯かつ未補正=推定誤差に注意すべきか)
     """
     bucket_name, _ = calc.get_prob_bucket(est_prob)
     info = calibration_factors.get(bucket_name)
-    if not info or not info["is_reliable"]:
-        return est_prob
+    is_reliable = bool(info and info["is_reliable"])
+    # オッズが跳ねる低確率帯(0-5%=大穴)は、確率推定のわずかな誤差がEVの計算上
+    # 大きく増幅されるため、実績による補正が効いていない間は特に注意が必要(のんとの
+    # 相談により追加)。
+    low_prob_warning = (bucket_name == "0-5%(大穴)") and not is_reliable
+    if not info or not is_reliable:
+        return est_prob, low_prob_warning
     calibrated = est_prob * info["calibration_factor"]
-    return max(0.0, min(1.0, calibrated))
+    return max(0.0, min(1.0, calibrated)), low_prob_warning
 
 
 @router.post("/calculate/{race_id}")
@@ -89,10 +95,12 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     calibration_factors = purchases_router.get_calibration_factors(db)
 
     created = []
+    low_prob_warnings = {}
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob = _apply_calibration(est_prob, calibration_factors)
+        est_prob, low_prob_warning = _apply_calibration(est_prob, calibration_factors)
+        low_prob_warnings[(o.bet_type, o.combination)] = low_prob_warning
 
         market_prob = normalized_market.get(o.bet_type, {}).get(
             o.combination, calc.market_prob_from_odds(o.odds_value, o.bet_type)
@@ -161,6 +169,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             "is_recommended": r.is_recommended,
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
+            "low_prob_warning": low_prob_warnings.get((r.bet_type, r.combination), False),
         })
 
     return {
@@ -215,7 +224,7 @@ def threshold_table(
         )
         for combo in combos:
             est_prob = _estimate_prob(win_probs, bet_type, combo)
-            est_prob = _apply_calibration(est_prob, calibration_factors)
+            est_prob, low_prob_warning = _apply_calibration(est_prob, calibration_factors)
             is_skip, _ = calc.apply_min_prob_filter(est_prob, 100, min_win_prob)  # 勝率フィルターのみ判定
             if is_skip or est_prob <= 0:
                 continue
@@ -225,6 +234,7 @@ def threshold_table(
                 "combination": "-".join(str(c) for c in combo),
                 "estimated_win_prob_pct": round(est_prob * 100, 2),
                 "threshold_odds": round(threshold_odds, 2),
+                "low_prob_warning": low_prob_warning,
             })
 
     results.sort(key=lambda r: r["threshold_odds"])
@@ -271,7 +281,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob = _apply_calibration(est_prob, calibration_factors)
+        est_prob, low_prob_warning = _apply_calibration(est_prob, calibration_factors)
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
@@ -290,6 +300,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "raw_stake": raw_stake,
             "win_prob": est_prob,
             "total_vote_amount": o.total_vote_amount,
+            "low_prob_warning": low_prob_warning,
         })
 
     if not candidates:
@@ -338,6 +349,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "stake": stake,
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
+            "low_prob_warning": c["low_prob_warning"],
         })
 
     race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0
