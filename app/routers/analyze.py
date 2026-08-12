@@ -202,10 +202,15 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
         entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
         if not entries:
             continue
+        # 注意: app_win_rate(アプリ側勝率)はここに意図的に含めない。
+        # AI推定はアプリ勝率を見ずに独立した意見を出し、後段でtipstar実績とAI実績の
+        # 信頼度(source_weights)に応じて重み付け合成する。ここに含めると合成時に
+        # アプリ勝率の影響を二重に効かせてしまうため(のんとの設計相談により決定)。
         entries_payload = [
             {
                 "car_number": e.car_number,
                 "player_name": e.player_name,
+                "region": e.region,
                 "race_score": e.race_score,
                 "leg_style": e.leg_style,
                 "s_count": e.s_count,
@@ -219,12 +224,16 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                 "finish_2nd": e.finish_2nd,
                 "finish_3rd": e.finish_3rd,
                 "line_group": e.line_group,
-                "app_win_rate": e.app_win_rate,
                 "is_local": e.is_local,
                 "pre_race_comment": e.pre_race_comment,
             }
             for e in entries
         ]
+        weather_info = {
+            "weather": race.weather,
+            "temperature_c": race.temperature_c,
+            "season": race.season,
+        }
         try:
             bank = race.bank
             bank_info = None
@@ -240,6 +249,7 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                 development = simulate_race_development(
                     entries_payload, lines=race.lines_data, bank_info=bank_info,
                     race_stage=race.race_stage, grade=race.grade,
+                    weather_info=weather_info,
                 )
                 race.development_simulation = development
                 db.commit()
@@ -251,6 +261,7 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                 entries_payload, lines=race.lines_data, bank_info=bank_info,
                 race_stage=race.race_stage, grade=race.grade,
                 development_simulation=development,
+                weather_info=weather_info,
             )
         except Exception:
             ai_probs = {}

@@ -310,15 +310,74 @@ def purchase_stats(db: Session = Depends(get_db)):
             return "不明"
         return race.grade
 
+    def bank_bucket(p):
+        # 旧実装はp.tags["bank"]を参照していたが、tagsはどこからも書き込まれておらず
+        # 常に「不明」になっていた不具合があったため、race.venue_nameから直接取得するよう修正。
+        race = db.query(models.Race).get(p.race_id)
+        if not race or not race.venue_name:
+            return "不明"
+        return race.venue_name
+
+    def _combination_cars(p):
+        try:
+            return [int(x) for x in p.combination.split("-")]
+        except (ValueError, AttributeError):
+            return []
+
+    # 競走得点帯の区切り(A級〜S級上位までを想定した目安の帯。データが増えたら見直す)
+    RACE_SCORE_BUCKETS = [
+        (0, 55, "55未満"),
+        (55, 65, "55-65"),
+        (65, 75, "65-75"),
+        (75, 10 ** 6, "75以上"),
+    ]
+
+    def race_score_bucket(p):
+        cars = _combination_cars(p)
+        if not cars:
+            return "得点情報なし"
+        entries = (
+            db.query(models.Entry)
+            .filter(models.Entry.race_id == p.race_id, models.Entry.car_number.in_(cars))
+            .all()
+        )
+        scores = [e.race_score for e in entries if e.race_score is not None]
+        if not scores:
+            return "得点情報なし"
+        avg_score = sum(scores) / len(scores)
+        for lo, hi, name in RACE_SCORE_BUCKETS:
+            if lo <= avg_score < hi:
+                return f"買い目内平均得点:{name}"
+        return "買い目内平均得点:75以上"
+
+    def leg_style_bucket(p):
+        cars = _combination_cars(p)
+        if not cars:
+            return "脚質情報なし"
+        entries = (
+            db.query(models.Entry)
+            .filter(models.Entry.race_id == p.race_id, models.Entry.car_number.in_(cars))
+            .all()
+        )
+        styles = [e.leg_style for e in entries if e.leg_style]
+        if not styles:
+            return "脚質情報なし"
+        unique_styles = set(styles)
+        if len(unique_styles) == 1:
+            return f"買い目内脚質:{unique_styles.pop()}のみ"
+        return "買い目内脚質:混在(" + "・".join(sorted(unique_styles)) + ")"
+
     all_buckets = {
         "券種別": bucket_stats(lambda p: p.bet_type),
         "勝率帯別": bucket_stats(prob_bucket),
-        "バンク別": bucket_stats(lambda p: (p.tags or {}).get("bank", "不明")),
+        "バンク別": bucket_stats(bank_bucket),
         "ライン絡み別": bucket_stats(line_bucket),
         "バンク先行有利度別": bucket_stats(bank_lead_bucket),
         "レースステージ別": bucket_stats(race_stage_bucket),
         "季節別": bucket_stats(season_bucket),
         "グレード別": bucket_stats(grade_bucket),
+        "買い目内平均競走得点別": bucket_stats(race_score_bucket),
+        "買い目内脚質構成別": bucket_stats(leg_style_bucket),
     }
 
     # 全ての切り口を横断し、サンプル数が一定以上(ノイズ除け)で期待値実績が高い条件をランキング化する。
@@ -351,6 +410,8 @@ def purchase_stats(db: Session = Depends(get_db)):
         "by_race_stage": all_buckets["レースステージ別"],
         "by_season": all_buckets["季節別"],
         "by_grade": all_buckets["グレード別"],
+        "by_race_score": all_buckets["買い目内平均競走得点別"],
+        "by_leg_style": all_buckets["買い目内脚質構成別"],
         "odds_drift": _odds_drift_stats(purchases),
         "note": (
             "expectancy_pctは0%が損益分岐点(roi_pctは100%が損益分岐点、同じ実績を別表現にしたもの)。"

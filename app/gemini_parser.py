@@ -157,9 +157,35 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
         return json.loads(cleaned)
 
 
+def _build_weather_text(weather_info: dict = None) -> str:
+    """天候・気温・季節の情報を、戦術傾向の解説付きでプロンプト用テキストに変換する。"""
+    if not weather_info:
+        return ""
+    weather = weather_info.get("weather")
+    temperature_c = weather_info.get("temperature_c")
+    season = weather_info.get("season")
+    if not (weather or temperature_c is not None or season):
+        return ""
+    parts = []
+    if weather:
+        parts.append(f"天候:{weather}")
+    if temperature_c is not None:
+        parts.append(f"気温:{temperature_c}℃")
+    if season:
+        parts.append(f"季節:{season}")
+    return (
+        f"開催時の条件: {' / '.join(parts)}。\n"
+        "(雨天・強風時は視界不良や風の抵抗により、後方から差す展開より前で仕掛ける先行選手が"
+        "残りやすくなる傾向があります。逆に晴天・無風の好条件では、実力差がそのまま出やすく、"
+        "追い込み選手にもチャンスが生まれやすくなります。低温時は筋肉の動きが硬くなりやすく、"
+        "立ち上がりの鋭さが必要な捲り・差しにはやや不利、先行選手にはやや有利に働く傾向があります。"
+        "これらはあくまで一般的な傾向であり、他の要素と組み合わせた参考情報として扱ってください)\n"
+    )
+
+
 def simulate_race_development(
     entries: list, lines: list = None, bank_info: dict = None,
-    race_stage: str = None, grade: str = None,
+    race_stage: str = None, grade: str = None, weather_info: dict = None,
 ) -> str:
     """
     レース展開を予想する(1段階目)。
@@ -180,11 +206,12 @@ def simulate_race_development(
             f"先行有利度{bank_info.get('lead_advantage_score')}(0=差し有利〜1=先行絶対有利)\n"
         )
     stage_text = f"グレード:{grade or '不明'} / ステージ:{race_stage or '不明'}\n" if (race_stage or grade) else ""
+    weather_text = _build_weather_text(weather_info)
 
     prompt = f"""
 あなたは競輪の展開予想の専門家です。以下の情報から、このレースがどのように展開するかを予想してください。
 
-{lines_text}{bank_text}{stage_text}
+{lines_text}{bank_text}{stage_text}{weather_text}
 選手データ:
 {json.dumps(entries, ensure_ascii=False, indent=2)}
 
@@ -204,14 +231,22 @@ def simulate_race_development(
 def estimate_ai_win_probabilities(
     entries: list, lines: list = None, bank_info: dict = None,
     race_stage: str = None, grade: str = None, development_simulation: str = None,
+    weather_info: dict = None,
 ) -> dict:
     """
     選手データ一覧(競走得点・脚質・決まり手・着順分布・ライン構成等)をもとに、
     GeminiにAI独自の勝率推定をさせる。
+
+    重要: この関数に渡す entries には、意図的に app_win_rate(アプリ側の勝率)を含めない運用にしている。
+    AI推定はアプリ勝率とは独立した「もう一つの意見」として扱い、後段(analyze.py)で
+    実績ベースの信頼度に応じて両者を重み付け合成する。もしAI推定の入力にアプリ勝率が
+    混ざっていると、合成時にアプリ勝率の影響を二重に効かせてしまい、重み付けの前提が崩れるため。
+
     lines: [[1,2],[3],[4,5,6],[7]]形式のライン構成(分かれば)。
     bank_info: {"lap_length_m":..,"home_stretch_length_m":..,"lead_advantage_score":..}形式のバンク特性(分かれば)。
     race_stage: 予選/準決勝/決勝等のステージ(分かれば)。grade: GI/GII等(分かれば)。
     development_simulation: simulate_race_developmentで生成した展開予想の文章(分かれば)。
+    weather_info: {"weather":..,"temperature_c":..,"season":..}形式の開催時条件(分かれば)。
     戻り値: {car_number: win_prob(0-1)} で、合計が1になるよう正規化されたもの。
     """
     if not GEMINI_API_KEY:
@@ -257,15 +292,19 @@ def estimate_ai_win_probabilities(
         "つけないよう注意してください)\n"
         if development_simulation else ""
     )
+    weather_text = _build_weather_text(weather_info)
 
     prompt = f"""
 以下は競輪レースの出走選手データです。各選手が1着になる確率を推定してください。
 競走得点・脚質・S/H/B回数・決まり手の傾向・着順分布を総合的に考慮してください。
 "pre_race_comment"に前検コメント等があれば、調子や仕上がり具合の参考情報として考慮してください。
-{lines_text}{bank_text}{stage_text}{development_text}"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
+"region"(地区)がある場合、開催地との近さ(隣接地区か等)も参考情報として考慮してください。
+{lines_text}{bank_text}{stage_text}{weather_text}{development_text}"is_local"がtrueの選手は、その開催地の地元選手であることを意味します。地元選手は声援を受けて
 好走しやすい傾向が一般に知られているため、他条件が拮抗している場合のプラス要因として考慮してください
 (ただし地元であること単体を過大評価せず、あくまで複数要素の一つとして扱ってください)。
 単一の要素(例:得点だけ)で機械的に決めず、複数の要素を組み合わせて判断してください。
+なお、このデータにはアプリ側の勝率(tipstar等の予想値)は意図的に含めていません。
+あなた自身の判断だけによる、独立した推定を行ってください。
 
 出力は次のJSON形式のみ。説明文は不要です。確率の合計は1.0になるようにしてください。
 {{"probabilities": {{"車番(文字列)": 確率(float 0-1), ...}}}}

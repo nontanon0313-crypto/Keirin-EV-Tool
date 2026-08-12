@@ -594,6 +594,8 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     html += renderBucketTable("レースステージ別", data.by_race_stage);
     html += renderBucketTable("季節別", data.by_season);
     html += renderBucketTable("グレード別", data.by_grade);
+    html += renderBucketTable("買い目内平均競走得点別", data.by_race_score);
+    html += renderBucketTable("買い目内脚質構成別", data.by_leg_style);
     if (data.odds_drift && !data.odds_drift.message) {
       html += `<p style="margin-top:10px;"><strong>オッズ変動の影響</strong></p>`;
       html += `<p>サンプル数: ${data.odds_drift.sample_count}件 / 平均乖離: ${data.odds_drift.avg_odds_drift_pct}% / 不利方向の割合: ${data.odds_drift.worsened_ratio_pct}%</p>`;
