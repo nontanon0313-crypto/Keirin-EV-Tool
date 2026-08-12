@@ -154,6 +154,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             "market_prob_pct": round(r.market_prob * 100, 2),
             "odds_value": r.odds_value,
             "ev_pct": round(r.ev_pct, 2),
+            "roi_pct": round(r.ev_pct + 100, 2),
             "recommended_stake": r.recommended_stake,
             "is_skip": r.is_skip,
             "skip_reason": r.skip_reason,
@@ -306,6 +307,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     items = []
     total_stake = 0.0
     total_expected_profit = 0.0
+    total_hit_prob = 0.0
     remaining_budget = race_cap
     for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
         stake = calc.round_to_bet_unit(c["raw_stake"])
@@ -319,6 +321,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         expected_profit = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         total_stake += stake
         total_expected_profit += expected_profit
+        total_hit_prob += c["win_prob"]
         remaining_budget -= stake
         total_vote = c["total_vote_amount"]
         if total_vote is not None and total_vote > 0:
@@ -331,10 +334,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "estimated_win_prob_pct": c["estimated_win_prob_pct"],
             "odds_value": c["odds_value"],
             "ev_pct": c["ev_pct"],
+            "roi_pct": round(c["ev_pct"] + 100, 2),
             "stake": stake,
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
         })
+
+    race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0
 
     return {
         "race_id": race_id,
@@ -343,7 +349,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "race_budget_cap": round(race_cap, 0),
         "excluded_by_budget_count": len(candidates) - len(items),
         "total_expected_profit": round(total_expected_profit, 0),
-        "race_ev_pct": round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0,
+        "race_ev_pct": race_ev_pct,
+        "race_roi_pct": round(race_ev_pct + 100, 2),
+        # 排反前提(このレースで買い目のどれか1つでも当たる確率)の簡易合算。券種が同じ的中を
+        # 複数拾っている場合など厳密には排反でないケースもあるが、race_ev_pct算出と同じ
+        # 簡易モデルに合わせている。
+        "race_hit_prob_pct": round(min(total_hit_prob, 1.0) * 100, 2),
         "items": items,
     }
 

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime
+import asyncio
 
 from ..database import get_db
 from .. import models
@@ -168,14 +169,34 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
     """
     複数枚のスクショ(出走表・成績・勝率・オッズを問わず)をまとめてアップロードし、
     Geminiで解析してDBに反映する。
+
+    Gemini解析(parse_screenshot)はネットワーク待ちが主体のため、従来は枚数分を
+    1枚ずつ順番に呼び出しており、枚数に比例して処理時間が伸びていた(投票締切に
+    間に合わないとの指摘あり)。ここを並列実行に変更し、時間を短縮する。
     """
     results = []
     affected_races = {}
 
+    file_infos = []
     for f in files:
         content = await f.read()
         mime = f.content_type or "image/png"
-        parsed = parse_screenshot(content, mime)
+        file_infos.append((f.filename, content, mime))
+
+    # 複数枚のGemini解析を並列実行(1枚ずつの逐次待ちをなくす)。
+    # 1枚が失敗しても他の枚の処理は続けられるよう、例外は個別に受け取る。
+    parsed_list = await asyncio.gather(
+        *[asyncio.to_thread(parse_screenshot, content, mime) for (_, content, mime) in file_infos],
+        return_exceptions=True,
+    )
+
+    error_count = 0
+    for (filename, _, _), parsed in zip(file_infos, parsed_list):
+        if isinstance(parsed, Exception):
+            error_count += 1
+            results.append({"filename": filename, "error": str(parsed)})
+            continue
+
         race = _get_or_create_race(db, parsed)
         affected_races[race.id] = race
 
@@ -188,7 +209,7 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
             db.commit()
 
         results.append({
-            "filename": f.filename,
+            "filename": filename,
             "screen_type": parsed.get("screen_type"),
             "race_id": race.id,
             "venue_name": race.venue_name,
@@ -285,4 +306,4 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                 e.blended_win_prob = app_p
         db.commit()
 
-    return {"processed_files": len(files), "results": results, "race_ids": list(affected_races.keys())}
+    return {"processed_files": len(files), "error_count": error_count, "results": results, "race_ids": list(affected_races.keys())}

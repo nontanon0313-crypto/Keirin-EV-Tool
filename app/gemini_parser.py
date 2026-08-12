@@ -145,7 +145,10 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
     response = _call_with_retry(
         model,
         [EXTRACTION_PROMPT, _image_to_part(image_bytes, mime_type)],
-        generation_config={"response_mime_type": "application/json", "max_output_tokens": 8192},
+        # 旧: max_output_tokens=8192。オッズが100件超になるとJSON出力がここで途切れて
+        # 不完全なJSONになり、フロント側で「Failed to fetch」的な失敗として現れていた。
+        # gemini-3.1-flash-liteは65536まで対応しているため、余裕を持って32768に拡大。
+        generation_config={"response_mime_type": "application/json", "max_output_tokens": 32768},
     )
 
     text = response.text.strip()

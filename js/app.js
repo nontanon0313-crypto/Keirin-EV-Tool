@@ -124,8 +124,8 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    resultBox.textContent = `解析完了: ${data.processed_files}枚処理\n` +
-      data.results.map(r => `- ${r.filename}: ${r.screen_type} (レースID:${r.race_id} 選手${r.entries_found}件 オッズ${r.odds_found}件)`).join("\n");
+    resultBox.textContent = `解析完了: ${data.processed_files}枚処理${data.error_count ? `(うち${data.error_count}枚は解析失敗)` : ""}\n` +
+      data.results.map(r => r.error ? `- ${r.filename}: ❌解析失敗(${r.error})` : `- ${r.filename}: ${r.screen_type} (レースID:${r.race_id} 選手${r.entries_found}件 オッズ${r.odds_found}件)`).join("\n");
     await loadRaces();
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
@@ -272,13 +272,13 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    let html = `<p class="note">期待値マイナス・見送り対象(${data.hidden_negative_count}件)は非表示にしています。期待値0%が収支トントン(回収率100%相当)の基準です。</p>`;
-    html += `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>期待値%</th><th>推奨額</th><th>判定</th><th>自己影響</th></tr>`;
+    let html = `<p class="note">期待値マイナス・見送り対象(${data.hidden_negative_count}件)は非表示にしています。回収率100%が収支トントンの基準です。</p>`;
+    html += `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>回収率%</th><th>推奨額</th><th>判定</th><th>自己影響</th></tr>`;
     for (const r of data.results) {
       const cls = r.is_skip ? "ev-skip" : (r.is_recommended ? "ev-positive" : "");
       const judge = r.is_skip ? "見送り" : (r.is_recommended ? "🟢買い" : "△");
       const impact = r.self_impact_pct === null ? "不明" : `${r.self_impact_pct}%${r.self_impact_warning ? "⚠️" : ""}`;
-      html += `<tr class="${cls}"><td>${r.bet_type}</td><td>${r.combination}</td><td>${r.estimated_win_prob_pct}%</td><td>${r.odds_value}</td><td>${r.ev_pct}%</td><td>${r.is_skip ? "-" : r.recommended_stake + "円"}</td><td>${judge}</td><td>${impact}</td></tr>`;
+      html += `<tr class="${cls}"><td>${r.bet_type}</td><td>${r.combination}</td><td>${r.estimated_win_prob_pct}%</td><td>${r.odds_value}</td><td>${r.roi_pct}%</td><td>${r.is_skip ? "-" : r.recommended_stake + "円"}</td><td>${judge}</td><td>${impact}</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
@@ -323,11 +323,11 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     }
 
     let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円)${data.excluded_by_budget_count > 0 ? `<br>予算の都合で${data.excluded_by_budget_count}件は見送りました(期待値が低い順に除外)` : ""}</p>`;
-    html += `<p>レース全体の期待値: ${data.race_ev_pct}%(期待利益 約${data.total_expected_profit}円)</p>`;
-    html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>期待値%</th><th>投票額</th><th>自己影響</th></tr>`;
+    html += `<p>レース全体の回収率: ${data.race_roi_pct}%(期待利益 約${data.total_expected_profit}円) / レース全体の的中率: 約${data.race_hit_prob_pct}%</p>`;
+    html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th><th>自己影響</th></tr>`;
     for (const it of data.items) {
       const impact = it.self_impact_pct === null ? "不明" : `${it.self_impact_pct}%${it.self_impact_warning ? "⚠️" : ""}`;
-      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.estimated_win_prob_pct}%</td><td>${it.odds_value}</td><td>${it.ev_pct}%</td><td>${it.stake}円</td><td>${impact}</td></tr>`;
+      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.estimated_win_prob_pct}%</td><td>${it.odds_value}</td><td>${it.roi_pct}%</td><td>${it.stake}円</td><td>${impact}</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
