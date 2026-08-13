@@ -116,6 +116,7 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
   for (const file of input.files) {
     formData.append("files", file);
   }
+  formData.append("is_final_odds", document.getElementById("isFinalOddsCheckbox").checked);
 
   try {
     const res = await fetch(apiUrl("/analyze/screenshots"), {
@@ -124,7 +125,7 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    resultBox.textContent = `解析完了: ${data.processed_files}枚処理${data.error_count ? `(うち${data.error_count}枚は解析失敗)` : ""}\n` +
+    resultBox.textContent = `解析完了: ${data.processed_files}枚処理${data.error_count ? `(うち${data.error_count}枚は解析失敗)` : ""}${data.final_odds_updated_count ? `\n最終オッズを${data.final_odds_updated_count}件の購入履歴に反映しました` : ""}\n` +
       data.results.map(r => r.error ? `- ${r.filename}: ❌解析失敗(${r.error})` : `- ${r.filename}: ${r.screen_type} (レースID:${r.race_id} 選手${r.entries_found}件 オッズ${r.odds_found}件)`).join("\n");
     await loadRaces();
   } catch (e) {
@@ -272,14 +273,16 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    let html = `<p class="note">期待値マイナス・見送り対象(${data.hidden_negative_count}件)は非表示にしています。回収率100%が収支トントンの基準です。<br>⚠️低確率帯(未補正)は、推定確率0-5%の「大穴」帯で、実績データがまだ十分でなく自動補正が効いていません。確率推定のわずかな誤差がオッズで大きく増幅されるため、高い回収率が出ていても過信は禁物です。</p>`;
+    let html = `<p class="note">期待値マイナス・見送り対象(${data.hidden_negative_count}件)は非表示にしています。回収率100%が収支トントンの基準です。<br>⚠️低確率帯(未補正)は、推定確率0-5%の「大穴」帯で、実績データがまだ十分でなく自動補正が効いていません。確率推定のわずかな誤差がオッズで大きく増幅されるため、高い回収率が出ていても過信は禁物です。<br><span class="stake-inflated">🔶最低100円への切り上げ幅が大きい買い目</span>は、理論上の最適額よりかなり多く賭けていることを意味します。</p>`;
     html += `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>回収率%</th><th>推奨額</th><th>判定</th><th>自己影響</th></tr>`;
     for (const r of data.results) {
       const cls = r.is_skip ? "ev-skip" : (r.is_recommended ? "ev-positive" : "");
       const judge = r.is_skip ? "見送り" : (r.is_recommended ? "🟢買い" : "△");
       const impact = r.self_impact_pct === null ? "不明" : `${r.self_impact_pct}%${r.self_impact_warning ? "⚠️" : ""}`;
       const probLabel = `${r.estimated_win_prob_pct}%${r.low_prob_warning ? " ⚠️低確率帯(未補正)" : ""}`;
-      html += `<tr class="${cls}"><td>${r.bet_type}</td><td>${r.combination}</td><td>${probLabel}</td><td>${r.odds_value}</td><td>${r.roi_pct}%</td><td>${r.is_skip ? "-" : r.recommended_stake + "円"}</td><td>${judge}</td><td>${impact}</td></tr>`;
+      const stakeCls = r.stake_inflated_warning ? "stake-inflated" : "";
+      const stakeLabel = r.is_skip ? "-" : `${r.recommended_stake}円${r.stake_inflated_warning ? "🔶" : ""}`;
+      html += `<tr class="${cls}"><td>${r.bet_type}</td><td>${r.combination}</td><td>${probLabel}</td><td>${r.odds_value}</td><td>${r.roi_pct}%</td><td class="${stakeCls}">${stakeLabel}</td><td>${judge}</td><td>${impact}</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
@@ -344,7 +347,9 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     for (const it of data.items) {
       const impact = it.self_impact_pct === null ? "不明" : `${it.self_impact_pct}%${it.self_impact_warning ? "⚠️" : ""}`;
       const probLabel = `${it.estimated_win_prob_pct}%${it.low_prob_warning ? " ⚠️低確率帯(未補正)" : ""}`;
-      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${probLabel}</td><td>${it.odds_value}</td><td>${it.roi_pct}%</td><td>${it.stake}円</td><td>${impact}</td></tr>`;
+      const stakeCls = it.stake_inflated_warning ? "stake-inflated" : "";
+      const stakeLabel = `${it.stake}円${it.stake_inflated_warning ? "🔶" : ""}`;
+      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${probLabel}</td><td>${it.odds_value}</td><td>${it.roi_pct}%</td><td class="${stakeCls}">${stakeLabel}</td><td>${impact}</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;

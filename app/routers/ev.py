@@ -151,6 +151,12 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             continue
         total_vote = odds_lookup.get((r.bet_type, r.combination))
         stake = r.recommended_stake or 0
+        # 100円単位への切り上げにより、ケリー計算の理論値(raw_stake)より
+        # 実際の賭け金がどれだけ膨らんでいるかを見る(のんの指摘により追加)。
+        # kelly_fraction列には上限キャップ後の比率(recommend_stakeのkelly_fraction_capped)が
+        # 保存されているため、bankrollを掛け戻せば丸め前の理論値を再現できる。
+        raw_stake = bankroll * r.kelly_fraction
+        stake_inflated_warning = stake > 0 and raw_stake > 0 and (stake / raw_stake) >= 2.0
         if total_vote is not None and total_vote > 0:
             self_impact_pct = round(stake / (total_vote + stake) * 100, 2)
         else:
@@ -170,6 +176,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
             "low_prob_warning": low_prob_warnings.get((r.bet_type, r.combination), False),
+            "stake_inflated_warning": stake_inflated_warning,
         })
 
     return {
@@ -410,6 +417,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
             "low_prob_warning": c["low_prob_warning"],
+            "stake_inflated_warning": c["raw_stake"] > 0 and (stake / c["raw_stake"]) >= 2.0,
         })
 
     race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0

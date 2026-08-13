@@ -291,6 +291,7 @@ def recommend_stake(
     return {
         "kelly_fraction_raw": f,
         "kelly_fraction_capped": capped_f,
+        "raw_stake": raw_stake,
         "recommended_stake": round_to_bet_unit(raw_stake),
     }
 

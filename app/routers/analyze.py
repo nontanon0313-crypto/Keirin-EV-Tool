@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime
@@ -164,8 +164,37 @@ def _upsert_odds(db: Session, race: models.Race, odds_list: list):
     db.commit()
 
 
+def _apply_final_odds(db: Session, race: models.Race, odds_list: list) -> int:
+    """
+    投票締切後に撮った「最終オッズ」スクショから、該当レースの購入履歴(pending/確定済み問わず)へ
+    final_oddsを反映する。手入力の手間なく、オッズ変動の実績(odds_drift)を溜められるようにするため。
+    """
+    odds_by_key = {
+        (o.get("bet_type"), o.get("combination")): o.get("odds_value")
+        for o in odds_list
+        if o.get("bet_type") and o.get("combination") and o.get("odds_value") is not None
+    }
+    if not odds_by_key:
+        return 0
+    purchases = db.query(models.Purchase).filter(models.Purchase.race_id == race.id).all()
+    updated_count = 0
+    for p in purchases:
+        odds_value = odds_by_key.get((p.bet_type, p.combination))
+        if odds_value is None:
+            continue
+        p.final_odds = odds_value
+        updated_count += 1
+    if updated_count:
+        db.commit()
+    return updated_count
+
+
 @router.post("/screenshots")
-async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session = Depends(get_db)):
+async def analyze_screenshots(
+    files: List[UploadFile] = File(...),
+    is_final_odds: bool = Form(False),
+    db: Session = Depends(get_db),
+):
     """
     複数枚のスクショ(出走表・成績・勝率・オッズを問わず)をまとめてアップロードし、
     Geminiで解析してDBに反映する。
@@ -173,9 +202,14 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
     Gemini解析(parse_screenshot)はネットワーク待ちが主体のため、従来は枚数分を
     1枚ずつ順番に呼び出しており、枚数に比例して処理時間が伸びていた(投票締切に
     間に合わないとの指摘あり)。ここを並列実行に変更し、時間を短縮する。
+
+    is_final_odds=Trueの場合、投票締切後の最終オッズのスクショとして扱い、
+    オッズ通常反映に加えて該当レースの購入履歴のfinal_oddsも自動で埋める
+    (手入力なしでオッズ変動の実績データを溜められるようにするため)。
     """
     results = []
     affected_races = {}
+    final_odds_updated_total = 0
 
     file_infos = []
     for f in files:
@@ -211,6 +245,8 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
             _upsert_entries(db, race, parsed["entries"])
         if parsed.get("odds_list"):
             _upsert_odds(db, race, parsed["odds_list"])
+            if is_final_odds:
+                final_odds_updated_total += _apply_final_odds(db, race, parsed["odds_list"])
         if parsed.get("lines"):
             race.lines_data = parsed["lines"]
             db.commit()
@@ -313,4 +349,10 @@ async def analyze_screenshots(files: List[UploadFile] = File(...), db: Session =
                 e.blended_win_prob = app_p
         db.commit()
 
-    return {"processed_files": len(files), "error_count": error_count, "results": results, "race_ids": list(affected_races.keys())}
+    return {
+        "processed_files": len(files),
+        "error_count": error_count,
+        "final_odds_updated_count": final_odds_updated_total,
+        "results": results,
+        "race_ids": list(affected_races.keys()),
+    }
