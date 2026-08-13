@@ -122,7 +122,14 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
   function renderProgress() {
     resultBox.textContent = `解析中... (${doneCount}/${total}枚完了)\n` + logLines.join("\n");
   }
-  renderProgress();
+  // 更新のたびにブラウザへ描画の機会を渡す。これをしないと、複数の更新がほぼ同時に
+  // 起きた場合にブラウザが描画をまとめてしまい、途中経過が画面に一度も表示されないまま
+  // 最後の状態だけが見える、という不具合が起きうる(のんの報告により追加)。
+  async function renderProgressAndFlush() {
+    renderProgress();
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
+  await renderProgressAndFlush();
 
   // 1枚ずつ個別リクエストにすることで、完了したファイルから順に進捗を表示できるようにする
   // (以前はまとめて1リクエストだったため、全部終わるまで進捗が全く見えなかった)。
@@ -152,7 +159,7 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
         logLines.push(`- ${file.name}: ❌解析失敗(${e.message})`);
       }
       doneCount++;
-      renderProgress();
+      await renderProgressAndFlush();
     }
   }
 
