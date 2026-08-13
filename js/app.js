@@ -110,29 +110,59 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
     return;
   }
 
-  resultBox.textContent = "解析中...(画像枚数によっては数十秒かかります)";
+  const isFinalOdds = document.getElementById("isFinalOddsCheckbox").checked;
+  const files = Array.from(input.files);
+  const total = files.length;
+  let doneCount = 0;
+  let errorCount = 0;
+  let finalOddsUpdatedTotal = 0;
+  const raceIdsSeen = [];
+  const logLines = [];
 
-  const formData = new FormData();
-  for (const file of input.files) {
-    formData.append("files", file);
+  function renderProgress() {
+    resultBox.textContent = `解析中... (${doneCount}/${total}枚完了)\n` + logLines.join("\n");
   }
-  formData.append("is_final_odds", document.getElementById("isFinalOddsCheckbox").checked);
+  renderProgress();
 
-  try {
-    const res = await fetch(apiUrl("/analyze/screenshots"), {
-      method: "POST",
-      body: formData,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(data));
-    resultBox.textContent = `解析完了: ${data.processed_files}枚処理${data.error_count ? `(うち${data.error_count}枚は解析失敗)` : ""}${data.final_odds_updated_count ? `\n最終オッズを${data.final_odds_updated_count}件の購入履歴に反映しました` : ""}\n` +
-      data.results.map(r => r.error ? `- ${r.filename}: ❌解析失敗(${r.error})` : `- ${r.filename}: ${r.screen_type} (レースID:${r.race_id} 選手${r.entries_found}件 オッズ${r.odds_found}件)`).join("\n");
-    // 今回反映したレースが1つならそれを、複数なら最後のものを自動選択して詳細まで表示する
-    const newRaceId = data.race_ids && data.race_ids.length ? data.race_ids[data.race_ids.length - 1] : null;
-    await loadRaces(newRaceId);
-  } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+  // 1枚ずつ個別リクエストにすることで、完了したファイルから順に進捗を表示できるようにする
+  // (以前はまとめて1リクエストだったため、全部終わるまで進捗が全く見えなかった)。
+  // 同時実行数を絞ることで、Gemini無料枠のレート制限への配慮もしている。
+  const CONCURRENCY = 4;
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < files.length) {
+      const i = nextIndex++;
+      const file = files[i];
+      const formData = new FormData();
+      formData.append("files", file);
+      formData.append("is_final_odds", isFinalOdds);
+      try {
+        const res = await fetch(apiUrl("/analyze/screenshots"), { method: "POST", body: formData });
+        const data = await res.json();
+        if (!res.ok) throw new Error(JSON.stringify(data));
+        errorCount += data.error_count || 0;
+        finalOddsUpdatedTotal += data.final_odds_updated_count || 0;
+        for (const id of data.race_ids || []) raceIdsSeen.push(id);
+        for (const r of data.results || []) {
+          logLines.push(r.error ? `- ${r.filename}: ❌解析失敗(${r.error})` : `- ${r.filename}: ${r.screen_type} (レースID:${r.race_id} 選手${r.entries_found}件 オッズ${r.odds_found}件)`);
+        }
+      } catch (e) {
+        errorCount++;
+        logLines.push(`- ${file.name}: ❌解析失敗(${e.message})`);
+      }
+      doneCount++;
+      renderProgress();
+    }
   }
+
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
+
+  resultBox.textContent = `解析完了: ${total}枚処理${errorCount ? `(うち${errorCount}枚は解析失敗)` : ""}${finalOddsUpdatedTotal ? `\n最終オッズを${finalOddsUpdatedTotal}件の購入履歴に反映しました` : ""}\n` +
+    logLines.join("\n");
+  // 今回反映したレースが1つならそれを、複数なら最後のものを自動選択して詳細まで表示する
+  const newRaceId = raceIdsSeen.length ? raceIdsSeen[raceIdsSeen.length - 1] : null;
+  await loadRaces(newRaceId);
 });
 
 // ---------- ② レース選択・期待値計算 ----------
