@@ -108,12 +108,17 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
 
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, skip_reason = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
-        # 100円ベット換算で、安全マージン(オッズ変動対策)を考慮した閾値以上を「買い示唆」とする
-        is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
 
         stake_info = calc.recommend_stake(
             bankroll, est_prob, o.odds_value, req.fractional_coefficient, req.max_bet_pct_per_bet, req.rebate_pct
         )
+        # 100円単位に切り捨てた結果0円(=理論上の賭け金が最低単位に満たない)になった場合は、
+        # 期待値がプラスでも実質的に賭けようがないため見送り扱いにする(のんの指摘により変更)。
+        if not is_skip and stake_info["recommended_stake"] == 0:
+            is_skip = True
+            skip_reason = "理論上の賭け金が最低単位(100円)に満たないため見送り"
+        # 100円ベット換算で、安全マージン(オッズ変動対策)を考慮した閾値以上を「買い示唆」とする
+        is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
 
         ev_result = models.EvResult(
             race_id=race_id,
@@ -151,12 +156,6 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             continue
         total_vote = odds_lookup.get((r.bet_type, r.combination))
         stake = r.recommended_stake or 0
-        # 100円単位への切り上げにより、ケリー計算の理論値(raw_stake)より
-        # 実際の賭け金がどれだけ膨らんでいるかを見る(のんの指摘により追加)。
-        # kelly_fraction列には上限キャップ後の比率(recommend_stakeのkelly_fraction_capped)が
-        # 保存されているため、bankrollを掛け戻せば丸め前の理論値を再現できる。
-        raw_stake = bankroll * r.kelly_fraction
-        stake_inflated_warning = stake > 0 and raw_stake > 0 and (stake / raw_stake) >= 2.0
         if total_vote is not None and total_vote > 0:
             self_impact_pct = round(stake / (total_vote + stake) * 100, 2)
         else:
@@ -176,7 +175,6 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
             "low_prob_warning": low_prob_warnings.get((r.bet_type, r.combination), False),
-            "stake_inflated_warning": stake_inflated_warning,
         })
 
     return {
@@ -353,11 +351,16 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     payout_by_outcome = {o: 0.0 for o in outcomes}
     excluded_by_garami_count = 0
     excluded_by_budget_count = 0
+    excluded_by_min_stake_count = 0
 
     for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
         if req.max_items and len(items) >= req.max_items:
             break
         stake = calc.round_to_bet_unit(c["raw_stake"])
+        if stake <= 0:
+            # 理論上の賭け金が最低単位(100円)に満たない(切り捨てで0円になった)
+            excluded_by_min_stake_count += 1
+            continue
         if stake > remaining_budget:
             if remaining_budget < 100:
                 break  # もう1点(最低100円)も買う余地が無いので、以降は全て予算オーバー
@@ -417,7 +420,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
             "low_prob_warning": c["low_prob_warning"],
-            "stake_inflated_warning": c["raw_stake"] > 0 and (stake / c["raw_stake"]) >= 2.0,
         })
 
     race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0
@@ -440,6 +442,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "race_budget_cap": round(race_cap, 0),
         "excluded_by_budget_count": excluded_by_budget_count,
         "excluded_by_garami_count": excluded_by_garami_count,
+        "excluded_by_min_stake_count": excluded_by_min_stake_count,
         "excluded_low_prob_count": excluded_low_prob_count,
         "garami_free": req.avoid_garami,
         "odds_safety_margins_used_pct": odds_safety_margins if req.avoid_garami else {},

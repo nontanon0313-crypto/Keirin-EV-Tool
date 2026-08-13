@@ -264,13 +264,15 @@ def kelly_fraction(
 def round_to_bet_unit(amount: float, unit: int = 100) -> int:
     """
     競輪の投票は100円単位のため、金額を100円単位に丸める。
-    ケリー計算値が100円未満でも、期待値プラスの買い目である以上は
-    最低単位(100円)で購入する運用とする(証拠金が少なくても100円単位で賭ける)。
+    以前は最低100円を強制していたが、ケリー計算値が100円未満の場合、理論値の
+    何倍もの金額を賭けることになり、リスクに対して過大な賭けになっていた
+    (のんの指摘により切り捨て方式に変更)。
+    切り捨てなので、実際の賭け金は理論値(amount)を超えない。切り捨てて0円になる
+    場合は「その金額では意味のある単位で賭けられない」として0を返す(見送り扱い)。
     """
-    if amount <= 0:
+    if amount < unit:
         return 0
-    rounded = round(amount / unit) * unit
-    return max(unit, int(rounded))
+    return int(amount // unit) * unit
 
 
 def recommend_stake(
@@ -282,7 +284,8 @@ def recommend_stake(
     rebate_pct: float = 0.0,
 ) -> Dict[str, float]:
     """
-    推奨購入金額を計算する。100円単位に丸め、証拠金が少なくても最低100円は確保する。
+    推奨購入金額を計算する。100円単位に切り捨てる。理論値(raw_stake)が100円未満の場合は
+    見送り(0円)になる。
     max_bet_pct_per_bet: 1点あたりの上限比率(資金に対する割合)。ケリー計算値がこれを超えたらキャップする。
     """
     f = kelly_fraction(win_prob, odds_value, fractional_coefficient, rebate_pct)
