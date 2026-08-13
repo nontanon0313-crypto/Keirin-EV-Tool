@@ -329,6 +329,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 各結果(起こりうる着順)の確率。3連単の的中確率と全く同じ計算(Harville式)。
     outcome_probs = {o: _estimate_prob(win_probs, "3連単", o) for o in outcomes} if outcomes else {}
 
+    # 投票時オッズは締切までにズレる(券種によってズレ幅が大きく異なり、実測でワイドは
+    # 3連単の4倍近くズレることが分かっている)。ガミり判定はこのズレを見込んで、
+    # 実際のオッズより保守的な値で計算し、多少ズレても崩れない安全マージンを持たせる。
+    odds_safety_margins = purchases_router.get_odds_safety_margins(db)
+
     def _winning_outcomes(bet_type: str, cars: tuple) -> list:
         combination_str = "-".join(str(c) for c in cars)
         return [o for o in outcomes if calc.judge_purchase_result(bet_type, combination_str, list(o))]
@@ -363,7 +368,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 excluded_by_garami_count += 1
                 continue
             new_total_stake = total_stake + stake
-            payout_gain = stake * c["odds_value"]
+            margin_pct = odds_safety_margins.get(c["bet_type"], purchases_router.DEFAULT_ODDS_SAFETY_MARGIN_PCT)
+            safety_odds = c["odds_value"] * (1 - margin_pct / 100)
+            payout_gain = stake * safety_odds
             ok = True
             # このベットが的中する結果それぞれで、payoutが新しい合計投票額を下回らないか確認
             for o in winning:
@@ -427,6 +434,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "excluded_by_garami_count": excluded_by_garami_count,
         "excluded_low_prob_count": excluded_low_prob_count,
         "garami_free": req.avoid_garami,
+        "odds_safety_margins_used_pct": odds_safety_margins if req.avoid_garami else {},
         "total_expected_profit": round(total_expected_profit, 0),
         "race_ev_pct": race_ev_pct,
         "race_roi_pct": round(race_ev_pct + 100, 2),

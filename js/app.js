@@ -330,7 +330,14 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     if (data.excluded_low_prob_count > 0) html += `<br>大穴帯(未補正)のため${data.excluded_low_prob_count}件を除外しました`;
     if (data.excluded_by_garami_count > 0) html += `<br>ガミり回避のため${data.excluded_by_garami_count}件を除外しました`;
     if (data.excluded_by_budget_count > 0) html += `<br>予算の都合で${data.excluded_by_budget_count}件は見送りました(期待値が低い順に除外)`;
-    if (data.garami_free) html += `<br>✅この組み合わせは、的中すれば必ず合計投票額以上を回収できます(ガミりなし保証)`;
+    if (data.garami_free) {
+      html += `<br>✅この組み合わせは、的中すれば必ず合計投票額以上を回収できます(ガミりなし保証)`;
+      const margins = data.odds_safety_margins_used_pct || {};
+      const marginEntries = Object.entries(margins);
+      if (marginEntries.length > 0) {
+        html += `<br><span class="note">券種別オッズ安全マージン: ${marginEntries.map(([bt, m]) => `${bt} -${m}%`).join(" / ")}(実績データ不足の券種はデフォルト-${20}%を使用)</span>`;
+      }
+    }
     html += `</p>`;
     html += `<p>レース全体の回収率: ${data.race_roi_pct}%(期待利益 約${data.total_expected_profit}円) / レース全体の的中率: 約${data.race_hit_prob_pct}%</p>`;
     html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th><th>自己影響</th></tr>`;

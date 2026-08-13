@@ -97,6 +97,36 @@ def get_calibration_factors(db: Session) -> dict:
     return result
 
 
+DEFAULT_ODDS_SAFETY_MARGIN_PCT = 20.0
+
+
+def get_odds_safety_margins(db: Session) -> dict:
+    """
+    券種ごとに「投票時オッズ→最終オッズ」の実績ズレ(最悪ケース)から、
+    ガミり回避チェックに使う安全マージンを算出する。
+    券種によってズレの大きさが大きく異なる(のんの実測: 3連単は約1割、ワイドは約4割)ため、
+    全体で1つの値にせず券種別に持つ。実績が少ない券種はデフォルト値を使う。
+    """
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.final_odds.isnot(None), models.Purchase.odds_at_purchase.isnot(None))
+        .all()
+    )
+    min_sample = 5
+    by_bet_type = {}
+    for p in purchases:
+        drift = (p.final_odds - p.odds_at_purchase) / p.odds_at_purchase * 100
+        by_bet_type.setdefault(p.bet_type, []).append(drift)
+
+    margins = {}
+    for bt, drifts in by_bet_type.items():
+        if len(drifts) < min_sample:
+            continue
+        worst = min(drifts)  # オッズが最も下がった(不利側に動いた)実績
+        margins[bt] = max(DEFAULT_ODDS_SAFETY_MARGIN_PCT, abs(worst)) if worst < 0 else DEFAULT_ODDS_SAFETY_MARGIN_PCT
+    return margins
+
+
 @router.get("/source-weights")
 def source_weights(db: Session = Depends(get_db)):
     """
@@ -458,6 +488,8 @@ def purchase_stats(db: Session = Depends(get_db)):
 def _odds_drift_stats(purchases):
     """
     ①的中率の精度とは別に、②投票時オッズ→最終オッズのズレだけを検証する。
+    券種によってズレ幅が大きく異なる(のんの実測: 3連単は約1割、ワイドは約4割)ため、
+    全体平均に加えて券種別の内訳も返す。
     (最終オッズが未記録の購入は対象外)
     """
     with_final = [p for p in purchases if p.final_odds is not None and p.odds_at_purchase]
@@ -471,10 +503,24 @@ def _odds_drift_stats(purchases):
     avg_drift_pct = sum(drifts) / len(drifts)
     worsened_count = sum(1 for d in drifts if d < 0)  # オッズが下がる=自分に不利な方向
 
+    by_bet_type = {}
+    for p in with_final:
+        d = (p.final_odds - p.odds_at_purchase) / p.odds_at_purchase * 100
+        by_bet_type.setdefault(p.bet_type, []).append(d)
+    by_bet_type_stats = {
+        bt: {
+            "sample_count": len(ds),
+            "avg_odds_drift_pct": round(sum(ds) / len(ds), 2),
+            "worst_odds_drift_pct": round(min(ds), 2),
+        }
+        for bt, ds in by_bet_type.items()
+    }
+
     return {
         "sample_count": len(with_final),
         "avg_odds_drift_pct": round(avg_drift_pct, 2),
         "worsened_ratio_pct": round(worsened_count / len(with_final) * 100, 1),
+        "by_bet_type": by_bet_type_stats,
         "note": "マイナスは投票時より最終オッズが下がった(不利な方向に動いた)ことを意味します",
     }
 
