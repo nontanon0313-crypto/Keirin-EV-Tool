@@ -17,6 +17,7 @@
   <button class="tab-btn active" data-tab="tab-vote">投票</button>
   <button class="tab-btn" data-tab="tab-bankroll">証拠金</button>
   <button class="tab-btn" data-tab="tab-verify">検証・設定</button>
+  <button class="tab-btn" data-tab="tab-settings">詳細設定</button>
 </nav>
 
 <main>
@@ -25,7 +26,7 @@
 
   <section class="card">
     <h2>① スクショ解析</h2>
-    <p class="note">出走表・直近成績・勝率・オッズ(全券種)のスクショをまとめて選択してください。複数レース分をまとめてもOKです。</p>
+    <p class="note">出走表・直近成績・勝率・オッズ(全券種)のスクショをまとめて選択してください。複数レース分をまとめてもOKです。アップロードが完了すると、対象レースが自動で選択され②の詳細も自動表示されます。</p>
     <input type="file" id="screenshotInput" multiple accept="image/*">
     <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
       <input type="checkbox" id="isFinalOddsCheckbox" style="width:auto;margin:0;">
@@ -37,14 +38,8 @@
 
   <section class="card">
     <h2>② レース選択・期待値計算</h2>
-    <button id="loadRacesBtn">レース一覧を更新</button>
     <select id="raceSelect"></select>
-    <button id="deleteRaceBtn" style="background:#ef4444;">選択中のレースを削除(やり直し用)</button>
-    <button id="checkRaceBtn" style="background:#38bdf8;">このレースの詳細・不足データを確認</button>
     <div id="raceDetailResult" class="result-box"></div>
-
-    <label>証拠金の上書き(空欄なら証拠金タブの残高を自動使用)</label>
-    <input type="number" id="bankrollInput" placeholder="空欄でOK">
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="rebateCheckbox" style="width:auto;margin:0;">
@@ -54,19 +49,6 @@
       <label>還元率(%)</label>
       <input type="number" id="rebatePctInput" value="5" step="0.5">
     </div>
-
-    <label>最低勝率フィルター(%、これを下回る大穴頼みの買い目は見送り)</label>
-    <input type="number" id="minProbInput" value="0" step="1">
-
-    <label>安全マージン(最低期待値%、オッズ変動対策)</label>
-    <input type="number" id="minEvInput" value="5" step="1">
-    <button id="suggestMarginBtn" style="background:#06b6d4;">実績から自動算出する</button>
-
-    <label>1レースあたりの上限比率(%、証拠金に対して。資金に余裕が出たら10%程度に絞る運用を推奨)</label>
-    <input type="number" id="maxRacePctInput" value="100" step="1">
-
-    <label>自動投票プランの最大件数(投票アプリへの手入力にかかる時間の目安。多すぎると締切に間に合わない)</label>
-    <input type="number" id="maxItemsInput" value="20" step="1">
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="excludeLowProbCheckbox" checked style="width:auto;margin:0;">
@@ -81,8 +63,6 @@
     <button id="calcEvBtn">期待値を計算(一覧)</button>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>
-    <label>閾値表の表示件数</label>
-    <input type="number" id="thresholdLimitInput" value="15" step="1">
     <div id="evResult" class="result-box"></div>
   </section>
 
@@ -120,6 +100,7 @@
 
   <section class="card">
     <h2>資金管理シミュレーション(破産確率)</h2>
+    <p class="note">証拠金タブの現在残高を初期資金として使用します。</p>
     <label>勝率(%)</label>
     <input type="number" id="simWinProb" value="30">
     <label>オッズ</label>
@@ -140,6 +121,36 @@
     <div id="statsResult" class="result-box"></div>
   </section>
 
+  <section class="card">
+    <h2>⚠️ レースデータの削除</h2>
+    <p class="note">「投票」タブでレースを選択してから、以下の削除ボタンを使ってください。</p>
+    <button id="deleteRaceBtn" style="background:#ef4444;">選択中のレースを削除(やり直し用)</button>
+    <button id="deleteAllBtn" style="background:#7f1d1d;">記録を全て削除する(証拠金残高は除く)</button>
+  </section>
+
+</div>
+
+<div id="tab-settings" class="tab-content">
+  <section class="card">
+    <h2>詳細設定(通常は変更不要)</h2>
+    <p class="note">ここは滅多に変更しない項目です。変更するとレース選択タブでの計算・自動プラン作成に反映されます。</p>
+
+    <label>最低勝率フィルター(%、これを下回る大穴頼みの買い目は見送り)</label>
+    <input type="number" id="minProbInput" value="0" step="1">
+
+    <label>安全マージン(最低期待値%、オッズ変動対策)</label>
+    <input type="number" id="minEvInput" value="5" step="1">
+    <button id="suggestMarginBtn" style="background:#06b6d4;">実績から自動算出する</button>
+
+    <label>1レースあたりの上限比率(%、証拠金に対して。資金に余裕が出たら10%程度に絞る運用を推奨)</label>
+    <input type="number" id="maxRacePctInput" value="100" step="1">
+
+    <label>自動投票プランの最大件数(投票アプリへの手入力にかかる時間の目安。多すぎると締切に間に合わない)</label>
+    <input type="number" id="maxItemsInput" value="20" step="1">
+
+    <label>閾値表の表示件数</label>
+    <input type="number" id="thresholdLimitInput" value="15" step="1">
+  </section>
 </div>
 
 </main>

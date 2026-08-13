@@ -152,3 +152,20 @@ def delete_race(race_id: int, db: Session = Depends(get_db)):
     db.delete(race)
     db.commit()
     return {"deleted": True, "race_id": race_id}
+
+
+@router.delete("/")
+def delete_all_races(db: Session = Depends(get_db)):
+    """
+    レース・選手・オッズ・期待値結果・購入履歴・見送り記録を全て削除する(証拠金残高は対象外)。
+    一括DELETE文はSQLAlchemyのcascade設定を経由しないため、外部キーの依存順
+    (Purchase/SkippedBet→EvResult/Odds/Entry→Race)に明示的に削除する。
+    """
+    db.query(models.Purchase).delete()
+    db.query(models.SkippedBet).delete()
+    db.query(models.EvResult).delete()
+    db.query(models.Odds).delete()
+    db.query(models.Entry).delete()
+    db.query(models.Race).delete()
+    db.commit()
+    return {"deleted_all": True}

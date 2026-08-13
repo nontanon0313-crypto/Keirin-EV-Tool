@@ -127,31 +127,40 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
     if (!res.ok) throw new Error(JSON.stringify(data));
     resultBox.textContent = `解析完了: ${data.processed_files}枚処理${data.error_count ? `(うち${data.error_count}枚は解析失敗)` : ""}${data.final_odds_updated_count ? `\n最終オッズを${data.final_odds_updated_count}件の購入履歴に反映しました` : ""}\n` +
       data.results.map(r => r.error ? `- ${r.filename}: ❌解析失敗(${r.error})` : `- ${r.filename}: ${r.screen_type} (レースID:${r.race_id} 選手${r.entries_found}件 オッズ${r.odds_found}件)`).join("\n");
-    await loadRaces();
+    // 今回反映したレースが1つならそれを、複数なら最後のものを自動選択して詳細まで表示する
+    const newRaceId = data.race_ids && data.race_ids.length ? data.race_ids[data.race_ids.length - 1] : null;
+    await loadRaces(newRaceId);
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
 });
 
 // ---------- ② レース選択・期待値計算 ----------
-async function loadRaces() {
+async function loadRaces(selectRaceId) {
   const select = document.getElementById("raceSelect");
+  const previousValue = select.value;
   try {
     const res = await fetch(apiUrl("/races/"));
     const races = await res.json();
     select.innerHTML = races.map(r =>
       `<option value="${r.id}">${r.venue_name} ${r.race_number}R (選手${r.entry_count}/オッズ${r.odds_count})</option>`
     ).join("");
+    // アップロード直後は今回反映したレースを、それ以外は元々選ばれていたレースを維持する
+    const target = selectRaceId ?? previousValue;
+    if (target && races.some(r => String(r.id) === String(target))) {
+      select.value = target;
+    }
+    await checkRace();
   } catch (e) {
     console.error(e);
   }
 }
-document.getElementById("loadRacesBtn").addEventListener("click", loadRaces);
+
 
 document.getElementById("deleteRaceBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   if (!raceId) {
-    alert("削除するレースを選択してください");
+    alert("削除するレースを選択してください(投票タブでレースを選んでから戻ってきてください)");
     return;
   }
   const select = document.getElementById("raceSelect");
@@ -170,11 +179,29 @@ document.getElementById("deleteRaceBtn").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("checkRaceBtn").addEventListener("click", async () => {
+document.getElementById("deleteAllBtn").addEventListener("click", async () => {
+  if (!confirm("レース・購入履歴・見送り記録など全ての記録を削除します。証拠金残高は削除されません。本当によろしいですか？(元に戻せません)")) {
+    return;
+  }
+  if (!confirm("最終確認です。本当に全記録を削除しますか？")) {
+    return;
+  }
+  try {
+    const res = await fetch(apiUrl("/races/"), { method: "DELETE" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    alert("全ての記録を削除しました");
+    await loadRaces();
+  } catch (e) {
+    alert("削除エラー: " + e.message);
+  }
+});
+
+async function checkRace() {
   const raceId = document.getElementById("raceSelect").value;
   const box = document.getElementById("raceDetailResult");
   if (!raceId) {
-    alert("レースを選択してください");
+    box.textContent = "";
     return;
   }
   box.textContent = "確認中...";
@@ -229,13 +256,12 @@ document.getElementById("checkRaceBtn").addEventListener("click", async () => {
   } catch (e) {
     box.textContent = "エラー: " + e.message;
   }
-});
+}
+document.getElementById("raceSelect").addEventListener("change", checkRace);
 
 function getBankrollOverride() {
-  const raw = document.getElementById("bankrollInput").value;
-  if (raw === "" || raw === null) return null;
-  const v = parseFloat(raw);
-  return isNaN(v) ? null : v;
+  // 証拠金は常に証拠金タブの残高を使う(のんの要望により上書き欄を廃止)
+  return null;
 }
 
 document.getElementById("calcEvBtn").addEventListener("click", async () => {
@@ -532,12 +558,24 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
 
 // ---------- ④ 資金管理シミュレーション ----------
 document.getElementById("runSimBtn").addEventListener("click", async () => {
-  const bankroll = parseFloat(document.getElementById("bankrollInput").value);
+  const resultBox = document.getElementById("simResult");
+  let bankroll;
+  try {
+    const bankrollRes = await fetch(apiUrl("/bankroll/"));
+    const bankrollData = await bankrollRes.json();
+    bankroll = bankrollData.current_balance;
+  } catch (e) {
+    resultBox.textContent = "証拠金の取得に失敗しました。先に証拠金タブで設定してください。";
+    return;
+  }
+  if (!bankroll) {
+    resultBox.textContent = "証拠金が未設定です。証拠金タブで初期額を設定してください。";
+    return;
+  }
   const winProb = parseFloat(document.getElementById("simWinProb").value) / 100;
   const odds = parseFloat(document.getElementById("simOdds").value);
   const stakeFraction = parseFloat(document.getElementById("simStakePct").value) / 100;
   const numBets = parseInt(document.getElementById("simNumBets").value);
-  const resultBox = document.getElementById("simResult");
 
   resultBox.textContent = "シミュレーション実行中...";
   try {
