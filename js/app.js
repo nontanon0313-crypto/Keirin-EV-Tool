@@ -700,6 +700,39 @@ document.getElementById("loadSourceWeightsBtn").addEventListener("click", async 
   }
 });
 
+// ---------- 詳細設定(localStorageに保存・復元) ----------
+const SETTINGS_STORAGE_KEY = "keirinEvToolSettings";
+const SETTINGS_INPUT_IDS = ["minProbInput", "minEvInput", "maxRacePctInput", "maxItemsInput", "thresholdLimitInput"];
+
+function loadSettingsFromStorage() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}");
+    for (const id of SETTINGS_INPUT_IDS) {
+      if (saved[id] !== undefined) {
+        const el = document.getElementById(id);
+        if (el) el.value = saved[id];
+      }
+    }
+  } catch (e) {
+    console.error("設定の読み込みに失敗:", e);
+  }
+}
+
+function saveSettingsToStorage() {
+  const values = {};
+  for (const id of SETTINGS_INPUT_IDS) {
+    const el = document.getElementById(id);
+    if (el) values[id] = el.value;
+  }
+  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(values));
+}
+
+SETTINGS_INPUT_IDS.forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", saveSettingsToStorage);
+});
+loadSettingsFromStorage();
+
 // 初回ロード
 loadRaces();
 refreshBankrollDisplay();
