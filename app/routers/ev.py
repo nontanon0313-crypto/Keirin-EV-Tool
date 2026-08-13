@@ -260,7 +260,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     """
     1レース全体で、期待値プラス(安全マージン込み)の買い目をまとめて拾い、
     証拠金・1レース上限比率の範囲内に収まるよう自動で配分する「投票プラン」を返す。
-    複数の買い目は互いに同時的中しない(排反)とみなして単純合算する簡易モデル。
+    avoid_garami=True(既定)の場合、券種をまたいで買い目を選ぶことで発生しうる
+    「的中したのに合計投票額を下回る(ガミる)」結果が起きないことを保証しながら選定する。
     """
     race = db.query(models.Race).get(race_id)
     if not race:
@@ -309,14 +310,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         candidates = [c for c in candidates if not c["low_prob_warning"]]
         excluded_low_prob_count = before_count - len(candidates)
 
-    # 投票アプリへの手入力で現実的に処理できる件数に絞る(期待値が高い順)。
-    # ここで絞ってから予算配分するため、以降の「予算の都合で見送り」件数はこの絞り込み後の件数が基準になる。
-    excluded_by_max_items_count = 0
-    if req.max_items and len(candidates) > req.max_items:
-        candidates.sort(key=lambda x: -x["ev_pct"])
-        excluded_by_max_items_count = len(candidates) - req.max_items
-        candidates = candidates[: req.max_items]
-
     if not candidates:
         return {
             "race_id": race_id,
@@ -327,26 +320,72 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     race_cap = bankroll * req.max_race_pct
 
-    # 期待値が高い順に、100円単位で予算内に収まる分だけ採用する。
-    # (証拠金が少ない時、弱い候補まで一律100円で買ってしまい非効率になるのを防ぐ)
+    # --- ガミり(的中はしたのに合計投票額を下回る)を避けるための「起こりうる結果」の洗い出し ---
+    # 券種をまたいで買い目を選ぶと、同じ結果で複数券が同時的中したり、逆に1つしか
+    # 的中しなかったりする。3連単の着順(上位3着の並び)がどの券種の的中・不的中も
+    # 一意に決めるため、これを「起こりうる結果」の全体集合として使う。
+    car_numbers = sorted({e.car_number for e in entries})
+    outcomes = list(itertools.permutations(car_numbers, 3)) if len(car_numbers) >= 3 else []
+    # 各結果(起こりうる着順)の確率。3連単の的中確率と全く同じ計算(Harville式)。
+    outcome_probs = {o: _estimate_prob(win_probs, "3連単", o) for o in outcomes} if outcomes else {}
+
+    def _winning_outcomes(bet_type: str, cars: tuple) -> list:
+        combination_str = "-".join(str(c) for c in cars)
+        return [o for o in outcomes if calc.judge_purchase_result(bet_type, combination_str, list(o))]
+
+    # 期待値が高い順に、ガミりが起きない範囲で・100円単位で予算内に収まる分だけ採用する。
     items = []
     total_stake = 0.0
     total_expected_profit = 0.0
-    total_hit_prob = 0.0
     remaining_budget = race_cap
+    payout_by_outcome = {o: 0.0 for o in outcomes}
+    excluded_by_garami_count = 0
+    excluded_by_budget_count = 0
+
     for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
+        if req.max_items and len(items) >= req.max_items:
+            break
         stake = calc.round_to_bet_unit(c["raw_stake"])
         if stake > remaining_budget:
             if remaining_budget < 100:
-                continue  # もう1点(最低100円)も買う余地が無い
-            stake = calc.round_to_bet_unit(remaining_budget) if remaining_budget >= 100 else 0
+                break  # もう1点(最低100円)も買う余地が無いので、以降は全て予算オーバー
+            stake = calc.round_to_bet_unit(remaining_budget)
             if stake <= 0 or stake > remaining_budget:
+                excluded_by_budget_count += 1
                 continue
+
+        cars = tuple(int(x) for x in c["combination"].split("-"))
+        winning = _winning_outcomes(c["bet_type"], cars) if req.avoid_garami else []
+
+        if req.avoid_garami:
+            if not winning:
+                # 起こりうる結果と1つも一致しない(データ不整合)場合は安全側でスキップ
+                excluded_by_garami_count += 1
+                continue
+            new_total_stake = total_stake + stake
+            payout_gain = stake * c["odds_value"]
+            ok = True
+            # このベットが的中する結果それぞれで、payoutが新しい合計投票額を下回らないか確認
+            for o in winning:
+                if payout_by_outcome[o] + payout_gain < new_total_stake:
+                    ok = False
+                    break
+            # 既存の的中結果(このベットでは的中しないもの)も、合計投票額が増える分だけ
+            # 再チェックが必要
+            if ok:
+                for o, payout in payout_by_outcome.items():
+                    if payout > 0 and o not in winning and payout < new_total_stake:
+                        ok = False
+                        break
+            if not ok:
+                excluded_by_garami_count += 1
+                continue
+            for o in winning:
+                payout_by_outcome[o] += payout_gain
 
         expected_profit = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         total_stake += stake
         total_expected_profit += expected_profit
-        total_hit_prob += c["win_prob"]
         remaining_budget -= stake
         total_vote = c["total_vote_amount"]
         if total_vote is not None and total_vote > 0:
@@ -368,22 +407,30 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0
 
+    # 「レース全体の的中率」= 採用した買い目のうち、どれか1つでも的中する結果の確率の合計。
+    # avoid_garami有効時は、的中する結果=必ず黒字になる結果でもある(ガミりを起こさないよう
+    # 選んでいるため)。以前は各買い目の勝率を単純合算していたが、券種をまたいで同じ結果が
+    # 重複カウントされるケースがあり不正確だった(のんの指摘により修正)。
+    if outcomes:
+        race_hit_prob_pct = round(
+            sum(p for o, p in outcome_probs.items() if payout_by_outcome.get(o, 0.0) > 0) * 100, 2
+        )
+    else:
+        race_hit_prob_pct = 0
+
     return {
         "race_id": race_id,
         "num_bets": len(items),
         "total_stake": round(total_stake, 0),
         "race_budget_cap": round(race_cap, 0),
-        "excluded_by_budget_count": len(candidates) - len(items),
-        "excluded_by_max_items_count": excluded_by_max_items_count,
+        "excluded_by_budget_count": excluded_by_budget_count,
+        "excluded_by_garami_count": excluded_by_garami_count,
         "excluded_low_prob_count": excluded_low_prob_count,
+        "garami_free": req.avoid_garami,
         "total_expected_profit": round(total_expected_profit, 0),
         "race_ev_pct": race_ev_pct,
         "race_roi_pct": round(race_ev_pct + 100, 2),
-        # 排反前提(このレースで買い目のどれか1つでも当たる確率)の簡易合算。券種が同じ的中を
-        # 複数拾っている場合など厳密には排反でないケースもあるが、race_ev_pct算出と同じ
-        # 簡易モデルに合わせている。低確率帯(未補正)を除外している場合、この的中率も
-        # 除外後の集合のみで計算しているため、除外前より低く出るのが正常。
-        "race_hit_prob_pct": round(min(total_hit_prob, 1.0) * 100, 2),
+        "race_hit_prob_pct": race_hit_prob_pct,
         "items": items,
     }
 
