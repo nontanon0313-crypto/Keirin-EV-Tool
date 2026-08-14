@@ -86,12 +86,19 @@ def get_calibration_factors(db: Session) -> dict:
         if is_reliable and predicted_avg:
             factor = calc.compute_calibration_factor(actual_win_rate, predicted_avg)
 
+        deviation_pct = None
+        if actual_win_rate is not None and predicted_avg is not None:
+            # 実績的中率 - 予想平均確率。プラス=予想が実際より低め(過小評価)、
+            # マイナス=予想が実際より高め(過大評価)だったことを意味する。
+            deviation_pct = round((actual_win_rate - predicted_avg) * 100, 2)
+
         result[name] = {
             "sample_count": count,
             "required_sample_count": required,
             "is_reliable": is_reliable,
             "actual_win_rate_pct": round(actual_win_rate * 100, 2) if actual_win_rate is not None else None,
             "predicted_avg_prob_pct": round(predicted_avg * 100, 2) if predicted_avg is not None else None,
+            "deviation_pct": deviation_pct,
             "calibration_factor": round(factor, 3),
         }
     return result
@@ -237,8 +244,27 @@ def suggested_margin(db: Session = Depends(get_db)):
 
 @router.get("/calibration")
 def calibration_status(db: Session = Depends(get_db)):
-    """勝率帯ごとの自動補正の状態(補正係数・信頼できるか・必要試行数)を返す。"""
-    return get_calibration_factors(db)
+    """勝率帯ごとの自動補正の状態(補正係数・信頼できるか・必要試行数)と、全体1本のズレも返す。"""
+    buckets = get_calibration_factors(db)
+
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result != "pending", models.Purchase.win_prob_at_purchase.isnot(None))
+        .all()
+    )
+    overall = None
+    if purchases:
+        wins = sum(1 for p in purchases if p.result == "win")
+        actual = wins / len(purchases)
+        predicted = sum(p.win_prob_at_purchase for p in purchases) / len(purchases)
+        overall = {
+            "sample_count": len(purchases),
+            "actual_win_rate_pct": round(actual * 100, 2),
+            "predicted_avg_prob_pct": round(predicted * 100, 2),
+            "deviation_pct": round((actual - predicted) * 100, 2),
+        }
+
+    return {"overall": overall, "buckets": buckets}
 
 
 @router.get("/pending")

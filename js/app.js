@@ -739,11 +739,25 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
   try {
     const res = await fetch(apiUrl("/purchases/calibration"));
     const data = await res.json();
-    let html = "<p>各勝率帯の自動補正の状態です。試行数が必要数に達すると、以降の期待値計算に自動で反映されます。</p>";
-    html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>AI推定平均</th><th>補正係数</th></tr>`;
-    for (const [bucket, info] of Object.entries(data)) {
+    let html = "";
+    if (data.overall) {
+      const o = data.overall;
+      const sign = o.deviation_pct > 0 ? "+" : "";
+      html += `<p><strong>全体のズレ: ${sign}${o.deviation_pct}pt</strong>(実績的中率${o.actual_win_rate_pct}% - 予想平均${o.predicted_avg_prob_pct}%、${o.sample_count}件)<br>プラスなら予想が控えめ(実際はもっと当たっている)、マイナスなら予想が強気すぎ(実際はもっと外れている)ことを意味します。</p>`;
+    } else {
+      html += "<p>まだ確定した購入履歴がありません。</p>";
+    }
+    html += "<p>以下は勝率帯ごとの内訳です。試行数が必要数に達すると、以降の期待値計算に自動で反映されます。</p>";
+    html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>補正係数</th></tr>`;
+    for (const [bucket, info] of Object.entries(data.buckets || {})) {
       const status = info.is_reliable ? '<span class="ev-positive">適用中</span>' : "未達(補正なし)";
-      html += `<tr><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${info.calibration_factor}倍</td></tr>`;
+      let devText = "-";
+      if (info.deviation_pct !== null && info.deviation_pct !== undefined) {
+        const sign = info.deviation_pct > 0 ? "+" : "";
+        const cls = Math.abs(info.deviation_pct) >= 5 ? ' style="color:#f59e0b;font-weight:bold;"' : "";
+        devText = `<span${cls}>${sign}${info.deviation_pct}pt</span>`;
+      }
+      html += `<tr><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${info.calibration_factor}倍</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
