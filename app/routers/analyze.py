@@ -261,98 +261,123 @@ async def analyze_screenshots(
             "odds_found": len(parsed.get("odds_list") or []),
         })
 
-    # 全画像取り込み後、レースごとにAI独自の勝率推定を実行
-    for race_id, race in affected_races.items():
-        entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
-        if not entries:
-            continue
-        # 注意: app_win_rate(アプリ側勝率)はここに意図的に含めない。
-        # AI推定はアプリ勝率を見ずに独立した意見を出し、後段でtipstar実績とAI実績の
-        # 信頼度(source_weights)に応じて重み付け合成する。ここに含めると合成時に
-        # アプリ勝率の影響を二重に効かせてしまうため(のんとの設計相談により決定)。
-        entries_payload = [
-            {
-                "car_number": e.car_number,
-                "player_name": e.player_name,
-                "region": e.region,
-                "race_score": e.race_score,
-                "leg_style": e.leg_style,
-                "s_count": e.s_count,
-                "h_count": e.h_count,
-                "b_count": e.b_count,
-                "kimarite_nige": e.kimarite_nige,
-                "kimarite_makuri": e.kimarite_makuri,
-                "kimarite_sashi": e.kimarite_sashi,
-                "kimarite_mark": e.kimarite_mark,
-                "finish_1st": e.finish_1st,
-                "finish_2nd": e.finish_2nd,
-                "finish_3rd": e.finish_3rd,
-                "line_group": e.line_group,
-                "is_local": e.is_local,
-                "pre_race_comment": e.pre_race_comment,
-            }
-            for e in entries
-        ]
-        weather_info = {
-            "weather": race.weather,
-            "temperature_c": race.temperature_c,
-            "season": race.season,
-        }
-        try:
-            bank = race.bank
-            bank_info = None
-            if bank:
-                bank_info = {
-                    "lap_length_m": bank.lap_length_m,
-                    "home_stretch_length_m": bank.home_stretch_length_m,
-                    "lead_advantage_score": bank.lead_advantage_score,
-                }
-
-            # 1段階目: 展開予想を先に生成する(選手構成が変わった可能性があるので毎回更新する)
-            try:
-                development = simulate_race_development(
-                    entries_payload, lines=race.lines_data, bank_info=bank_info,
-                    race_stage=race.race_stage, grade=race.grade,
-                    weather_info=weather_info,
-                )
-                race.development_simulation = development
-                db.commit()
-            except Exception:
-                development = race.development_simulation  # 失敗時は前回分があればそれを使う
-
-            # 2段階目: 展開予想を踏まえて勝率を推定する
-            ai_probs = estimate_ai_win_probabilities(
-                entries_payload, lines=race.lines_data, bank_info=bank_info,
-                race_stage=race.race_stage, grade=race.grade,
-                development_simulation=development,
-                weather_info=weather_info,
-            )
-        except Exception:
-            ai_probs = {}
-
-        # tipstar勝率とAI推定、どちらが実際に精度が高いかを実績から取得(データ不足時は1:1)
-        try:
-            weights = purchases_router.source_weights(db)
-        except Exception:
-            weights = {"app_weight": 0.5, "ai_weight": 0.5}
-
-        for e in entries:
-            ai_p = ai_probs.get(e.car_number)
-            if ai_p is not None:
-                e.ai_win_prob = ai_p
-            app_p = (e.app_win_rate / 100.0) if e.app_win_rate is not None else None
-            if ai_p is not None and app_p is not None:
-                e.blended_win_prob = ai_p * weights["ai_weight"] + app_p * weights["app_weight"]
-            elif ai_p is not None:
-                e.blended_win_prob = ai_p
-            elif app_p is not None:
-                e.blended_win_prob = app_p
-        db.commit()
-
     return {
         "processed_files": len(files),
         "error_count": error_count,
         "final_odds_updated_count": final_odds_updated_total,
         "results": results,
         "race_ids": list(affected_races.keys()),
+    }
+
+
+@router.post("/estimate/{race_id}")
+def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
+    """
+    指定したレースについて、AI独自の展開予想・勝率推定を実行する(Gemini呼び出し2回)。
+
+    以前はスクショ取り込み(analyze_screenshots)の中で自動的に実行していたが、
+    画像を1枚ずつ個別リクエストで送るように変更した際、同じレースの複数ファイルが
+    並行してそれぞれ独自にAI推定を走らせてしまい、
+    - 処理途中の不完全なデータでAI推定が実行される
+    - どのリクエストの結果が最後に残るかが競合(レースコンディション)して不安定になる
+    - Gemini呼び出し数が無駄に増え、レート制限に引っかかりやすくなる(Failed to fetchの一因)
+    という問題が起きていた(のんの報告により発覚)。
+    そのため、全ファイルの取り込みが終わった後にユーザーが明示的に1回だけ呼ぶ形に変更した。
+    """
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+    entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
+    if not entries:
+        raise HTTPException(400, "このレースには選手データがまだありません")
+
+    entries_payload = [
+        {
+            "car_number": e.car_number,
+            "player_name": e.player_name,
+            "region": e.region,
+            "race_score": e.race_score,
+            "leg_style": e.leg_style,
+            "s_count": e.s_count,
+            "h_count": e.h_count,
+            "b_count": e.b_count,
+            "kimarite_nige": e.kimarite_nige,
+            "kimarite_makuri": e.kimarite_makuri,
+            "kimarite_sashi": e.kimarite_sashi,
+            "kimarite_mark": e.kimarite_mark,
+            "finish_1st": e.finish_1st,
+            "finish_2nd": e.finish_2nd,
+            "finish_3rd": e.finish_3rd,
+            "line_group": e.line_group,
+            "is_local": e.is_local,
+            "pre_race_comment": e.pre_race_comment,
+        }
+        for e in entries
+    ]
+    weather_info = {
+        "weather": race.weather,
+        "temperature_c": race.temperature_c,
+        "season": race.season,
+    }
+
+    bank = race.bank
+    bank_info = None
+    if bank:
+        bank_info = {
+            "lap_length_m": bank.lap_length_m,
+            "home_stretch_length_m": bank.home_stretch_length_m,
+            "lead_advantage_score": bank.lead_advantage_score,
+        }
+
+    # 1段階目: 展開予想を先に生成する
+    try:
+        development = simulate_race_development(
+            entries_payload, lines=race.lines_data, bank_info=bank_info,
+            race_stage=race.race_stage, grade=race.grade,
+            weather_info=weather_info,
+        )
+        race.development_simulation = development
+        db.commit()
+    except Exception as e:
+        development = race.development_simulation  # 失敗時は前回分があればそれを使う
+        if development is None:
+            raise HTTPException(502, f"展開予想の生成に失敗しました: {e}")
+
+    # 2段階目: 展開予想を踏まえて勝率を推定する
+    try:
+        ai_probs = estimate_ai_win_probabilities(
+            entries_payload, lines=race.lines_data, bank_info=bank_info,
+            race_stage=race.race_stage, grade=race.grade,
+            development_simulation=development,
+            weather_info=weather_info,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"AI勝率推定に失敗しました: {e}")
+
+    # tipstar勝率とAI推定、どちらが実際に精度が高いかを実績から取得(データ不足時は1:1)
+    try:
+        weights = purchases_router.source_weights(db)
+    except Exception:
+        weights = {"app_weight": 0.5, "ai_weight": 0.5}
+
+    updated_count = 0
+    for e in entries:
+        ai_p = ai_probs.get(e.car_number)
+        if ai_p is not None:
+            e.ai_win_prob = ai_p
+        app_p = (e.app_win_rate / 100.0) if e.app_win_rate is not None else None
+        if ai_p is not None and app_p is not None:
+            e.blended_win_prob = ai_p * weights["ai_weight"] + app_p * weights["app_weight"]
+        elif ai_p is not None:
+            e.blended_win_prob = ai_p
+        elif app_p is not None:
+            e.blended_win_prob = app_p
+        if e.blended_win_prob is not None:
+            updated_count += 1
+    db.commit()
+
+    return {
+        "race_id": race_id,
+        "updated_entries": updated_count,
+        "development_simulation": race.development_simulation,
     }

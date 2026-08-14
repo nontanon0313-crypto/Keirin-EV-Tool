@@ -250,7 +250,7 @@ async function checkRace() {
     let html = `<p><strong>${data.venue_name} ${data.race_number}R</strong> - `;
     html += data.ready_for_ev_calc
       ? `<span class="ev-positive">期待値計算に必要なデータは揃っています</span></p>`
-      : `<span style="color:#ef4444;">まだ不足しているデータがあります</span></p>`;
+      : `<span style="color:#ef4444;">まだ不足しているデータがあります(選手データ・オッズに加えて「AI予想を実行」が必要な場合があります)</span></p>`;
 
     if (data.lines_data && data.lines_data.length) {
       html += `<p>ライン構成: ${data.lines_data.map(l => l.join("-")).join(" / ")}</p>`;
@@ -295,6 +295,29 @@ async function checkRace() {
   }
 }
 document.getElementById("raceSelect").addEventListener("change", checkRace);
+
+document.getElementById("runEstimateBtn").addEventListener("click", async () => {
+  const raceId = document.getElementById("raceSelect").value;
+  const box = document.getElementById("raceDetailResult");
+  if (!raceId) {
+    alert("レースを選択してください");
+    return;
+  }
+  const btn = document.getElementById("runEstimateBtn");
+  btn.disabled = true;
+  btn.textContent = "AI予想を実行中...(展開予想→勝率推定の2段階、数十秒かかります)";
+  try {
+    const res = await fetch(apiUrl(`/analyze/estimate/${raceId}`), { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    await checkRace();
+  } catch (e) {
+    box.innerHTML += `<p style="color:#ef4444;">AI予想の実行に失敗しました: ${e.message}</p>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🎯AI予想を実行(展開予想+勝率推定)";
+  }
+});
 
 function getBankrollOverride() {
   // 証拠金は常に証拠金タブの残高を使う(のんの要望により上書き欄を廃止)
