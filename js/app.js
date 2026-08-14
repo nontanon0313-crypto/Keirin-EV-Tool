@@ -189,7 +189,7 @@ async function loadRaces(selectRaceId) {
     const res = await fetch(apiUrl("/races/"));
     const races = await res.json();
     select.innerHTML = races.map(r =>
-      `<option value="${r.id}">${r.venue_name} ${r.race_number}R (選手${r.entry_count}/オッズ${r.odds_count})</option>`
+      `<option value="${r.id}">${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R (選手${r.entry_count}/オッズ${r.odds_count})</option>`
     ).join("");
     // アップロード直後は今回反映したレースを、それ以外は元々選ばれていたレースを維持する
     const target = selectRaceId ?? previousValue;
@@ -305,35 +305,12 @@ async function checkRace() {
 }
 document.getElementById("raceSelect").addEventListener("change", checkRace);
 
-document.getElementById("runEstimateBtn").addEventListener("click", async () => {
-  const raceId = document.getElementById("raceSelect").value;
-  const box = document.getElementById("raceDetailResult");
-  if (!raceId) {
-    alert("レースを選択してください");
-    return;
-  }
-  const btn = document.getElementById("runEstimateBtn");
-  btn.disabled = true;
-  btn.textContent = "AI予想を実行中...(展開予想→勝率推定の2段階、数十秒かかります)";
-  try {
-    const res = await fetch(apiUrl(`/analyze/estimate/${raceId}`), { method: "POST" });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-    await checkRace();
-  } catch (e) {
-    box.innerHTML += `<p style="color:#ef4444;">AI予想の実行に失敗しました: ${e.message}</p>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "🎯AI予想を実行(展開予想+勝率推定)";
-  }
-});
-
 function getBankrollOverride() {
   // 証拠金は常に証拠金タブの残高を使う(のんの要望により上書き欄を廃止)
   return null;
 }
 
-document.getElementById("calcEvBtn").addEventListener("click", async () => {
+document.getElementById("racePlanBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   const resultBox = document.getElementById("evResult");
   if (!raceId) {
@@ -351,50 +328,22 @@ document.getElementById("calcEvBtn").addEventListener("click", async () => {
     return;
   }
 
-  resultBox.textContent = "計算中...";
+  // AI予想(展開予想+勝率推定)がまだ済んでいなければ、先に自動で実行する
+  // (以前は別ボタンだったが、のんの要望で自動投票プラン作成に統合)
   try {
-    const res = await fetch(apiUrl(`/ev/calculate/${raceId}`), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        race_id: parseInt(raceId),
-        bankroll,
-        fractional_coefficient: kellyCoef,
-        min_win_prob: minProb,
-        min_ev_pct: minEvPct,
-        rebate_pct: getRebatePct(),
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(data));
-
-    let html = `<p class="note">期待値マイナス・見送り対象(${data.hidden_negative_count}件)は非表示にしています。回収率100%が収支トントンの基準です。<br>⚠️低確率帯(未補正)は、推定確率0-5%の「大穴」帯で、実績データがまだ十分でなく自動補正が効いていません。確率推定のわずかな誤差がオッズで大きく増幅されるため、高い回収率が出ていても過信は禁物です。</p>`;
-    html += `<table><tr><th>券種</th><th>買い目</th><th>推定勝率</th><th>オッズ</th><th>回収率%</th><th>推奨額</th><th>判定</th><th>自己影響</th></tr>`;
-    for (const r of data.results) {
-      const cls = r.is_skip ? "ev-skip" : (r.is_recommended ? "ev-positive" : "");
-      const judge = r.is_skip ? "見送り" : (r.is_recommended ? "🟢買い" : "△");
-      const impact = r.self_impact_pct === null ? "不明" : `${r.self_impact_pct}%${r.self_impact_warning ? "⚠️" : ""}`;
-      const probLabel = `${r.estimated_win_prob_pct}%${r.low_prob_warning ? " ⚠️低確率帯(未補正)" : ""}`;
-      html += `<tr class="${cls}"><td>${r.bet_type}</td><td>${r.combination}</td><td>${probLabel}</td><td>${r.odds_value}</td><td>${r.roi_pct}%</td><td>${r.is_skip ? "-" : r.recommended_stake + "円"}</td><td>${judge}</td><td>${impact}</td></tr>`;
+    const raceRes = await fetch(apiUrl(`/races/${raceId}`));
+    const raceData = await raceRes.json();
+    const needsEstimate = !raceData.entries || raceData.entries.some((e) => !e.ready_for_ev);
+    if (needsEstimate) {
+      resultBox.textContent = "AI予想を実行中...(展開予想→勝率推定の2段階、数十秒かかります)";
+      const estRes = await fetch(apiUrl(`/analyze/estimate/${raceId}`), { method: "POST" });
+      const estData = await estRes.json();
+      if (!estRes.ok) throw new Error(estData.detail || "AI予想の実行に失敗しました");
     }
-    html += "</table>";
-    resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
-  }
-});
-
-document.getElementById("racePlanBtn").addEventListener("click", async () => {
-  const raceId = document.getElementById("raceSelect").value;
-  const resultBox = document.getElementById("evResult");
-  if (!raceId) {
-    alert("レースを選択してください");
+    resultBox.textContent = "エラー(AI予想): " + e.message;
     return;
   }
-  const bankroll = getBankrollOverride();
-  const kellyCoef = FIXED_KELLY_COEFFICIENT;
-  const minProb = parseFloat(document.getElementById("minProbInput").value) / 100;
-  const minEvPct = parseFloat(document.getElementById("minEvInput").value);
 
   resultBox.textContent = "プラン作成中...";
   try {
@@ -590,10 +539,26 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
         <label>実際の着順(例: 2-5-1 = 1着2番,2着5番,3着1番)</label>
         <input type="text" placeholder="2-5-1" id="result_${raceId}">
         <button data-race="${raceId}" class="confirmResultBtn">この着順で一括確定する</button>
+        <button data-race="${raceId}" class="discardPendingBtn" style="background:#64748b;">実際は投票しなかった(この分を破棄)</button>
         <div id="confirmMsg_${raceId}" class="result-box"></div>
       `;
       box.appendChild(div);
     }
+
+    document.querySelectorAll(".discardPendingBtn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const raceId = btn.dataset.race;
+        if (!confirm("このレースの未確定分を破棄します(実際に投票しなかった記録として削除)。よろしいですか？")) return;
+        try {
+          const res = await fetch(apiUrl(`/purchases/pending/by-race/${raceId}`), { method: "DELETE" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(data));
+          document.getElementById("loadPendingBtn").click();
+        } catch (e) {
+          alert("破棄エラー: " + e.message);
+        }
+      });
+    });
 
     document.querySelectorAll(".confirmResultBtn").forEach((btn) => {
       btn.addEventListener("click", async () => {
@@ -673,7 +638,7 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
 // ---------- ⑤ 実績検証 ----------
 function renderBucketTable(title, bucketObj) {
   if (!bucketObj || Object.keys(bucketObj).length === 0) return "";
-  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>的中率</th><th>期待的中率</th><th>実績</th><th>想定期待値</th></tr>`;
+  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>的中率</th><th>想定的中率</th><th>実績</th><th>想定期待値</th></tr>`;
   for (const [key, v] of Object.entries(bucketObj)) {
     const cls = v.expectancy_pct > 0 ? "ev-positive" : "";
     html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.win_rate_pct}%</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct}%</td><td>${v.expected_ev_pct ?? "-"}${v.expected_ev_pct !== null ? "%" : ""}</td></tr>`;
@@ -693,12 +658,12 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       return;
     }
     let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(100%が損益分岐点。想定期待値: ${data.expected_ev_pct ?? "-"}${data.expected_ev_pct !== null ? "%" : ""}。総ベット数: ${data.total_bets}件)</p>`;
-    html += `<p>期待的中率(AIが購入時点で見積もっていた平均勝率): ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}</p>`;
+    html += `<p>的中率: ${data.overall_win_rate_pct}%(想定的中率: ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}、AIが購入時点で見積もっていた平均勝率)</p>`;
     html += `<p class="note">${data.note}</p>`;
 
     if (data.best_conditions_ranking && data.best_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>🏆 好調な条件(実績が高い順)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待的中率</th><th>実績</th><th>想定期待値</th></tr>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>想定的中率</th><th>実績</th><th>想定期待値</th></tr>`;
       for (const r of data.best_conditions_ranking) {
         html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_ev_pct ?? "-"}${r.expected_ev_pct !== null ? "%" : ""}</td></tr>`;
       }
@@ -706,7 +671,7 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     }
     if (data.worst_conditions_ranking && data.worst_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>⚠️ 不調な条件(見直しの手がかり)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待的中率</th><th>実績</th><th>想定期待値</th></tr>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>想定的中率</th><th>実績</th><th>想定期待値</th></tr>`;
       for (const r of data.worst_conditions_ranking) {
         html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_ev_pct ?? "-"}${r.expected_ev_pct !== null ? "%" : ""}</td></tr>`;
       }

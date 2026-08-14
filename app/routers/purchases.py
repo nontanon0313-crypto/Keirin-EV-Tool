@@ -267,6 +267,34 @@ def calibration_status(db: Session = Depends(get_db)):
     return {"overall": overall, "buckets": buckets}
 
 
+@router.delete("/{purchase_id}")
+def delete_purchase(purchase_id: int, db: Session = Depends(get_db)):
+    """
+    購入履歴を1件削除する。実際には投票しなかった(見送った)未確定の記録を
+    消すためのもの。結果確定済み(win/lose)のものは、実績が歪むため削除できない。
+    """
+    obj = db.query(models.Purchase).get(purchase_id)
+    if not obj:
+        raise HTTPException(404, "購入履歴が見つかりません")
+    if obj.result != "pending":
+        raise HTTPException(400, "結果確定済みの購入履歴は削除できません(実績データのため)")
+    db.delete(obj)
+    db.commit()
+    return {"deleted": True, "purchase_id": purchase_id}
+
+
+@router.delete("/pending/by-race/{race_id}")
+def delete_pending_purchases_by_race(race_id: int, db: Session = Depends(get_db)):
+    """指定レースの未確定(pending)購入履歴をまとめて削除する。実際には投票しなかった分の整理用。"""
+    deleted_count = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.race_id == race_id, models.Purchase.result == "pending")
+        .delete()
+    )
+    db.commit()
+    return {"deleted_count": deleted_count, "race_id": race_id}
+
+
 @router.get("/pending")
 def list_pending_purchases(db: Session = Depends(get_db)):
     """まだ結果未確定の購入履歴一覧(結果入力画面用)。レースごとにまとめられるよう、レース情報も付与する。"""
@@ -509,16 +537,19 @@ def purchase_stats(db: Session = Depends(get_db)):
                 })
     ranking.sort(key=lambda x: -x["expectancy_pct"])
 
-    # 全体の想定期待値・期待的中率(購入時点でAIが見積もっていた値の平均)
+    # 全体の想定期待値・想定的中率(購入時点でAIが見積もっていた値の平均)
     win_prob_values = [p.win_prob_at_purchase for p in purchases if p.win_prob_at_purchase is not None]
     ev_pct_values = [p.ev_pct_at_purchase for p in purchases if p.ev_pct_at_purchase is not None]
     expected_win_rate_pct = round(sum(win_prob_values) / len(win_prob_values) * 100, 1) if win_prob_values else None
     expected_ev_pct = round(sum(ev_pct_values) / len(ev_pct_values), 2) if ev_pct_values else None
+    overall_win_count = sum(1 for p in purchases if p.result == "win")
+    overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1)
 
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "overall_roi_pct": round(overall_expectancy_pct + 100, 2),
         "expected_ev_pct": expected_ev_pct,
+        "overall_win_rate_pct": overall_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
         "total_bets": len(purchases),
         "best_conditions_ranking": ranking[:10],

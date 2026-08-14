@@ -80,6 +80,7 @@ def list_races(db: Session = Depends(get_db)):
             "race_number": r.race_number,
             "grade": r.grade,
             "event_title": r.event_title,
+            "race_date": r.race_date.strftime("%m/%d") if r.race_date else None,
             "entry_count": len(r.entries),
             "odds_count": len(r.odds_list),
         }

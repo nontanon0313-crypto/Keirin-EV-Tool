@@ -16,7 +16,7 @@
 <nav class="tabbar">
   <button class="tab-btn active" data-tab="tab-vote">投票</button>
   <button class="tab-btn" data-tab="tab-bankroll">証拠金</button>
-  <button class="tab-btn" data-tab="tab-verify">検証・設定</button>
+  <button class="tab-btn" data-tab="tab-verify">検証</button>
   <button class="tab-btn" data-tab="tab-settings">詳細設定</button>
 </nav>
 
@@ -40,8 +40,6 @@
     <h2>② レース選択・期待値計算</h2>
     <select id="raceSelect"></select>
     <div id="raceDetailResult" class="result-box"></div>
-    <button id="runEstimateBtn" style="background:#22c55e;">🎯AI予想を実行(展開予想+勝率推定)</button>
-    <p class="note">スクショの取り込みが全て終わったら、このボタンを1回押してください。同じレースで何度もスクショを追加した場合も、最後に1回押せばOKです(自動実行はしません)。</p>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="rebateCheckbox" style="width:auto;margin:0;">
@@ -62,8 +60,8 @@
       券種をまたいだ「ガミり」(的中しても合計投票額を下回る結果)が起きないように選ぶ(推奨)
     </label>
 
-    <button id="calcEvBtn">期待値を計算(一覧)</button>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
+    <p class="note">AI予想がまだなら自動で実行してからプランを作成します(数十秒かかる場合があります)。</p>
     <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>
     <div id="evResult" class="result-box"></div>
   </section>
@@ -101,6 +99,14 @@
 <div id="tab-verify" class="tab-content">
 
   <section class="card">
+    <h2>実績検証</h2>
+    <button id="loadStatsBtn">集計を表示</button>
+    <button id="loadCalibrationBtn" style="background:#06b6d4;">自動補正の状態を確認</button>
+    <button id="loadSourceWeightsBtn" style="background:#8b5cf6;">tipstar/AI予想の重み付けを確認</button>
+    <div id="statsResult" class="result-box"></div>
+  </section>
+
+  <section class="card">
     <h2>資金管理シミュレーション(破産確率)</h2>
     <p class="note">証拠金タブの現在残高を初期資金として使用します。</p>
     <label>勝率(%)</label>
@@ -113,14 +119,6 @@
     <input type="number" id="simNumBets" value="100">
     <button id="runSimBtn">シミュレーション実行</button>
     <div id="simResult" class="result-box"></div>
-  </section>
-
-  <section class="card">
-    <h2>実績検証</h2>
-    <button id="loadStatsBtn">集計を表示</button>
-    <button id="loadCalibrationBtn" style="background:#06b6d4;">自動補正の状態を確認</button>
-    <button id="loadSourceWeightsBtn" style="background:#8b5cf6;">tipstar/AI予想の重み付けを確認</button>
-    <div id="statsResult" class="result-box"></div>
   </section>
 
   <section class="card">
