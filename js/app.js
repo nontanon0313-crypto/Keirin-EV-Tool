@@ -114,9 +114,6 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
   const files = Array.from(input.files);
   const total = files.length;
   let doneCount = 0;
-  let errorCount = 0;
-  let finalOddsUpdatedTotal = 0;
-  const raceIdsSeen = [];
   const logLines = [];
 
   function renderProgress() {
@@ -131,39 +128,51 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
   }
   await renderProgressAndFlush();
 
-  // 1枚ずつ個別リクエストにすることで、完了したファイルから順に進捗を表示できるようにする
-  // (以前はまとめて1リクエストだったため、全部終わるまで進捗が全く見えなかった)。
-  // 同時実行数を絞ることで、Gemini無料枠のレート制限への配慮もしている。
-  const CONCURRENCY = 4;
-  let nextIndex = 0;
+  const formData = new FormData();
+  for (const file of files) formData.append("files", file);
+  formData.append("is_final_odds", isFinalOdds);
 
-  async function worker() {
-    while (nextIndex < files.length) {
-      const i = nextIndex++;
-      const file = files[i];
-      const formData = new FormData();
-      formData.append("files", file);
-      formData.append("is_final_odds", isFinalOdds);
-      try {
-        const res = await fetch(apiUrl("/analyze/screenshots"), { method: "POST", body: formData });
-        const data = await res.json();
-        if (!res.ok) throw new Error(JSON.stringify(data));
-        errorCount += data.error_count || 0;
-        finalOddsUpdatedTotal += data.final_odds_updated_count || 0;
-        for (const id of data.race_ids || []) raceIdsSeen.push(id);
-        for (const r of data.results || []) {
-          logLines.push(r.error ? `- ${r.filename}: ❌解析失敗(${r.error})` : `- ${r.filename}: ${r.screen_type} (レースID:${r.race_id} 選手${r.entries_found}件 オッズ${r.odds_found}件)`);
-        }
-      } catch (e) {
-        errorCount++;
-        logLines.push(`- ${file.name}: ❌解析失敗(${e.message})`);
-      }
-      doneCount++;
-      await renderProgressAndFlush();
+  // サーバー側は全ファイルを並列処理しつつ、完了したものから順に1行ずつ(NDJSON)返す。
+  // これにより、並列処理の速さと「今どこまで進んだか」の進捗表示を両立している
+  // (以前は1枚ずつ個別リクエストにして進捗を見せていたが、並列度が下がっていた)。
+  let summary = null;
+  try {
+    const res = await fetch(apiUrl("/analyze/screenshots"), { method: "POST", body: formData });
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `サーバーエラー(${res.status})`);
     }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // 未完成の最終行は次回に持ち越す
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const obj = JSON.parse(line);
+        if (obj.type === "summary") {
+          summary = obj;
+          continue;
+        }
+        logLines.push(obj.error
+          ? `- ${obj.filename}: ❌解析失敗(${obj.error})`
+          : `- ${obj.filename}: ${obj.screen_type} (レースID:${obj.race_id} 選手${obj.entries_found}件 オッズ${obj.odds_found}件)`);
+        doneCount++;
+        await renderProgressAndFlush();
+      }
+    }
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message + "\n" + logLines.join("\n");
+    return;
   }
 
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker));
+  const errorCount = summary?.error_count ?? 0;
+  const finalOddsUpdatedTotal = summary?.final_odds_updated_count ?? 0;
+  const raceIdsSeen = summary?.race_ids ?? [];
 
   resultBox.textContent = `解析完了: ${total}枚処理${errorCount ? `(うち${errorCount}枚は解析失敗)` : ""}${finalOddsUpdatedTotal ? `\n最終オッズを${finalOddsUpdatedTotal}件の購入履歴に反映しました` : ""}\n` +
     logLines.join("\n");

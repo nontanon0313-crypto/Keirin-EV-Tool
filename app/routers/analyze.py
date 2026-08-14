@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import datetime
 import asyncio
+import json
 
 from ..database import get_db
 from .. import models
@@ -199,75 +201,93 @@ async def analyze_screenshots(
     複数枚のスクショ(出走表・成績・勝率・オッズを問わず)をまとめてアップロードし、
     Geminiで解析してDBに反映する。
 
-    Gemini解析(parse_screenshot)はネットワーク待ちが主体のため、従来は枚数分を
-    1枚ずつ順番に呼び出しており、枚数に比例して処理時間が伸びていた(投票締切に
-    間に合わないとの指摘あり)。ここを並列実行に変更し、時間を短縮する。
+    Gemini解析(parse_screenshot)はネットワーク待ちが主体のため、並列実行して
+    枚数に比例して処理時間が伸びないようにしている。加えて、1件処理が終わるたびに
+    NDJSON(改行区切りJSON)で1行ずつ結果をストリーミング返却することで、
+    フロント側が「並列の速さ」と「今どこまで進んだか分かる進捗表示」を両立できるようにしている
+    (以前は「1枚ずつ個別リクエスト」で進捗は見えたが並列度が下がっていた。のんの指摘により、
+    サーバー側の並列処理を保ったままストリーミングする方式に変更)。
 
     is_final_odds=Trueの場合、投票締切後の最終オッズのスクショとして扱い、
     オッズ通常反映に加えて該当レースの購入履歴のfinal_oddsも自動で埋める
     (手入力なしでオッズ変動の実績データを溜められるようにするため)。
-    """
-    results = []
-    affected_races = {}
-    final_odds_updated_total = 0
 
+    注意: AI予想(展開予想・勝率推定)はここでは実行しない。以前はレースごとに
+    自動実行していたが、複数ファイルが同じレースを触る際に重複実行され、
+    データ競合やGemini呼び出し過多(レート制限超過)を招いていたため、
+    /analyze/estimate/{race_id} を明示的に呼ぶ方式に変更した。
+    """
     file_infos = []
     for f in files:
         content = await f.read()
         mime = f.content_type or "image/png"
         file_infos.append((f.filename, content, mime))
 
-    # 複数枚のGemini解析を並列実行(1枚ずつの逐次待ちをなくす)。
-    # ただし無料枠のレート制限(30回/分)に一斉に引っかかると、まとめて20秒待ちが
-    # 発生し逆効果になるため、同時実行数に上限を設けて少しずつずらして送る。
+    # 無料枠のレート制限(30回/分)に一斉に引っかかると、まとめて20秒待ちが発生し
+    # 逆効果になるため、同時実行数に上限を設けて少しずつずらして送る。
     semaphore = asyncio.Semaphore(8)
 
-    async def _parse_with_limit(content: bytes, mime: str):
+    async def _process_one(filename: str, content: bytes, mime: str) -> dict:
         async with semaphore:
-            return await asyncio.to_thread(parse_screenshot, content, mime)
+            try:
+                parsed = await asyncio.to_thread(parse_screenshot, content, mime)
+            except Exception as e:
+                return {"type": "file_result", "filename": filename, "error": str(e)}
 
-    parsed_list = await asyncio.gather(
-        *[_parse_with_limit(content, mime) for (_, content, mime) in file_infos],
-        return_exceptions=True,
-    )
+        # DB書き込みはasyncio(シングルスレッド)上の同期処理なので、他タスクと
+        # 途中で入り交じることはない(awaitを挟まないブロックは割り込まれない)。
+        try:
+            race = _get_or_create_race(db, parsed)
+            final_odds_updated = 0
+            if parsed.get("entries"):
+                _upsert_entries(db, race, parsed["entries"])
+            if parsed.get("odds_list"):
+                _upsert_odds(db, race, parsed["odds_list"])
+                if is_final_odds:
+                    final_odds_updated = _apply_final_odds(db, race, parsed["odds_list"])
+            if parsed.get("lines"):
+                race.lines_data = parsed["lines"]
+                db.commit()
 
-    error_count = 0
-    for (filename, _, _), parsed in zip(file_infos, parsed_list):
-        if isinstance(parsed, Exception):
-            error_count += 1
-            results.append({"filename": filename, "error": str(parsed)})
-            continue
+            return {
+                "type": "file_result",
+                "filename": filename,
+                "screen_type": parsed.get("screen_type"),
+                "race_id": race.id,
+                "venue_name": race.venue_name,
+                "race_number": race.race_number,
+                "entries_found": len(parsed.get("entries") or []),
+                "odds_found": len(parsed.get("odds_list") or []),
+                "final_odds_updated": final_odds_updated,
+            }
+        except Exception as e:
+            return {"type": "file_result", "filename": filename, "error": str(e)}
 
-        race = _get_or_create_race(db, parsed)
-        affected_races[race.id] = race
+    async def stream():
+        tasks = [asyncio.create_task(_process_one(fn, content, mime)) for fn, content, mime in file_infos]
+        error_count = 0
+        final_odds_updated_total = 0
+        race_ids = []
+        for coro in asyncio.as_completed(tasks):
+            result = await coro
+            if result.get("error"):
+                error_count += 1
+            else:
+                final_odds_updated_total += result.get("final_odds_updated", 0)
+                if result["race_id"] not in race_ids:
+                    race_ids.append(result["race_id"])
+            yield json.dumps(result, ensure_ascii=False) + "\n"
 
-        if parsed.get("entries"):
-            _upsert_entries(db, race, parsed["entries"])
-        if parsed.get("odds_list"):
-            _upsert_odds(db, race, parsed["odds_list"])
-            if is_final_odds:
-                final_odds_updated_total += _apply_final_odds(db, race, parsed["odds_list"])
-        if parsed.get("lines"):
-            race.lines_data = parsed["lines"]
-            db.commit()
+        summary = {
+            "type": "summary",
+            "processed_files": len(files),
+            "error_count": error_count,
+            "final_odds_updated_count": final_odds_updated_total,
+            "race_ids": race_ids,
+        }
+        yield json.dumps(summary, ensure_ascii=False) + "\n"
 
-        results.append({
-            "filename": filename,
-            "screen_type": parsed.get("screen_type"),
-            "race_id": race.id,
-            "venue_name": race.venue_name,
-            "race_number": race.race_number,
-            "entries_found": len(parsed.get("entries") or []),
-            "odds_found": len(parsed.get("odds_list") or []),
-        })
-
-    return {
-        "processed_files": len(files),
-        "error_count": error_count,
-        "final_odds_updated_count": final_odds_updated_total,
-        "results": results,
-        "race_ids": list(affected_races.keys()),
-    }
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
 @router.post("/estimate/{race_id}")
