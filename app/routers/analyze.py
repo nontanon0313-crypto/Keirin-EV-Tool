@@ -9,7 +9,7 @@ import json
 from ..database import get_db
 from .. import models
 from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities, simulate_race_development
-from ..keirin_data import is_local_player
+from ..keirin_data import is_local_player, get_current_weather
 from . import purchases as purchases_router
 
 router = APIRouter(prefix="/analyze", tags=["analyze"])
@@ -29,7 +29,7 @@ def _current_season_jst() -> str:
     return "冬"
 
 
-def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
+async def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
     venue = parsed.get("venue_name")
     race_number = parsed.get("race_number")
     query = db.query(models.Race)
@@ -55,11 +55,28 @@ def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
         if existing.temperature_c is None and parsed.get("temperature_c") is not None:
             existing.temperature_c = parsed.get("temperature_c")
             db.commit()
+        # スクショに天候が写っていないことが多いため、開催地の座標からリアルタイム天候を
+        # 補完する(のんの要望により追加)。requests呼び出しはブロッキングのため、
+        # 並列処理を止めないようスレッドに逃がす。取得できなければ何もしない。
+        if existing.weather is None and existing.venue_name:
+            live = await asyncio.to_thread(get_current_weather, existing.venue_name)
+            if live:
+                existing.weather = live["weather"]
+                existing.temperature_c = live["temperature_c"]
+                db.commit()
         return existing
 
     bank = None
     if venue:
         bank = db.query(models.BankMaster).filter(models.BankMaster.name == venue).first()
+
+    weather = parsed.get("weather")
+    temperature_c = parsed.get("temperature_c")
+    if weather is None and venue:
+        live = await asyncio.to_thread(get_current_weather, venue)
+        if live:
+            weather = live["weather"]
+            temperature_c = live["temperature_c"]
 
     race = models.Race(
         venue_name=venue or "不明",
@@ -69,8 +86,8 @@ def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
         race_stage=parsed.get("race_stage"),
         event_title=parsed.get("event_title"),
         source_app=parsed.get("source_app"),
-        weather=parsed.get("weather"),
-        temperature_c=parsed.get("temperature_c"),
+        weather=weather,
+        temperature_c=temperature_c,
         season=_current_season_jst(),
     )
     db.add(race)
@@ -237,7 +254,7 @@ async def analyze_screenshots(
         # DB書き込みはasyncio(シングルスレッド)上の同期処理なので、他タスクと
         # 途中で入り交じることはない(awaitを挟まないブロックは割り込まれない)。
         try:
-            race = _get_or_create_race(db, parsed)
+            race = await _get_or_create_race(db, parsed)
             final_odds_updated = 0
             if parsed.get("entries"):
                 _upsert_entries(db, race, parsed["entries"])

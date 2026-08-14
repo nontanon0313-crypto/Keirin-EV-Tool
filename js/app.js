@@ -339,6 +339,9 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
       const estRes = await fetch(apiUrl(`/analyze/estimate/${raceId}`), { method: "POST" });
       const estData = await estRes.json();
       if (!estRes.ok) throw new Error(estData.detail || "AI予想の実行に失敗しました");
+      // ②の詳細表示(AI推定・合成勝率の列)を更新する
+      // (以前は「AI予想を実行」ボタン自身がこれを呼んでいたが、ボタン統合で漏れていた)
+      await checkRace();
     }
   } catch (e) {
     resultBox.textContent = "エラー(AI予想): " + e.message;
