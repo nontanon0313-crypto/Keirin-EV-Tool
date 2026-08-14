@@ -452,6 +452,10 @@ async function recordRacePlanAsPurchases() {
       combination: it.combination,
       stake_amount: it.stake,
       odds_at_purchase: it.odds_value,
+      // 以前はここが漏れており、購入履歴のwin_prob_at_purchaseが常に空になっていた。
+      // このせいで「想定的中率」が算出できず、勝率帯別の自動補正・実績検証も
+      // 正しく機能していなかった(のんの報告により発覚)。
+      win_prob_at_purchase: it.estimated_win_prob_pct / 100,
       ev_pct_at_purchase: it.ev_pct,
     }));
 
@@ -580,6 +584,7 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
           const winCount = result.updated.filter(u => u.result === "win").length;
           msgBox.textContent = `${result.updated_count}件を確定しました(的中${winCount}件)。払戻額は最終オッズが未入力の場合、購入時オッズで概算しています。`;
           await refreshBankrollDisplay();
+          await loadRaces(); // 確定済みレースはもう投票できないため一覧(投票タブ)から消す
         } catch (e) {
           msgBox.textContent = "エラー: " + e.message;
         }

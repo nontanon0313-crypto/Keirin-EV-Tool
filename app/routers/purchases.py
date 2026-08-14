@@ -566,7 +566,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         "by_leg_style": all_buckets["買い目内脚質構成別"],
         "odds_drift": _odds_drift_stats(purchases),
         "note": (
-            "expectancy_pctは0%が損益分岐点(roi_pctは100%が損益分岐点、同じ実績を別表現にしたもの)。"
+            "「実績」は0%が損益分岐点、「実績収支率」は100%が損益分岐点の表現です(同じ数字を2通りの基準で表しているだけです)。"
             f"件数{min_sample_for_ranking}件未満の条件はランキングから除外しています(判断が不安定なため)。"
         ),
     }

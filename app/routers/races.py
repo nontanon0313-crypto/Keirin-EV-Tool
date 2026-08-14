@@ -72,7 +72,15 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
 
 @router.get("/")
 def list_races(db: Session = Depends(get_db)):
-    races = db.query(models.Race).order_by(models.Race.id.desc()).limit(50).all()
+    # 過去のレース(着順確定済み=actual_resultがある)は、もう投票できないため
+    # 選択する必要が無い。一覧からは除外する(のんの要望により変更)。
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.is_(None))
+        .order_by(models.Race.id.desc())
+        .limit(50)
+        .all()
+    )
     return [
         {
             "id": r.id,
