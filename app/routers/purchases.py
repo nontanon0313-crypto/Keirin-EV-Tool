@@ -338,23 +338,43 @@ def purchase_stats(db: Session = Depends(get_db)):
         buckets = {}
         for p in purchases:
             key = key_fn(p)
-            b = buckets.setdefault(key, {"stake": 0.0, "payout": 0.0, "count": 0, "wins": 0})
+            b = buckets.setdefault(key, {
+                "stake": 0.0, "payout": 0.0, "count": 0, "wins": 0,
+                "win_prob_sum": 0.0, "win_prob_count": 0,
+                "ev_pct_sum": 0.0, "ev_pct_count": 0,
+            })
             b["stake"] += p.stake_amount
             b["payout"] += p.payout_amount
             b["count"] += 1
             if p.result == "win":
                 b["wins"] += 1
+            # win_prob_at_purchase / ev_pct_at_purchase は、購入時点でのAI予想値
+            # (実績ではなく「買った時、AIはどう見積もっていたか」のスナップショット)。
+            if p.win_prob_at_purchase is not None:
+                b["win_prob_sum"] += p.win_prob_at_purchase
+                b["win_prob_count"] += 1
+            if p.ev_pct_at_purchase is not None:
+                b["ev_pct_sum"] += p.ev_pct_at_purchase
+                b["ev_pct_count"] += 1
         out = {}
         for k, v in buckets.items():
             expectancy = ((v["payout"] - v["stake"]) / v["stake"] * 100) if v["stake"] else 0
+            expected_win_rate_pct = (
+                round(v["win_prob_sum"] / v["win_prob_count"] * 100, 1) if v["win_prob_count"] else None
+            )
+            expected_ev_pct = (
+                round(v["ev_pct_sum"] / v["ev_pct_count"], 2) if v["ev_pct_count"] else None
+            )
             out[k] = {
                 "count": v["count"],
                 "win_rate_pct": round(v["wins"] / v["count"] * 100, 1),
+                "expected_win_rate_pct": expected_win_rate_pct,
                 # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
                 "roi_pct": round(expectancy + 100, 2),
                 "expectancy_pct": round(expectancy, 2),
+                "expected_ev_pct": expected_ev_pct,
             }
-        # 期待値(実績)が高い順に並べ替える
+        # 実績が高い順に並べ替える
         return dict(sorted(out.items(), key=lambda item: -item[1]["expectancy_pct"]))
 
     def prob_bucket(p):
@@ -471,7 +491,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         "買い目内脚質構成別": bucket_stats(leg_style_bucket),
     }
 
-    # 全ての切り口を横断し、サンプル数が一定以上(ノイズ除け)で期待値実績が高い条件をランキング化する。
+    # 全ての切り口を横断し、サンプル数が一定以上(ノイズ除け)で実績が高い条件をランキング化する。
     # これが「集計結果を見て予想を修正する」ための最初の手がかりになる。
     min_sample_for_ranking = 5
     ranking = []
@@ -483,13 +503,23 @@ def purchase_stats(db: Session = Depends(get_db)):
                     "condition": key,
                     "count": v["count"],
                     "win_rate_pct": v["win_rate_pct"],
+                    "expected_win_rate_pct": v["expected_win_rate_pct"],
                     "expectancy_pct": v["expectancy_pct"],
+                    "expected_ev_pct": v["expected_ev_pct"],
                 })
     ranking.sort(key=lambda x: -x["expectancy_pct"])
+
+    # 全体の想定期待値・期待的中率(購入時点でAIが見積もっていた値の平均)
+    win_prob_values = [p.win_prob_at_purchase for p in purchases if p.win_prob_at_purchase is not None]
+    ev_pct_values = [p.ev_pct_at_purchase for p in purchases if p.ev_pct_at_purchase is not None]
+    expected_win_rate_pct = round(sum(win_prob_values) / len(win_prob_values) * 100, 1) if win_prob_values else None
+    expected_ev_pct = round(sum(ev_pct_values) / len(ev_pct_values), 2) if ev_pct_values else None
 
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "overall_roi_pct": round(overall_expectancy_pct + 100, 2),
+        "expected_ev_pct": expected_ev_pct,
+        "expected_win_rate_pct": expected_win_rate_pct,
         "total_bets": len(purchases),
         "best_conditions_ranking": ranking[:10],
         "worst_conditions_ranking": ranking[-10:][::-1] if len(ranking) > 10 else [],

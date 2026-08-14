@@ -673,10 +673,10 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
 // ---------- ⑤ 実績検証 ----------
 function renderBucketTable(title, bucketObj) {
   if (!bucketObj || Object.keys(bucketObj).length === 0) return "";
-  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>的中率</th><th>期待値実績</th></tr>`;
+  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>的中率</th><th>期待的中率</th><th>実績</th><th>想定期待値</th></tr>`;
   for (const [key, v] of Object.entries(bucketObj)) {
     const cls = v.expectancy_pct > 0 ? "ev-positive" : "";
-    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.win_rate_pct}%</td><td>${v.expectancy_pct}%</td></tr>`;
+    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.win_rate_pct}%</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct}%</td><td>${v.expected_ev_pct ?? "-"}${v.expected_ev_pct !== null ? "%" : ""}</td></tr>`;
   }
   html += "</table>";
   return html;
@@ -692,22 +692,23 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       resultBox.textContent = data.message;
       return;
     }
-    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(100%が損益分岐点。総ベット数: ${data.total_bets}件)</p>`;
+    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(100%が損益分岐点。想定期待値: ${data.expected_ev_pct ?? "-"}${data.expected_ev_pct !== null ? "%" : ""}。総ベット数: ${data.total_bets}件)</p>`;
+    html += `<p>期待的中率(AIが購入時点で見積もっていた平均勝率): ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}</p>`;
     html += `<p class="note">${data.note}</p>`;
 
     if (data.best_conditions_ranking && data.best_conditions_ranking.length) {
-      html += `<p style="margin-top:12px;"><strong>🏆 好調な条件(期待値実績が高い順)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待値実績</th></tr>`;
+      html += `<p style="margin-top:12px;"><strong>🏆 好調な条件(実績が高い順)</strong></p>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待的中率</th><th>実績</th><th>想定期待値</th></tr>`;
       for (const r of data.best_conditions_ranking) {
-        html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expectancy_pct}%</td></tr>`;
+        html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_ev_pct ?? "-"}${r.expected_ev_pct !== null ? "%" : ""}</td></tr>`;
       }
       html += `</table>`;
     }
     if (data.worst_conditions_ranking && data.worst_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>⚠️ 不調な条件(見直しの手がかり)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待値実績</th></tr>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>期待的中率</th><th>実績</th><th>想定期待値</th></tr>`;
       for (const r of data.worst_conditions_ranking) {
-        html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expectancy_pct}%</td></tr>`;
+        html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_ev_pct ?? "-"}${r.expected_ev_pct !== null ? "%" : ""}</td></tr>`;
       }
       html += `</table>`;
     }
