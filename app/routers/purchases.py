@@ -405,7 +405,7 @@ def purchase_stats(db: Session = Depends(get_db)):
             b = buckets.setdefault(key, {
                 "stake": 0.0, "payout": 0.0, "count": 0, "wins": 0,
                 "win_prob_sum": 0.0, "win_prob_count": 0,
-                "ev_pct_sum": 0.0, "ev_pct_count": 0,
+                "ev_profit_sum": 0.0, "ev_stake_sum": 0.0,
             })
             b["stake"] += p.stake_amount
             b["payout"] += p.payout_amount
@@ -417,9 +417,11 @@ def purchase_stats(db: Session = Depends(get_db)):
             if p.win_prob_at_purchase is not None:
                 b["win_prob_sum"] += p.win_prob_at_purchase
                 b["win_prob_count"] += 1
+            # 投資額で加重平均する(証拠金の日々の変動で1点あたりの投資額が違うため、
+            # 単純平均だと少額の買い目と高額の買い目が同じ重みになってしまう)。
             if p.ev_pct_at_purchase is not None:
-                b["ev_pct_sum"] += p.ev_pct_at_purchase
-                b["ev_pct_count"] += 1
+                b["ev_profit_sum"] += p.stake_amount * p.ev_pct_at_purchase / 100
+                b["ev_stake_sum"] += p.stake_amount
         out = {}
         for k, v in buckets.items():
             expectancy = ((v["payout"] - v["stake"]) / v["stake"] * 100) if v["stake"] else 0
@@ -427,10 +429,12 @@ def purchase_stats(db: Session = Depends(get_db)):
                 round(v["win_prob_sum"] / v["win_prob_count"] * 100, 1) if v["win_prob_count"] else None
             )
             # ev_pct_at_purchaseは「0%が損益分岐点」表現のため、+100して実績(roi_pct)と
-            # 同じ「100%が損益分岐点」表現に揃える(外部監査により発覚したバグを修正)。
+            # 同じ「100%が損益分岐点」表現に揃える。さらに投資額で加重する
+            # (外部監査・のんの指摘により修正)。
             expected_roi_pct = (
-                round(v["ev_pct_sum"] / v["ev_pct_count"] + 100, 2) if v["ev_pct_count"] else None
+                round((v["ev_profit_sum"] / v["ev_stake_sum"] + 1) * 100, 2) if v["ev_stake_sum"] else None
             )
+            expected_profit = round(v["ev_profit_sum"], 0) if v["ev_stake_sum"] else None
             out[k] = {
                 "count": v["count"],
                 "win_rate_pct": round(v["wins"] / v["count"] * 100, 1),
@@ -438,7 +442,9 @@ def purchase_stats(db: Session = Depends(get_db)):
                 # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
                 "roi_pct": round(expectancy + 100, 2),
                 "expectancy_pct": round(expectancy, 2),
+                "profit": round(v["payout"] - v["stake"], 0),
                 "expected_roi_pct": expected_roi_pct,
+                "expected_profit": expected_profit,
             }
         # 実績が高い順に並べ替える
         return dict(sorted(out.items(), key=lambda item: -item[1]["expectancy_pct"]))
@@ -596,10 +602,20 @@ def purchase_stats(db: Session = Depends(get_db)):
     # 注意: ev_pct_at_purchaseは「0%が損益分岐点」の表現(calc_ev_pctの定義)で保存されている。
     # 実績収支率(overall_roi_pct)は「100%が損益分岐点」の表現なので、そのまま並べて比較すると
     # 単位が100ポイントずれる。+100して揃える(外部監査により発覚したバグを修正)。
+    #
+    # さらに、レースごとに投資額が異なる(証拠金は日々変動するため)ため、単純平均では
+    # 少額のレースと高額のレースが同じ重みになってしまい、実際に得ていた/失っていた金額
+    # (想定収益)とズレる。実績収支率(payout/stake)が金額加重であるのに合わせ、
+    # 想定側も金額加重で計算する(のんの指摘により修正)。
     win_prob_values = [p.win_prob_at_purchase for p in purchases if p.win_prob_at_purchase is not None]
-    ev_pct_values = [p.ev_pct_at_purchase for p in purchases if p.ev_pct_at_purchase is not None]
+    ev_purchases = [p for p in purchases if p.ev_pct_at_purchase is not None]
     expected_win_rate_pct = round(sum(win_prob_values) / len(win_prob_values) * 100, 1) if win_prob_values else None
-    expected_roi_pct = round(sum(ev_pct_values) / len(ev_pct_values) + 100, 2) if ev_pct_values else None
+    expected_stake_sum = sum(p.stake_amount for p in ev_purchases)
+    expected_profit_sum = sum(p.stake_amount * p.ev_pct_at_purchase / 100 for p in ev_purchases)
+    expected_roi_pct = (
+        round((expected_profit_sum / expected_stake_sum + 1) * 100, 2) if expected_stake_sum else None
+    )
+    expected_profit_total = round(expected_profit_sum, 0) if ev_purchases else None
     overall_win_count = sum(1 for p in purchases if p.result == "win")
     overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1)
 
@@ -656,7 +672,9 @@ def purchase_stats(db: Session = Depends(get_db)):
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "overall_roi_pct": round(overall_expectancy_pct + 100, 2),
+        "overall_profit_total": round(total_payout - total_stake, 0),
         "expected_roi_pct": expected_roi_pct,
+        "expected_profit_total": expected_profit_total,
         "overall_win_rate_pct": overall_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
         "calibration_significance": calibration_significance,

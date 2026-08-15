@@ -284,7 +284,8 @@ async function checkRace() {
     html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>脚質</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
     for (const e of data.entries) {
       const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';
-      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.region ?? "-"}</td><td>${e.leg_style ?? "-"}</td><td>${e.app_win_rate ?? "-"}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
+      const appWinRateLabel = `${e.app_win_rate ?? "-"}${e.zero_app_win_rate_warning ? " ⚠️欠場でないか要確認" : ""}`;
+      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.region ?? "-"}</td><td>${e.leg_style ?? "-"}</td><td>${appWinRateLabel}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
     }
     html += `</table>`;
 
@@ -304,6 +305,7 @@ async function checkRace() {
   }
 }
 document.getElementById("raceSelect").addEventListener("change", checkRace);
+document.getElementById("refreshRaceListBtn").addEventListener("click", () => loadRaces());
 
 function getBankrollOverride() {
   // 証拠金は常に証拠金タブの残高を使う(のんの要望により上書き欄を廃止)
@@ -389,11 +391,10 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     }
     html += `</p>`;
     html += `<p>レース全体の回収率: ${data.race_roi_pct}%(期待利益 約${data.total_expected_profit}円) / レース全体の的中率: 約${data.race_hit_prob_pct}%</p>`;
-    html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th><th>自己影響</th></tr>`;
+    html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th></tr>`;
     for (const it of data.items) {
-      const impact = it.self_impact_pct === null ? "不明" : `${it.self_impact_pct}%${it.self_impact_warning ? "⚠️" : ""}`;
       const probLabel = `${it.estimated_win_prob_pct}%${it.low_prob_warning ? " ⚠️低確率帯(未補正)" : ""}`;
-      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${probLabel}</td><td>${it.odds_value}</td><td>${it.roi_pct}%</td><td>${it.stake}円</td><td>${impact}</td></tr>`;
+      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${probLabel}</td><td>${it.odds_value}</td><td>${it.roi_pct}%</td><td>${it.stake}円</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
@@ -670,7 +671,7 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       resultBox.textContent = data.message;
       return;
     }
-    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(100%が損益分岐点。想定回収率: ${data.expected_roi_pct ?? "-"}${data.expected_roi_pct !== null ? "%" : ""}・同じく100%が損益分岐点。総ベット数: ${data.total_bets}件)</p>`;
+    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(実績損益: ${data.overall_profit_total}円 / 100%が損益分岐点。想定回収率: ${data.expected_roi_pct ?? "-"}${data.expected_roi_pct !== null ? "%" : ""}(想定損益: ${data.expected_profit_total ?? "-"}円)・同じく100%が損益分岐点。総ベット数: ${data.total_bets}件)</p>`;
     html += `<p>的中率: ${data.overall_win_rate_pct}%(想定的中率: ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}、AIが購入時点で見積もっていた平均勝率)</p>`;
     if (data.calibration_significance) {
       const cs = data.calibration_significance;

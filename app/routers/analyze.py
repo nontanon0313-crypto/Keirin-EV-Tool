@@ -9,7 +9,7 @@ import json
 from ..database import get_db
 from .. import models
 from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities, simulate_race_development
-from ..keirin_data import is_local_player, get_current_weather
+from ..keirin_data import is_local_player, get_current_weather, normalize_venue_name
 from . import purchases as purchases_router
 
 router = APIRouter(prefix="/analyze", tags=["analyze"])
@@ -30,7 +30,7 @@ def _current_season_jst() -> str:
 
 
 async def _get_or_create_race(db: Session, parsed: dict) -> models.Race:
-    venue = parsed.get("venue_name")
+    venue = normalize_venue_name(parsed.get("venue_name"))
     race_number = parsed.get("race_number")
     query = db.query(models.Race)
     if venue:

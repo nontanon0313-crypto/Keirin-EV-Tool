@@ -85,6 +85,24 @@ def compute_lead_advantage(straight_m: Optional[float]) -> Optional[float]:
     return round(max(0.0, min(1.0, score)), 3)
 
 
+def normalize_venue_name(venue_name: Optional[str]) -> Optional[str]:
+    """
+    スクショごとのOCR読み取りゆれ(表記ゆれ、例:「京王閣」と「京王閣競輪場」)を吸収し、
+    43場マスタの正式名称に正規化する。同じレースなのに場名の揺れで別レースとして
+    重複登録されてしまう不具合の対策(のんの報告により追加)。
+    一致するマスタ名が見つからない場合は、元の文字列をそのまま返す。
+    """
+    if not venue_name:
+        return venue_name
+    stripped = venue_name.strip()
+    if stripped in VENUE_DATA:
+        return stripped
+    for name in VENUE_DATA:
+        if name in stripped or stripped in name:
+            return name
+    return stripped
+
+
 def get_prefecture_for_venue(venue_name: str) -> Optional[str]:
     """開催場名から都道府県を推定する。前方一致・部分一致でも照合を試みる。"""
     if not venue_name:

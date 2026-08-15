@@ -135,6 +135,10 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
                 "leg_style": e.leg_style,
                 "race_score": e.race_score,
                 "app_win_rate": e.app_win_rate,
+                # OCRでは「欠場」を直接判定できないため、アプリ勝率がちょうど0%の場合に
+                # 目視確認を促す(のんの指摘により追加。0%自体は本当に低調な選手の場合も
+                # あるので、警告であって除外はしない)。
+                "zero_app_win_rate_warning": e.app_win_rate == 0,
                 "ai_win_prob": round(e.ai_win_prob * 100, 2) if e.ai_win_prob is not None else None,
                 "blended_win_prob": round(e.blended_win_prob * 100, 2) if e.blended_win_prob is not None else None,
                 "ready_for_ev": e.blended_win_prob is not None,
