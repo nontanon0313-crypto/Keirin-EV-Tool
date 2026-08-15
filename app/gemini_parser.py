@@ -186,6 +186,30 @@ def _build_weather_text(weather_info: dict = None) -> str:
     )
 
 
+def _is_girls_keirin(lines: list) -> bool:
+    """
+    ガールズケイリンかどうかを、ライン構成から推定する。
+    ガールズケイリンは必ず全員単騎(ライン協調なし)になるため、
+    ライン情報が全て1車ずつ(単騎)であれば、ガールズケイリンとみなせる
+    (のんの指摘により追加。画面上に「ガールズ」等の明示が無くても判定できる)。
+    """
+    if not lines:
+        return False
+    return all(len(line) == 1 for line in lines)
+
+
+def _girls_keirin_note(lines: list) -> str:
+    if not _is_girls_keirin(lines):
+        return ""
+    return (
+        "このレースは、ライン構成が全員単騎であることからガールズケイリンと推定されます。"
+        "ガールズケイリンは男子と異なり、ライン(先行・番手・3番手の連携)による協調戦術が"
+        "基本的に存在せず、各選手が個々の脚力・位置取りだけで戦う個人戦です。"
+        "「番手選手が有利」「ラインの主導権争い」といった、ライン協調を前提とした推論は"
+        "当てはめず、各選手の脚質・競走得点・位置取りの巧拙を中心に判断してください。\n"
+    )
+
+
 def simulate_race_development(
     entries: list, lines: list = None, bank_info: dict = None,
     race_stage: str = None, grade: str = None, weather_info: dict = None,
@@ -202,6 +226,7 @@ def simulate_race_development(
         raise RuntimeError("GEMINI_API_KEY が設定されていません")
 
     lines_text = f"ライン構成: {json.dumps(lines, ensure_ascii=False)}\n(各配列が1ライン、先行→番手→3番手の順)\n" if lines else "ライン情報: 不明\n"
+    lines_text += _girls_keirin_note(lines)
     bank_text = ""
     if bank_info and bank_info.get("lead_advantage_score") is not None:
         bank_text = (
@@ -265,6 +290,7 @@ def estimate_ai_win_probabilities(
         "掛け合わせて判断してください。弱いライン(先行選手の実力が低い)を過大評価しないでください)\n"
         if lines else ""
     )
+    lines_text += _girls_keirin_note(lines)
 
     bank_text = ""
     if bank_info and bank_info.get("lead_advantage_score") is not None:

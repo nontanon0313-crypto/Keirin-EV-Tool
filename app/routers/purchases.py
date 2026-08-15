@@ -426,8 +426,10 @@ def purchase_stats(db: Session = Depends(get_db)):
             expected_win_rate_pct = (
                 round(v["win_prob_sum"] / v["win_prob_count"] * 100, 1) if v["win_prob_count"] else None
             )
-            expected_ev_pct = (
-                round(v["ev_pct_sum"] / v["ev_pct_count"], 2) if v["ev_pct_count"] else None
+            # ev_pct_at_purchaseは「0%が損益分岐点」表現のため、+100して実績(roi_pct)と
+            # 同じ「100%が損益分岐点」表現に揃える(外部監査により発覚したバグを修正)。
+            expected_roi_pct = (
+                round(v["ev_pct_sum"] / v["ev_pct_count"] + 100, 2) if v["ev_pct_count"] else None
             )
             out[k] = {
                 "count": v["count"],
@@ -436,7 +438,7 @@ def purchase_stats(db: Session = Depends(get_db)):
                 # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
                 "roi_pct": round(expectancy + 100, 2),
                 "expectancy_pct": round(expectancy, 2),
-                "expected_ev_pct": expected_ev_pct,
+                "expected_roi_pct": expected_roi_pct,
             }
         # 実績が高い順に並べ替える
         return dict(sorted(out.items(), key=lambda item: -item[1]["expectancy_pct"]))
@@ -586,27 +588,50 @@ def purchase_stats(db: Session = Depends(get_db)):
                     "win_rate_pct": v["win_rate_pct"],
                     "expected_win_rate_pct": v["expected_win_rate_pct"],
                     "expectancy_pct": v["expectancy_pct"],
-                    "expected_ev_pct": v["expected_ev_pct"],
+                    "expected_roi_pct": v["expected_roi_pct"],
                 })
     ranking.sort(key=lambda x: -x["expectancy_pct"])
 
     # 全体の想定期待値・想定的中率(購入時点でAIが見積もっていた値の平均)
+    # 注意: ev_pct_at_purchaseは「0%が損益分岐点」の表現(calc_ev_pctの定義)で保存されている。
+    # 実績収支率(overall_roi_pct)は「100%が損益分岐点」の表現なので、そのまま並べて比較すると
+    # 単位が100ポイントずれる。+100して揃える(外部監査により発覚したバグを修正)。
     win_prob_values = [p.win_prob_at_purchase for p in purchases if p.win_prob_at_purchase is not None]
     ev_pct_values = [p.ev_pct_at_purchase for p in purchases if p.ev_pct_at_purchase is not None]
     expected_win_rate_pct = round(sum(win_prob_values) / len(win_prob_values) * 100, 1) if win_prob_values else None
-    expected_ev_pct = round(sum(ev_pct_values) / len(ev_pct_values), 2) if ev_pct_values else None
+    expected_roi_pct = round(sum(ev_pct_values) / len(ev_pct_values) + 100, 2) if ev_pct_values else None
     overall_win_count = sum(1 for p in purchases if p.result == "win")
     overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1)
 
     # 「予想と実績のズレは、単なる偶然のブレか、それとも本当に予想が偏っているのか」を
     # 統計的に判定する(のんの指摘により追加)。二項検定: 予想確率が正しいとしたら、
     # 実績の的中数がこれ以下になる確率(片側p値)。小さいほど「偶然では説明しにくい」。
+    # 注意(外部監査による指摘): 同一レース内の複数の買い目は独立試行ではない
+    # (1レースにつき実際に成立する結果は基本1通りのため、同じレース内の買い目の
+    # 的中・不的中は強く相関する)。「買い目単位」の検定はこの相関を無視しているため、
+    # 実際より「有意」に見えすぎる可能性がある。参考値として、より妥当な
+    # 「レース単位」の検定(そのレースの購入全体が黒字で終えたか)も併記する。
     calibration_significance = None
     if win_prob_values:
         purchases_with_prob = [p for p in purchases if p.win_prob_at_purchase is not None]
         wins_with_prob = sum(1 for p in purchases_with_prob if p.result == "win")
-        p_value = calc.binomial_lower_tail_p(wins_with_prob, len(purchases_with_prob),
-                                              sum(win_prob_values) / len(win_prob_values))
+        n_with_prob = len(purchases_with_prob)
+        avg_predicted_prob = sum(win_prob_values) / len(win_prob_values)
+        p_value = calc.binomial_lower_tail_p(wins_with_prob, n_with_prob, avg_predicted_prob)
+
+        # レース単位の検定(独立性の問題を避けるための補助指標)。
+        # そのレースの購入全体で黒字(payout>=stake)だったレースの割合を、
+        # 「想定期待値(roi換算)が100%以上なら黒字を期待する」という単純な基準と比較する。
+        race_ids_with_purchase = sorted({p.race_id for p in purchases})
+        race_level_results = []
+        for rid in race_ids_with_purchase:
+            race_purchases = [p for p in purchases if p.race_id == rid]
+            race_stake = sum(p.stake_amount for p in race_purchases)
+            race_payout = sum(p.payout_amount for p in race_purchases)
+            race_level_results.append(1 if race_payout >= race_stake else 0)
+        n_races = len(race_level_results)
+        profit_races = sum(race_level_results)
+
         if p_value < 0.05:
             judgement = "予想が実態より高すぎる可能性が高い(偶然では説明しにくい)"
         elif p_value < 0.20:
@@ -616,12 +641,22 @@ def purchase_stats(db: Session = Depends(get_db)):
         calibration_significance = {
             "p_value_pct": round(p_value * 100, 4),
             "judgement": judgement,
+            "n_used": n_with_prob,
+            "wins_used": wins_with_prob,
+            "predicted_prob_used_pct": round(avg_predicted_prob * 100, 4),
+            "note": "総ベット数と一致しない場合、win_prob_at_purchase未記録の購入(手動記録分等)が混ざっています",
+            "race_level": {
+                "n_races": n_races,
+                "profit_races": profit_races,
+                "profit_race_rate_pct": round(profit_races / n_races * 100, 1) if n_races else None,
+                "note": "「1レース=1試行」として、そのレースの購入全体が黒字だったか(同一レース内の買い目間の相関を避けた、より妥当な参考値。ただしレース数が少ないと検出力は低い)",
+            },
         }
 
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "overall_roi_pct": round(overall_expectancy_pct + 100, 2),
-        "expected_ev_pct": expected_ev_pct,
+        "expected_roi_pct": expected_roi_pct,
         "overall_win_rate_pct": overall_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
         "calibration_significance": calibration_significance,
