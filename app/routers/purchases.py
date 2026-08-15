@@ -371,6 +371,33 @@ def purchase_stats(db: Session = Depends(get_db)):
         for e in db.query(models.Entry).filter(models.Entry.race_id.in_(race_ids)).all():
             entries_by_race_id.setdefault(e.race_id, []).append(e)
 
+    # 「1番人気オッズ集中度パターン」判定用: レースごとの3連単最低オッズ(1番人気)を取得する。
+    # 境界値は遠山競輪研究所(Gamboo)の実データ分析(S級・A12班9車立て基準)を採用。
+    # https://gamboo.jp/topics/?tid=tohyama024-pc (のんが共有)
+    top_fav_odds_by_race = {}
+    if race_ids:
+        tan_odds = (
+            db.query(models.Odds)
+            .filter(models.Odds.race_id.in_(race_ids), models.Odds.bet_type == "3連単")
+            .all()
+        )
+        for o in tan_odds:
+            cur = top_fav_odds_by_race.get(o.race_id)
+            if cur is None or o.odds_value < cur:
+                top_fav_odds_by_race[o.race_id] = o.odds_value
+
+    def popularity_pattern_bucket(p):
+        odds = top_fav_odds_by_race.get(p.race_id)
+        if odds is None:
+            return "3連単オッズなし"
+        if odds <= 5.6:
+            return "超人気集中型(1番人気〜5.6倍)"
+        if odds <= 9.9:
+            return "人気集中型(5.7〜9.9倍)"
+        if odds <= 17.7:
+            return "標準型(10.0〜17.7倍)"
+        return "人気分散型(17.8倍〜)"
+
     def bucket_stats(key_fn):
         buckets = {}
         for p in purchases:
@@ -526,6 +553,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         "グレード別": bucket_stats(grade_bucket),
         "買い目内平均競走得点別": bucket_stats(race_score_bucket),
         "買い目内脚質構成別": bucket_stats(leg_style_bucket),
+        "人気集中度パターン別": bucket_stats(popularity_pattern_bucket),
     }
 
     # 単一条件(例:「グレード別」だけ)の集計は、他の要因との交絡(本当の原因が別にある)
@@ -540,6 +568,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         "券種×勝率帯": combo_bucket(lambda p: p.bet_type, "券種", prob_bucket, "勝率帯"),
         "季節×バンク先行有利度": combo_bucket(season_bucket, "季節", bank_lead_bucket, "先行有利度"),
         "券種×ライン絡み": combo_bucket(lambda p: p.bet_type, "券種", line_bucket, "ライン"),
+        "券種×人気集中度パターン": combo_bucket(lambda p: p.bet_type, "券種", popularity_pattern_bucket, "人気集中度"),
     }
     min_sample_for_combo = 8
 
@@ -609,6 +638,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         "by_grade": all_buckets["グレード別"],
         "by_race_score": all_buckets["買い目内平均競走得点別"],
         "by_leg_style": all_buckets["買い目内脚質構成別"],
+        "by_popularity_pattern": all_buckets["人気集中度パターン別"],
         "combo_buckets": {
             k: {kk: vv for kk, vv in v.items() if vv["count"] >= min_sample_for_combo}
             for k, v in combo_buckets.items()
