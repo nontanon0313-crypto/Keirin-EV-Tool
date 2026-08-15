@@ -87,10 +87,16 @@ def get_calibration_factors(db: Session) -> dict:
             factor = calc.compute_calibration_factor(actual_win_rate, predicted_avg)
 
         deviation_pct = None
+        significance_p_value_pct = None
         if actual_win_rate is not None and predicted_avg is not None:
             # 実績的中率 - 予想平均確率。プラス=予想が実際より低め(過小評価)、
             # マイナス=予想が実際より高め(過大評価)だったことを意味する。
             deviation_pct = round((actual_win_rate - predicted_avg) * 100, 2)
+            # このズレが単なる偶然のブレなのか、統計的に有意なのかを二項検定で判定する
+            # (のんの指摘により追加)。小さいほど「偶然では説明しにくい」。
+            significance_p_value_pct = round(
+                calc.binomial_lower_tail_p(wins, count, predicted_avg) * 100, 4
+            )
 
         result[name] = {
             "sample_count": count,
@@ -99,6 +105,7 @@ def get_calibration_factors(db: Session) -> dict:
             "actual_win_rate_pct": round(actual_win_rate * 100, 2) if actual_win_rate is not None else None,
             "predicted_avg_prob_pct": round(predicted_avg * 100, 2) if predicted_avg is not None else None,
             "deviation_pct": deviation_pct,
+            "significance_p_value_pct": significance_p_value_pct,
             "calibration_factor": round(factor, 3),
         }
     return result
@@ -257,11 +264,13 @@ def calibration_status(db: Session = Depends(get_db)):
         wins = sum(1 for p in purchases if p.result == "win")
         actual = wins / len(purchases)
         predicted = sum(p.win_prob_at_purchase for p in purchases) / len(purchases)
+        p_value = calc.binomial_lower_tail_p(wins, len(purchases), predicted)
         overall = {
             "sample_count": len(purchases),
             "actual_win_rate_pct": round(actual * 100, 2),
             "predicted_avg_prob_pct": round(predicted * 100, 2),
             "deviation_pct": round((actual - predicted) * 100, 2),
+            "significance_p_value_pct": round(p_value * 100, 4),
         }
 
     return {"overall": overall, "buckets": buckets}
@@ -519,6 +528,21 @@ def purchase_stats(db: Session = Depends(get_db)):
         "買い目内脚質構成別": bucket_stats(leg_style_bucket),
     }
 
+    # 単一条件(例:「グレード別」だけ)の集計は、他の要因との交絡(本当の原因が別にある)
+    # を見分けられない。「G1は勝ちやすい」のような早計な判断を避けるため、
+    # 意味がありそうな2軸の組み合わせも別途集計する(のんの指摘により追加)。
+    # 組み合わせは母数が単一条件より減るため、最低サンプル数を高めに設定する。
+    def combo_bucket(key_fn_a, label_a, key_fn_b, label_b):
+        return bucket_stats(lambda p: f"{label_a}:{key_fn_a(p)} × {label_b}:{key_fn_b(p)}")
+
+    combo_buckets = {
+        "グレード×季節": combo_bucket(grade_bucket, "グレード", season_bucket, "季節"),
+        "券種×勝率帯": combo_bucket(lambda p: p.bet_type, "券種", prob_bucket, "勝率帯"),
+        "季節×バンク先行有利度": combo_bucket(season_bucket, "季節", bank_lead_bucket, "先行有利度"),
+        "券種×ライン絡み": combo_bucket(lambda p: p.bet_type, "券種", line_bucket, "ライン"),
+    }
+    min_sample_for_combo = 8
+
     # 全ての切り口を横断し、サンプル数が一定以上(ノイズ除け)で実績が高い条件をランキング化する。
     # これが「集計結果を見て予想を修正する」ための最初の手がかりになる。
     min_sample_for_ranking = 5
@@ -545,12 +569,33 @@ def purchase_stats(db: Session = Depends(get_db)):
     overall_win_count = sum(1 for p in purchases if p.result == "win")
     overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1)
 
+    # 「予想と実績のズレは、単なる偶然のブレか、それとも本当に予想が偏っているのか」を
+    # 統計的に判定する(のんの指摘により追加)。二項検定: 予想確率が正しいとしたら、
+    # 実績の的中数がこれ以下になる確率(片側p値)。小さいほど「偶然では説明しにくい」。
+    calibration_significance = None
+    if win_prob_values:
+        purchases_with_prob = [p for p in purchases if p.win_prob_at_purchase is not None]
+        wins_with_prob = sum(1 for p in purchases_with_prob if p.result == "win")
+        p_value = calc.binomial_lower_tail_p(wins_with_prob, len(purchases_with_prob),
+                                              sum(win_prob_values) / len(win_prob_values))
+        if p_value < 0.05:
+            judgement = "予想が実態より高すぎる可能性が高い(偶然では説明しにくい)"
+        elif p_value < 0.20:
+            judgement = "やや予想が高めだが、まだ偶然の範囲とも言える"
+        else:
+            judgement = "現時点のサンプル数では、偶然のブレの範囲内"
+        calibration_significance = {
+            "p_value_pct": round(p_value * 100, 4),
+            "judgement": judgement,
+        }
+
     return {
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "overall_roi_pct": round(overall_expectancy_pct + 100, 2),
         "expected_ev_pct": expected_ev_pct,
         "overall_win_rate_pct": overall_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
+        "calibration_significance": calibration_significance,
         "total_bets": len(purchases),
         "best_conditions_ranking": ranking[:10],
         "worst_conditions_ranking": ranking[-10:][::-1] if len(ranking) > 10 else [],
@@ -564,10 +609,15 @@ def purchase_stats(db: Session = Depends(get_db)):
         "by_grade": all_buckets["グレード別"],
         "by_race_score": all_buckets["買い目内平均競走得点別"],
         "by_leg_style": all_buckets["買い目内脚質構成別"],
+        "combo_buckets": {
+            k: {kk: vv for kk, vv in v.items() if vv["count"] >= min_sample_for_combo}
+            for k, v in combo_buckets.items()
+        },
         "odds_drift": _odds_drift_stats(purchases),
         "note": (
             "「実績」は0%が損益分岐点、「実績収支率」は100%が損益分岐点の表現です(同じ数字を2通りの基準で表しているだけです)。"
             f"件数{min_sample_for_ranking}件未満の条件はランキングから除外しています(判断が不安定なため)。"
+            f"組み合わせ集計は件数{min_sample_for_combo}件未満のマスを非表示にしています(単一条件よりサンプルが減るため基準を厳しめにしています)。"
         ),
     }
 

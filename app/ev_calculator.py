@@ -11,6 +11,7 @@
 
 import itertools
 import random
+from math import comb
 from typing import List, Dict, Tuple
 
 # 競輪の券種別 控除率(dev注: 実際の値は年度・券種で変わるため、確定情報がない場合の暫定値。
@@ -353,10 +354,32 @@ def monte_carlo_bankruptcy(
         final_bankrolls.append(bankroll)
 
     avg_final = sum(final_bankrolls) / len(final_bankrolls)
+    sorted_finals = sorted(final_bankrolls)
+    median_final = sorted_finals[len(sorted_finals) // 2]
+    # 平均だけだと「一部の大勝ちが平均を押し上げているだけ」で見えなくなるため、
+    # 「初期資金を上回って終えた試行の割合」も別途出す(のんの要望により追加。
+    # 「安定してプラス収支になっているか」を確認する指標)。
+    profit_count = sum(1 for b in final_bankrolls if b > initial_bankroll)
     return {
         "ruin_probability_pct": round(ruin_count / num_trials * 100, 2),
         "average_final_bankroll": round(avg_final, 0),
+        "median_final_bankroll": round(median_final, 0),
+        "profit_probability_pct": round(profit_count / num_trials * 100, 2),
         "num_trials": num_trials,
         "num_bets_per_trial": num_bets_per_trial,
         "ruin_threshold_pct": ruin_threshold_pct,
     }
+
+
+def binomial_lower_tail_p(actual_wins: int, n: int, predicted_prob: float) -> float:
+    """
+    「予想確率が正しいとしたら、実際の的中数がこれ以下になる確率(片側p値)」を計算する。
+    値が小さい(目安5%未満)ほど、「単なる偶然のブレ」では説明しにくく、予想確率が
+    実態より高すぎる(過大評価している)可能性が高いことを意味する。
+    逆に値が大きければ(例えば20%以上)、今のサンプル数ではまだ偶然のブレの範囲内と言える。
+    """
+    if n <= 0 or not (0.0 < predicted_prob < 1.0):
+        return 1.0
+    actual_wins = max(0, min(actual_wins, n))
+    p = predicted_prob
+    return sum(comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(0, actual_wins + 1))

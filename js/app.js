@@ -375,7 +375,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     }
 
     let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円)`;
-    if (data.excluded_low_prob_count > 0) html += `<br>大穴帯(未補正)のため${data.excluded_low_prob_count}件を除外しました`;
+    html += `<br><span class="note">大穴帯除外設定: ${data.exclude_low_prob_warning_requested ? "ON" : "OFF"}(除外件数${data.excluded_low_prob_count}件)</span>`;
     if (data.excluded_by_min_stake_count > 0) html += `<br>理論上の賭け金が最低単位(100円)未満のため${data.excluded_by_min_stake_count}件を見送りました`;
     if (data.excluded_by_garami_count > 0) html += `<br>ガミり回避のため${data.excluded_by_garami_count}件を除外しました`;
     if (data.excluded_by_budget_count > 0) html += `<br>予算の都合で${data.excluded_by_budget_count}件は見送りました(期待値が低い順に除外)`;
@@ -585,7 +585,11 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
           const result = await res.json();
           if (!res.ok) throw new Error(JSON.stringify(result));
           const winCount = result.updated.filter(u => u.result === "win").length;
-          msgBox.textContent = `${result.updated_count}件を確定しました(的中${winCount}件)。払戻額は最終オッズが未入力の場合、購入時オッズで概算しています。`;
+          let msg = `${result.updated_count}件を確定しました(的中${winCount}件)。払戻額は最終オッズが未入力の場合、購入時オッズで概算しています。\n`;
+          msg += result.updated
+            .map(u => `${u.result === "win" ? "🟢的中" : "✗ハズレ"} ${u.bet_type} ${u.combination}${u.result === "win" ? `(払戻${u.payout_amount}円${u.payout_is_estimated ? "・概算" : ""})` : ""}`)
+            .join("\n");
+          msgBox.textContent = msg;
           await refreshBankrollDisplay();
           await loadRaces(); // 確定済みレースはもう投票できないため一覧(投票タブ)から消す
         } catch (e) {
@@ -636,7 +640,8 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
     if (!res.ok) throw new Error(JSON.stringify(data));
     resultBox.textContent =
       `破産確率(資金が${data.ruin_threshold_pct * 100}%以下になる確率): ${data.ruin_probability_pct}%\n` +
-      `平均最終資金: ${data.average_final_bankroll}円\n` +
+      `黒字化率(初期資金より増えて終わった割合): ${data.profit_probability_pct}%\n` +
+      `平均最終資金: ${data.average_final_bankroll}円 / 中央値: ${data.median_final_bankroll}円\n` +
       `(試行回数: ${data.num_trials}回 × ${data.num_bets_per_trial}ベット)`;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
@@ -667,6 +672,11 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     }
     let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(100%が損益分岐点。想定期待値: ${data.expected_ev_pct ?? "-"}${data.expected_ev_pct !== null ? "%" : ""}。総ベット数: ${data.total_bets}件)</p>`;
     html += `<p>的中率: ${data.overall_win_rate_pct}%(想定的中率: ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}、AIが購入時点で見積もっていた平均勝率)</p>`;
+    if (data.calibration_significance) {
+      const cs = data.calibration_significance;
+      const cls = cs.p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (cs.p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
+      html += `<p${cls}>📊 このズレが偶然起きる確率: ${cs.p_value_pct}%(${cs.judgement})</p>`;
+    }
     html += `<p class="note">${data.note}</p>`;
 
     if (data.best_conditions_ranking && data.best_conditions_ranking.length) {
@@ -686,7 +696,15 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       html += `</table>`;
     }
 
-    html += `<p style="margin-top:14px;"><strong>詳細(切り口別の全内訳)</strong></p>`;
+    if (data.combo_buckets && Object.values(data.combo_buckets).some(v => Object.keys(v).length > 0)) {
+      html += `<p style="margin-top:14px;"><strong>🔍 2軸の組み合わせ検証(単一条件だけでは分からない交絡を確認)</strong></p>`;
+      html += `<p class="note">単一条件(例:「グレード別」)だけでは、本当の原因が別の要因(季節など)にある可能性を見分けられません。以下は2つの条件を掛け合わせた集計です。</p>`;
+      for (const [comboTitle, comboData] of Object.entries(data.combo_buckets)) {
+        html += renderBucketTable(comboTitle, comboData);
+      }
+    }
+
+    html += `<p style="margin-top:14px;"><strong>詳細(単一条件別の内訳)</strong></p>`;
     html += renderBucketTable("券種別", data.by_bet_type);
     html += renderBucketTable("勝率帯別", data.by_win_prob_bucket);
     html += renderBucketTable("バンク別", data.by_bank);
@@ -718,11 +736,13 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
       const o = data.overall;
       const sign = o.deviation_pct > 0 ? "+" : "";
       html += `<p><strong>全体のズレ: ${sign}${o.deviation_pct}pt</strong>(実績的中率${o.actual_win_rate_pct}% - 予想平均${o.predicted_avg_prob_pct}%、${o.sample_count}件)<br>プラスなら予想が控えめ(実際はもっと当たっている)、マイナスなら予想が強気すぎ(実際はもっと外れている)ことを意味します。</p>`;
+      const cls = o.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (o.significance_p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
+      html += `<p${cls}>📊 このズレが偶然起きる確率: ${o.significance_p_value_pct}%(5%未満=偶然では説明しにくい、20%以上=まだ偶然の範囲内)</p>`;
     } else {
       html += "<p>まだ確定した購入履歴がありません。</p>";
     }
     html += "<p>以下は勝率帯ごとの内訳です。試行数が必要数に達すると、以降の期待値計算に自動で反映されます。</p>";
-    html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>補正係数</th></tr>`;
+    html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
     for (const [bucket, info] of Object.entries(data.buckets || {})) {
       const status = info.is_reliable ? '<span class="ev-positive">適用中</span>' : "未達(補正なし)";
       let devText = "-";
@@ -731,7 +751,12 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
         const cls = Math.abs(info.deviation_pct) >= 5 ? ' style="color:#f59e0b;font-weight:bold;"' : "";
         devText = `<span${cls}>${sign}${info.deviation_pct}pt</span>`;
       }
-      html += `<tr><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${info.calibration_factor}倍</td></tr>`;
+      let pText = "-";
+      if (info.significance_p_value_pct !== null && info.significance_p_value_pct !== undefined) {
+        const cls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : "";
+        pText = `<span${cls}>${info.significance_p_value_pct}%</span>`;
+      }
+      html += `<tr><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
