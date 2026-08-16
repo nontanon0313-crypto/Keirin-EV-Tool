@@ -668,6 +668,16 @@ def purchase_stats(db: Session = Depends(get_db)):
     overall_win_count = sum(1 for p in purchases if p.result == "win")
     overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1)
 
+    # 資金管理シミュレーション用: 投資額加重平均オッズ(実際に賭けてきたオッズの実態)。
+    # 単純平均だと少額の買い目と高額の買い目が同じ重みになってしまうため、
+    # 実績収支率と同じ考え方で投資額加重にする(のんの要望により追加)。
+    odds_purchases = [p for p in purchases if p.odds_at_purchase is not None]
+    avg_odds_weighted = (
+        round(sum(p.stake_amount * p.odds_at_purchase for p in odds_purchases)
+              / sum(p.stake_amount for p in odds_purchases), 2)
+        if odds_purchases else None
+    )
+
     # 「予想と実績のズレは、単なる偶然のブレか、それとも本当に予想が偏っているのか」を
     # 統計的に判定する(のんの指摘により追加)。二項検定: 予想確率が正しいとしたら、
     # 実績の的中数がこれ以下になる確率(片側p値)。小さいほど「偶然では説明しにくい」。
@@ -726,6 +736,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         "expected_profit_total": expected_profit_total,
         "overall_win_rate_pct": overall_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
+        "avg_odds_weighted": avg_odds_weighted,
         "calibration_significance": calibration_significance,
         "total_bets": len(purchases),
         "best_conditions_ranking": ranking[:10],

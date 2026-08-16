@@ -604,6 +604,35 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
 });
 
 // ---------- ④ 資金管理シミュレーション ----------
+
+// 検証タブを開いた時、実績の的中率・投資額加重平均オッズを自動入力する
+// (架空の数字ではなく、のん自身の実際の投票実績を土台にシミュレートするため)
+let simDefaultsFilled = false;
+async function fillSimDefaultsFromActuals() {
+  if (simDefaultsFilled) return; // 一度埋めたら、以降はユーザーの手入力を尊重して上書きしない
+  try {
+    const res = await fetch(apiUrl("/purchases/stats"));
+    const data = await res.json();
+    if (data.message) return; // 実績データがまだ無い
+    if (data.overall_win_rate_pct !== undefined && data.overall_win_rate_pct !== null) {
+      document.getElementById("simWinProb").value = data.overall_win_rate_pct;
+    }
+    if (data.avg_odds_weighted !== null && data.avg_odds_weighted !== undefined) {
+      document.getElementById("simOdds").value = data.avg_odds_weighted;
+    }
+    simDefaultsFilled = true;
+    const note = document.getElementById("simDefaultsNote");
+    if (note) note.textContent = `実績値を自動入力しました(的中率${data.overall_win_rate_pct}%・投資額加重平均オッズ${data.avg_odds_weighted}倍、総ベット数${data.total_bets}件)。データが増えたら再読み込みしてください。`;
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+document.getElementById("reloadSimDefaultsBtn").addEventListener("click", () => {
+  simDefaultsFilled = false;
+  fillSimDefaultsFromActuals();
+});
+
 document.getElementById("runSimBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("simResult");
   let bankroll;
@@ -621,8 +650,13 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
   }
   const winProb = parseFloat(document.getElementById("simWinProb").value) / 100;
   const odds = parseFloat(document.getElementById("simOdds").value);
-  const stakeFraction = parseFloat(document.getElementById("simStakePct").value) / 100;
-  const numBets = parseInt(document.getElementById("simNumBets").value);
+  const racePct = parseFloat(document.getElementById("simRacePct").value) / 100;
+  const betsPerRace = parseInt(document.getElementById("simBetsPerRace").value);
+  const numRaces = parseInt(document.getElementById("simNumRaces").value);
+  // 1レースあたりの投資上限を、そのレースの点数で均等に割った額を1点あたりの賭け比率とする
+  // (race_planの1レース上限比率と同じ考え方。のんの要望により、入力をレース単位に変更)
+  const stakeFraction = racePct / betsPerRace;
+  const numBets = betsPerRace * numRaces;
 
   resultBox.textContent = "シミュレーション実行中...";
   try {
@@ -643,7 +677,7 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
       `破産確率(資金が${data.ruin_threshold_pct * 100}%以下になる確率): ${data.ruin_probability_pct}%\n` +
       `黒字化率(初期資金より増えて終わった割合): ${data.profit_probability_pct}%\n` +
       `平均最終資金: ${data.average_final_bankroll}円 / 中央値: ${data.median_final_bankroll}円\n` +
-      `(試行回数: ${data.num_trials}回 × ${data.num_bets_per_trial}ベット)`;
+      `(試行回数: ${data.num_trials}回 × ${numRaces}レース分・1レース${betsPerRace}点・1点あたり賭け比率${(stakeFraction * 100).toFixed(3)}%)`;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
