@@ -787,6 +787,30 @@ document.getElementById("loadSourceWeightsBtn").addEventListener("click", async 
   }
 });
 
+document.getElementById("loadBigExpectedBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/big-expected-bets"));
+    const items = await res.json();
+    if (!items.length) {
+      resultBox.textContent = "対象データがありません(想定期待値が記録された購入がまだありません)。";
+      return;
+    }
+    let html = `<p class="note">想定利益(投資額×想定期待値)が大きい順です。上位の買い目が的中/不的中どちらだったかで、少数の高期待値な買い目が結果全体をどれだけ左右しているかが分かります。</p>`;
+    html += `<table><tr><th>レース</th><th>券種</th><th>買い目</th><th>投票額</th><th>想定勝率</th><th>オッズ</th><th>想定利益</th><th>結果</th><th>実損益</th></tr>`;
+    for (const it of items) {
+      const resultLabel = it.result === "pending" ? "未確定" : (it.result === "win" ? "🟢的中" : "✗ハズレ");
+      const cls = it.result === "win" ? "ev-positive" : (it.result === "lose" ? "ev-skip" : "");
+      html += `<tr class="${cls}"><td>${it.venue_name}${it.race_number}R</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.stake_amount}円</td><td>${it.win_prob_at_purchase_pct ?? "-"}%</td><td>${it.odds_at_purchase ?? "-"}</td><td>+${it.expected_profit}円</td><td>${resultLabel}</td><td>${it.actual_profit !== null ? it.actual_profit + "円" : "-"}</td></tr>`;
+    }
+    html += "</table>";
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 // ---------- 詳細設定(localStorageに保存・復元) ----------
 const SETTINGS_STORAGE_KEY = "keirinEvToolSettings";
 const SETTINGS_INPUT_IDS = ["minProbInput", "minEvInput", "maxRacePctInput", "maxItemsInput", "thresholdLimitInput"];

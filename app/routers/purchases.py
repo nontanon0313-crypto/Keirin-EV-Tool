@@ -304,6 +304,53 @@ def delete_pending_purchases_by_race(race_id: int, db: Session = Depends(get_db)
     return {"deleted_count": deleted_count, "race_id": race_id}
 
 
+@router.get("/big-expected-bets")
+def big_expected_bets(db: Session = Depends(get_db), limit: int = 20):
+    """
+    想定利益(投資額 × 想定期待値)が大きい順に購入履歴を並べる。
+    「想定損益の合計は大きいのに実績が伸びない」場合、少数の高額期待値の買い目が
+    的中/不的中でどれだけ結果を左右しているかを確認するための一覧
+    (のんの要望により追加)。
+    """
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.ev_pct_at_purchase.isnot(None))
+        .all()
+    )
+    race_ids = {p.race_id for p in purchases}
+    races_by_id = (
+        {r.id: r for r in db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()}
+        if race_ids else {}
+    )
+
+    items = []
+    for p in purchases:
+        expected_profit = p.stake_amount * p.ev_pct_at_purchase / 100
+        race = races_by_id.get(p.race_id)
+        items.append({
+            "purchase_id": p.id,
+            "race_id": p.race_id,
+            "venue_name": race.venue_name if race else "不明",
+            "race_number": race.race_number if race else None,
+            "bet_type": p.bet_type,
+            "combination": p.combination,
+            "stake_amount": p.stake_amount,
+            "odds_at_purchase": p.odds_at_purchase,
+            "win_prob_at_purchase_pct": (
+                round(p.win_prob_at_purchase * 100, 2) if p.win_prob_at_purchase is not None else None
+            ),
+            "ev_pct_at_purchase": p.ev_pct_at_purchase,
+            "expected_profit": round(expected_profit, 0),
+            "result": p.result,
+            "payout_amount": p.payout_amount,
+            "actual_profit": (
+                round(p.payout_amount - p.stake_amount, 0) if p.result != "pending" else None
+            ),
+        })
+    items.sort(key=lambda x: -x["expected_profit"])
+    return items[:limit]
+
+
 @router.get("/pending")
 def list_pending_purchases(db: Session = Depends(get_db)):
     """まだ結果未確定の購入履歴一覧(結果入力画面用)。レースごとにまとめられるよう、レース情報も付与する。"""
