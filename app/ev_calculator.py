@@ -114,32 +114,70 @@ def combination_prob(
         return total
 
 
-def judge_purchase_result(bet_type: str, combination: str, actual_top3: list) -> bool:
+def parse_actual_result(actual_result: str) -> dict:
     """
-    実際の上位3着(例: [2,5,1] = 1着2番,2着5番,3着1番)から、
-    ある購入(券種+買い目)が的中したかどうかを機械的に判定する。
+    実際の着順の文字列をパースする。通常は "2-5-1"(1着2番,2着5番,3着1番)。
+    同着がある場合は、同着の着順を"="で区切って入力する
+    (のんの要望により追加。例: 2着と3着が同着で3着が実質無い場合など)。
+    例: "7-14=9" → 1着7番、2着は14番と9番の同着。
+    戻り値: {
+        "groups": [[7],[14,9]],  # 着順ごとの車番グループ(同着は複数車)
+        "top3_set": {7,14,9},    # 上位3着に絡む車番の集合(3連複・ワイド判定用)
+        "canonical_orderings": [(7,14,9),(7,9,14)],  # 同着を展開した「あり得る着順」全パターン
+    }
+    """
+    groups = []
+    for part in actual_result.split("-"):
+        part = part.strip()
+        if not part:
+            continue
+        cars = [int(x) for x in part.split("=") if x.strip()]
+        if cars:
+            groups.append(cars)
+
+    top3_set = set()
+    for g in groups:
+        top3_set.update(g)
+
+    # 同着を展開して、あり得る着順の並びを全て列挙する
+    per_group_orderings = [list(itertools.permutations(g)) for g in groups]
+    canonical_orderings = [
+        tuple(car for group_order in combo for car in group_order)
+        for combo in itertools.product(*per_group_orderings)
+    ]
+
+    return {"groups": groups, "top3_set": top3_set, "canonical_orderings": canonical_orderings}
+
+
+def judge_purchase_result(bet_type: str, combination: str, actual_result) -> bool:
+    """
+    実際の上位3着から、ある購入(券種+買い目)が的中したかどうかを機械的に判定する。
+    actual_result: parse_actual_result()の戻り値(dict)、または後方互換のため
+    従来通りの車番リスト(例: [2,5,1])も受け付ける(同着なしの場合と同じ扱いになる)。
     """
     cars = [int(x) for x in combination.split("-")]
 
-    if bet_type in ("3連単",):
-        return cars == actual_top3[:3]
-    if bet_type in ("3連複",):
-        return set(cars) == set(actual_top3[:3])
+    if isinstance(actual_result, dict):
+        parsed = actual_result
+    else:
+        parsed = {
+            "top3_set": set(actual_result[:3]),
+            "canonical_orderings": [tuple(actual_result[:3])],
+        }
+    top3_set = parsed["top3_set"]
+    canonical_orderings = parsed["canonical_orderings"]
+
+    if bet_type == "3連単":
+        return tuple(cars) in canonical_orderings
+    if bet_type == "3連複":
+        return len(top3_set) == 3 and set(cars) == top3_set
     if bet_type in ("2車単", "2枠単"):
-        return cars == actual_top3[:2]
+        return any(tuple(cars) == o[:2] for o in canonical_orderings)
     if bet_type in ("2車複", "2枠複"):
-        return set(cars) == set(actual_top3[:2])
+        return any(set(cars) == set(o[:2]) for o in canonical_orderings)
     if bet_type == "ワイド":
-        return set(cars).issubset(set(actual_top3[:3])) and len(cars) == 2
+        return set(cars).issubset(top3_set) and len(cars) == 2
     return False
-    """[[1,2],[3],[4,5,6]]形式のライン構成を、{車番: ライン番号}の辞書に変換する。"""
-    if not lines_data:
-        return {}
-    line_map = {}
-    for idx, line in enumerate(lines_data):
-        for car in line:
-            line_map[int(car)] = idx
-    return line_map
 
 
 def wide_prob(

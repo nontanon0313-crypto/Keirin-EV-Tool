@@ -544,8 +544,8 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
       let itemsHtml = group.items.map(p => `${p.bet_type} ${p.combination}(${p.stake_amount}円)`).join(" / ");
       div.innerHTML = `
         <p><strong>${group.venue_name} ${group.race_number}R</strong><br>未確定: ${itemsHtml}</p>
-        <label>実際の着順(例: 2-5-1 = 1着2番,2着5番,3着1番)</label>
-        <input type="text" placeholder="2-5-1" id="result_${raceId}">
+        <label>実際の着順(例: 2-5-1 = 1着2番,2着5番,3着1番。同着は"="で区切る 例: 7-14=9)</label>
+        <input type="text" placeholder="2-5-1(同着なら 7-14=9)" id="result_${raceId}">
         <button data-race="${raceId}" class="confirmResultBtn">この着順で一括確定する</button>
         <button data-race="${raceId}" class="discardPendingBtn" style="background:#64748b;">実際は投票しなかった(この分を破棄)</button>
         <div id="confirmMsg_${raceId}" class="result-box"></div>

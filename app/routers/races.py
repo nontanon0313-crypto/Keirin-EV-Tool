@@ -12,7 +12,8 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
     """
     レースの実際の着順を1回入力するだけで、そのレースに紐づく全ての未確定購入を
     自動で的中/不的中判定し、証拠金にも反映する。
-    actual_result: 例 "2-5-1" (1着2番、2着5番、3着1番)
+    actual_result: 例 "2-5-1" (1着2番、2着5番、3着1番)。
+    同着がある場合は"="で区切って入力する(例: "7-14=9" → 1着7番、2着は14番と9番の同着)。
     """
     from .. import ev_calculator as calc
     from . import bankroll as bankroll_router
@@ -22,9 +23,11 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         raise HTTPException(404, "レースが見つかりません")
 
     try:
-        actual_top3 = [int(x) for x in actual_result.split("-")]
+        parsed_result = calc.parse_actual_result(actual_result)
+        if not parsed_result["groups"]:
+            raise ValueError("empty")
     except ValueError:
-        raise HTTPException(400, "着順の形式が正しくありません(例: 2-5-1)")
+        raise HTTPException(400, "着順の形式が正しくありません(例: 2-5-1、同着は7-14=9のように=で区切る)")
 
     race.actual_result = actual_result
     db.commit()
@@ -41,7 +44,7 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
     updated = []
     total_payout_delta = 0.0
     for p in pending:
-        is_win = calc.judge_purchase_result(p.bet_type, p.combination, actual_top3)
+        is_win = calc.judge_purchase_result(p.bet_type, p.combination, parsed_result)
         settlement_odds = p.final_odds if p.final_odds is not None else p.odds_at_purchase
         payout = round(p.stake_amount * settlement_odds) if (is_win and settlement_odds) else 0
 
@@ -135,10 +138,11 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
                 "leg_style": e.leg_style,
                 "race_score": e.race_score,
                 "app_win_rate": e.app_win_rate,
-                # OCRでは「欠場」を直接判定できないため、アプリ勝率がちょうど0%の場合に
-                # 目視確認を促す(のんの指摘により追加。0%自体は本当に低調な選手の場合も
-                # あるので、警告であって除外はしない)。
-                "zero_app_win_rate_warning": e.app_win_rate == 0,
+                # OCRでは「欠場」を直接判定できないため、アプリ勝率がちょうど0%かつ
+                # 他の基本データ(競走得点)も無い場合のみ、目視確認を促す。
+                # race_scoreなど他のデータがあれば実際に出走している証拠なので、
+                # 単に勝率が低いだけと判断できる(のんの指摘により条件を絞った)。
+                "zero_app_win_rate_warning": e.app_win_rate == 0 and e.race_score is None,
                 "ai_win_prob": round(e.ai_win_prob * 100, 2) if e.ai_win_prob is not None else None,
                 "blended_win_prob": round(e.blended_win_prob * 100, 2) if e.blended_win_prob is not None else None,
                 "ready_for_ev": e.blended_win_prob is not None,
