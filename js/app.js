@@ -797,15 +797,30 @@ document.getElementById("loadBigExpectedBtn").addEventListener("click", async ()
       resultBox.textContent = "対象データがありません(想定期待値が記録された購入がまだありません)。";
       return;
     }
-    let html = `<p class="note">想定利益(投資額×想定期待値)が大きい順です。上位の買い目が的中/不的中どちらだったかで、少数の高期待値な買い目が結果全体をどれだけ左右しているかが分かります。</p>`;
-    html += `<table><tr><th>レース</th><th>券種</th><th>買い目</th><th>投票額</th><th>想定勝率</th><th>オッズ</th><th>想定利益</th><th>結果</th><th>実損益</th></tr>`;
+    let html = `<p class="note">想定利益(投資額×想定期待値)が大きい順です。上位の買い目が的中/不的中どちらだったかで、少数の高期待値な買い目が結果全体をどれだけ左右しているかが分かります。誤って重複登録した等の場合は削除できます。</p>`;
+    html += `<table><tr><th>レース</th><th>券種</th><th>買い目</th><th>投票額</th><th>想定勝率</th><th>オッズ</th><th>想定利益</th><th>結果</th><th>実損益</th><th></th></tr>`;
     for (const it of items) {
       const resultLabel = it.result === "pending" ? "未確定" : (it.result === "win" ? "🟢的中" : "✗ハズレ");
       const cls = it.result === "win" ? "ev-positive" : (it.result === "lose" ? "ev-skip" : "");
-      html += `<tr class="${cls}"><td>${it.venue_name}${it.race_number}R</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.stake_amount}円</td><td>${it.win_prob_at_purchase_pct ?? "-"}%</td><td>${it.odds_at_purchase ?? "-"}</td><td>+${it.expected_profit}円</td><td>${resultLabel}</td><td>${it.actual_profit !== null ? it.actual_profit + "円" : "-"}</td></tr>`;
+      html += `<tr class="${cls}"><td>${it.venue_name}${it.race_number}R</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.stake_amount}円</td><td>${it.win_prob_at_purchase_pct ?? "-"}%</td><td>${it.odds_at_purchase ?? "-"}</td><td>+${it.expected_profit}円</td><td>${resultLabel}</td><td>${it.actual_profit !== null ? it.actual_profit + "円" : "-"}</td><td><button data-purchase-id="${it.purchase_id}" class="deleteBigExpectedBtn" style="width:auto;padding:4px 8px;font-size:12px;background:#7f1d1d;">削除</button></td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
+
+    document.querySelectorAll(".deleteBigExpectedBtn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.purchaseId;
+        if (!confirm("この購入記録を削除します(確定済みの場合、実績データも書き換わります。証拠金残高は自動調整されません)。よろしいですか？")) return;
+        try {
+          const res = await fetch(apiUrl(`/purchases/${id}`), { method: "DELETE" });
+          const data = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(data));
+          document.getElementById("loadBigExpectedBtn").click();
+        } catch (e) {
+          alert("削除エラー: " + e.message);
+        }
+      });
+    });
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }

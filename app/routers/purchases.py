@@ -279,14 +279,16 @@ def calibration_status(db: Session = Depends(get_db)):
 @router.delete("/{purchase_id}")
 def delete_purchase(purchase_id: int, db: Session = Depends(get_db)):
     """
-    購入履歴を1件削除する。実際には投票しなかった(見送った)未確定の記録を
-    消すためのもの。結果確定済み(win/lose)のものは、実績が歪むため削除できない。
+    購入履歴を1件削除する。実際には投票しなかった(見送った)未確定の記録の削除に加え、
+    バグ等による重複登録の後始末のため、確定済み(win/lose)の記録も削除できるようにしている
+    (のんの要望により変更。以前は確定済みは削除不可だったが、重複データを消せず
+    検証結果が歪んだままになる問題があった)。
+    注意: 証拠金残高はこの削除で自動調整されない(購入時の減算・払戻時の加算を遡って
+    取り消す処理はしていない)。証拠金に影響がある場合は、証拠金タブから手動で調整してください。
     """
     obj = db.query(models.Purchase).get(purchase_id)
     if not obj:
         raise HTTPException(404, "購入履歴が見つかりません")
-    if obj.result != "pending":
-        raise HTTPException(400, "結果確定済みの購入履歴は削除できません(実績データのため)")
     db.delete(obj)
     db.commit()
     return {"deleted": True, "purchase_id": purchase_id}
