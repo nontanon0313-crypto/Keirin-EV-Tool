@@ -82,9 +82,13 @@ def get_calibration_factors(db: Session) -> dict:
             actual_win_rate = None
             predicted_avg = None
 
+        # 以前は「必要数に達するまで補正係数1.0」のon/off切り替えだったが、
+        # これだと大穴帯(必要数8000件等)は事実上永遠に補正されない。
+        # サンプル数に応じて段階的に補正を効かせる方式に変更(のんの要望により修正)。
         factor = 1.0
-        if is_reliable and predicted_avg:
-            factor = calc.compute_calibration_factor(actual_win_rate, predicted_avg)
+        if count > 0 and predicted_avg:
+            raw_factor = calc.compute_calibration_factor(actual_win_rate, predicted_avg)
+            factor = calc.shrunk_calibration_factor(raw_factor, count, required)
 
         deviation_pct = None
         significance_p_value_pct = None

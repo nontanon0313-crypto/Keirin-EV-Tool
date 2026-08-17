@@ -35,17 +35,20 @@ def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict =
 def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
     """
     購入実績に基づく自動補正係数を適用する。
-    該当する勝率帯の試行数が十分(200÷帯の代表確率)でなければ、補正せずそのまま返す。
-    戻り値: (補正後確率, その勝率帯の低確率帯かつ未補正=推定誤差に注意すべきか)
+    以前は「試行数が十分(200÷帯の代表確率)になるまで補正なし」だったが、
+    大穴帯(必要数8000件等)は事実上ずっと補正されないままになるため、
+    サンプル数に応じて段階的に補正を効かせる方式に変更した(のんの要望により修正)。
+    calibration_factorsの各帯には、この段階的補正が既に反映されている。
+    戻り値: (補正後確率, その勝率帯の低確率帯かつ実績未成熟=推定誤差に注意すべきか)
     """
     bucket_name, _ = calc.get_prob_bucket(est_prob)
     info = calibration_factors.get(bucket_name)
     is_reliable = bool(info and info["is_reliable"])
     # オッズが跳ねる低確率帯(0-5%=大穴)は、確率推定のわずかな誤差がEVの計算上
-    # 大きく増幅されるため、実績による補正が効いていない間は特に注意が必要(のんとの
-    # 相談により追加)。
+    # 大きく増幅されるため、実績が十分溜まって確信が持てるまでは特に注意が必要
+    # (この警告フラグ自体は段階的補正とは別に、閾値到達までは出し続ける)。
     low_prob_warning = (bucket_name == "0-5%(大穴)") and not is_reliable
-    if not info or not is_reliable:
+    if not info:
         return est_prob, low_prob_warning
     calibrated = est_prob * info["calibration_factor"]
     return max(0.0, min(1.0, calibrated)), low_prob_warning
@@ -444,6 +447,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "excluded_by_garami_count": excluded_by_garami_count,
         "excluded_by_min_stake_count": excluded_by_min_stake_count,
         "excluded_low_prob_count": excluded_low_prob_count,
+        # 実際にどの設定でこのプランが作られたかを明示する(除外されたはずの大穴帯が
+        # 混ざっていた場合など、原因切り分けをしやすくするため。のんの報告により追加)。
+        "exclude_low_prob_warning_requested": req.exclude_low_prob_warning,
         "garami_free": req.avoid_garami,
         "odds_safety_margins_used_pct": odds_safety_margins if req.avoid_garami else {},
         "total_expected_profit": round(total_expected_profit, 0),

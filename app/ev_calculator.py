@@ -270,6 +270,22 @@ def compute_calibration_factor(actual_win_rate: float, predicted_avg_prob: float
     return max(0.3, min(3.0, factor))
 
 
+def shrunk_calibration_factor(raw_factor: float, sample_count: int, required_sample_count: int) -> float:
+    """
+    サンプル数が必要数(required_sample_count)に満たなくても、集まった分だけ
+    段階的に補正を効かせる(のんの要望により追加)。
+    以前は「必要数に達するまでは補正係数1.0(補正なし)、達したら実績値をフルに適用」という
+    on/off切り替えだったが、この方式だと必要数が非常に大きい低確率帯(大穴帯で8000件等)は
+    実質永遠に補正されないままになる。
+    ここでは shrinkage(サンプル数の割合)で「1.0(無補正)」と「実績ベースの係数」を
+    滑らかに按分する。データが少ないうちは無補正に近く、データが増えるほど実績を信頼する。
+    """
+    if required_sample_count <= 0:
+        return 1.0
+    weight = min(1.0, sample_count / required_sample_count)
+    return 1.0 * (1 - weight) + raw_factor * weight
+
+
 def kelly_fraction(
     win_prob: float, odds_value: float, fractional_coefficient: float = 0.25, rebate_pct: float = 0.0
 ) -> float:
