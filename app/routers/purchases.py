@@ -353,6 +353,75 @@ def big_expected_bets(db: Session = Depends(get_db), limit: int = 20):
     return items[:limit]
 
 
+@router.get("/car-pick-accuracy")
+def car_pick_accuracy(db: Session = Depends(get_db)):
+    """
+    券種の組み合わせによるノイズを除き、「そのレースでAIが最有力とした車番」が
+    実際に1着/上位3着に来たかどうかだけを追跡する。
+    同一レース内の複数買い目が、実質同じ車番予想を券種違いで何度も張っているだけ
+    (相関が強く、独立試行として扱えない)という問題を避けた、より純粋な予測精度の指標。
+    「1レース=1試行」なので、二項検定もそのまま正しく使える(のんの指摘により追加)。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+    items = []
+    for race in races:
+        entries = [e for e in race.entries if e.blended_win_prob is not None]
+        if not entries:
+            continue
+        top_pick = max(entries, key=lambda e: e.blended_win_prob)
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except (ValueError, IndexError):
+            continue
+        if not parsed["groups"]:
+            continue
+        first_group = parsed["groups"][0]
+        items.append({
+            "race_id": race.id,
+            "venue_name": race.venue_name,
+            "race_number": race.race_number,
+            "top_pick_car_number": top_pick.car_number,
+            "top_pick_player_name": top_pick.player_name,
+            "predicted_win_prob_pct": round(top_pick.blended_win_prob * 100, 2),
+            "actual_result": race.actual_result,
+            "won": top_pick.car_number in first_group,
+            "in_top3": top_pick.car_number in parsed["top3_set"],
+        })
+
+    if not items:
+        return {"message": "着順確定済み・AI推定済みのレースがまだありません"}
+
+    n = len(items)
+    win_count = sum(1 for it in items if it["won"])
+    top3_count = sum(1 for it in items if it["in_top3"])
+    avg_predicted_pct = sum(it["predicted_win_prob_pct"] for it in items) / n
+    p_value = calc.binomial_lower_tail_p(win_count, n, avg_predicted_pct / 100)
+
+    if p_value < 0.05:
+        judgement = "予想が実態より高すぎる可能性が高い(偶然では説明しにくい)"
+    elif p_value < 0.20:
+        judgement = "やや予想が高めだが、まだ偶然の範囲とも言える"
+    else:
+        judgement = "現時点のサンプル数では、偶然のブレの範囲内"
+
+    return {
+        "n_races": n,
+        "win_count": win_count,
+        "win_rate_pct": round(win_count / n * 100, 1),
+        "top3_count": top3_count,
+        "top3_rate_pct": round(top3_count / n * 100, 1),
+        "avg_predicted_win_prob_pct": round(avg_predicted_pct, 2),
+        "significance_p_value_pct": round(p_value * 100, 4),
+        "judgement": judgement,
+        "items": sorted(items, key=lambda x: -x["race_id"]),
+    }
+
+
 @router.get("/pending")
 def list_pending_purchases(db: Session = Depends(get_db)):
     """まだ結果未確定の購入履歴一覧(結果入力画面用)。レースごとにまとめられるよう、レース情報も付与する。"""

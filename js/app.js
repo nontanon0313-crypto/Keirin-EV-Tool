@@ -860,6 +860,33 @@ document.getElementById("loadBigExpectedBtn").addEventListener("click", async ()
   }
 });
 
+document.getElementById("loadCarPickBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/car-pick-accuracy"));
+    const data = await res.json();
+    if (data.message) {
+      resultBox.textContent = data.message;
+      return;
+    }
+    const cls = data.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (data.significance_p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
+    let html = `<p class="note">券種の組み合わせを介さず、「そのレースでAIが最も勝つと見積もった車番」だけを追跡した、1レース=1試行の指標です。</p>`;
+    html += `<p><strong>${data.n_races}レース中 ${data.win_count}レースで1着的中(${data.win_rate_pct}%)</strong> / 上位3着以内: ${data.top3_count}レース(${data.top3_rate_pct}%)</p>`;
+    html += `<p>想定平均勝率: ${data.avg_predicted_win_prob_pct}%</p>`;
+    html += `<p${cls}>📊 このズレが偶然起きる確率: ${data.significance_p_value_pct}%(${data.judgement})</p>`;
+    html += `<table><tr><th>レース</th><th>本命車番</th><th>選手名</th><th>想定勝率</th><th>着順</th><th>1着</th><th>3着以内</th></tr>`;
+    for (const it of data.items) {
+      const cls2 = it.won ? "ev-positive" : (it.in_top3 ? "" : "ev-skip");
+      html += `<tr class="${cls2}"><td>${it.venue_name}${it.race_number}R</td><td>${it.top_pick_car_number}番</td><td>${it.top_pick_player_name}</td><td>${it.predicted_win_prob_pct}%</td><td>${it.actual_result}</td><td>${it.won ? "🟢" : "-"}</td><td>${it.in_top3 ? "🟢" : "-"}</td></tr>`;
+    }
+    html += "</table>";
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 // ---------- 詳細設定(localStorageに保存・復元) ----------
 const SETTINGS_STORAGE_KEY = "keirinEvToolSettings";
 const SETTINGS_INPUT_IDS = ["minProbInput", "minEvInput", "maxRacePctInput", "maxItemsInput", "thresholdLimitInput"];
