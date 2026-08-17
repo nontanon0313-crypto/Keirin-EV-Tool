@@ -281,25 +281,17 @@ async function checkRace() {
       html += `<div style="background:#0b1220;border-radius:8px;padding:10px;margin-top:8px;"><strong>🎯AIによる展開予想</strong><p style="white-space:pre-wrap;margin-top:6px;">${data.development_simulation}</p></div>`;
     }
 
-    html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>脚質</th><th>得点</th><th>S</th><th>H</th><th>B</th><th>決まり手(逃/捲/差/マ)</th><th>直近着順</th><th>ライン</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
+    html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>脚質</th><th>得点</th><th>S</th><th>H</th><th>B</th><th>決まり手(逃/捲/差/マ)</th><th>直近着順</th><th>コメント</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
     for (const e of data.entries) {
       const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';
       const appWinRateLabel = `${e.app_win_rate ?? "-"}${e.zero_app_win_rate_warning ? " ⚠️欠場でないか要確認" : ""}`;
       const kimarite = `${e.kimarite_nige ?? "-"}/${e.kimarite_makuri ?? "-"}/${e.kimarite_sashi ?? "-"}/${e.kimarite_mark ?? "-"}`;
       const finishes = `${e.finish_1st ?? "-"}/${e.finish_2nd ?? "-"}/${e.finish_3rd ?? "-"}`;
-      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.region ?? "-"}${e.is_local ? "(地元)" : ""}</td><td>${e.leg_style ?? "-"}</td><td>${e.race_score ?? "-"}</td><td>${e.s_count ?? "-"}</td><td>${e.h_count ?? "-"}</td><td>${e.b_count ?? "-"}</td><td>${kimarite}</td><td>${finishes}</td><td>${e.line_group ?? "-"}</td><td>${appWinRateLabel}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
+      html += `<tr${status}><td>${e.car_number}</td><td>${e.player_name}</td><td>${e.region ?? "-"}${e.is_local ? "(地元)" : ""}</td><td>${e.leg_style ?? "-"}</td><td>${e.race_score ?? "-"}</td><td>${e.s_count ?? "-"}</td><td>${e.h_count ?? "-"}</td><td>${e.b_count ?? "-"}</td><td>${kimarite}</td><td>${finishes}</td><td>${e.pre_race_comment ?? "-"}</td><td>${appWinRateLabel}</td><td>${e.ai_win_prob ?? "-"}</td><td>${e.blended_win_prob ?? "未取得"}</td></tr>`;
     }
     html += `</table>`;
     html += `<p class="note">得点=競走得点、S/H/B=各回数、決まり手は逃げ/捲り/差し/マークの回数、直近着順は1着/2着/3着の回数です。数字が全て「-」の場合、その項目がOCRで読み取れていません。</p>`;
 
-    const commentedEntries = data.entries.filter(e => e.pre_race_comment);
-    if (commentedEntries.length) {
-      html += `<div style="margin-top:8px;"><strong>前検コメント</strong><ul>`;
-      for (const e of commentedEntries) {
-        html += `<li>${e.car_number}番 ${e.player_name}: ${e.pre_race_comment}</li>`;
-      }
-      html += `</ul></div>`;
-    }
 
     html += `<p>オッズ件数: ${data.odds_count}件</p><ul>`;
     if (Object.keys(data.odds_by_type).length === 0) {
