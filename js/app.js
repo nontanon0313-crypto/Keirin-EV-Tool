@@ -281,7 +281,7 @@ async function checkRace() {
       html += `<div style="background:#0b1220;border-radius:8px;padding:10px;margin-top:8px;"><strong>🎯AIによる展開予想</strong><p style="white-space:pre-wrap;margin-top:6px;">${data.development_simulation}</p></div>`;
     }
 
-    html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>脚質</th><th>得点</th><th>S</th><th>H</th><th>B</th><th>決まり手(逃/捲/差/マ)</th><th>直近着順</th><th>コメント</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
+    html += `<table><tr><th>車番</th><th>選手名</th><th>地区</th><th>脚質</th><th>競走得点</th><th>S</th><th>H</th><th>B</th><th>決まり手(逃/捲/差/マ)</th><th>直近着順</th><th>コメント</th><th>アプリ勝率</th><th>AI推定</th><th>合成勝率</th></tr>`;
     for (const e of data.entries) {
       const status = e.ready_for_ev ? "" : ' style="color:#ef4444;"';
       const appWinRateLabel = `${e.app_win_rate ?? "-"}${e.zero_app_win_rate_warning ? " ⚠️欠場でないか要確認" : ""}`;
