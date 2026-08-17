@@ -137,6 +137,17 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
                 "is_local": e.is_local,
                 "leg_style": e.leg_style,
                 "race_score": e.race_score,
+                "s_count": e.s_count,
+                "h_count": e.h_count,
+                "b_count": e.b_count,
+                "kimarite_nige": e.kimarite_nige,
+                "kimarite_makuri": e.kimarite_makuri,
+                "kimarite_sashi": e.kimarite_sashi,
+                "kimarite_mark": e.kimarite_mark,
+                "finish_1st": e.finish_1st,
+                "finish_2nd": e.finish_2nd,
+                "finish_3rd": e.finish_3rd,
+                "line_group": e.line_group,
                 "app_win_rate": e.app_win_rate,
                 # OCRでは「欠場」を直接判定できないため、アプリ勝率がちょうど0%かつ
                 # 他の基本データ(競走得点)も無い場合のみ、目視確認を促す。
