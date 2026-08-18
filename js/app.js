@@ -891,6 +891,25 @@ document.getElementById("loadCarPickBtn").addEventListener("click", async () => 
   }
 });
 
+document.getElementById("loadSkippedStatsBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/skipped/stats"));
+    const data = await res.json();
+    if (data.message) {
+      resultBox.textContent = data.message;
+      return;
+    }
+    let html = `<p class="note">大穴帯除外・予算超過・ガミり回避・最大件数などで自動プランから除外された買い目が、実際どうなっていたかを検証します。除外が正しかった(見送り正解)割合と、逃した利益(機会損失)を確認できます。</p>`;
+    html += `<p><strong>見送り正解率: ${data.correct_skip_pct}%</strong>(${data.total_skipped_evaluated}件中)</p>`;
+    html += `<p>取りこぼした的中: ${data.missed_opportunities_count}件 / 逃した想定払戻合計: ${data.missed_profit_total}円</p>`;
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 // ---------- 詳細設定(localStorageに保存・復元) ----------
 const SETTINGS_STORAGE_KEY = "keirinEvToolSettings";
 const SETTINGS_INPUT_IDS = ["minProbInput", "minEvInput", "maxRacePctInput", "maxItemsInput", "thresholdLimitInput"];

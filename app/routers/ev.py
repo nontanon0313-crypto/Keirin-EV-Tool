@@ -313,9 +313,16 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         })
 
     excluded_low_prob_count = 0
+    skipped_for_verification = []  # (candidate, reason) 後でSkippedBetとして記録する
     if req.exclude_low_prob_warning:
         before_count = len(candidates)
-        candidates = [c for c in candidates if not c["low_prob_warning"]]
+        kept = []
+        for c in candidates:
+            if c["low_prob_warning"]:
+                skipped_for_verification.append((c, "大穴帯(未補正)のため除外"))
+            else:
+                kept.append(c)
+        candidates = kept
         excluded_low_prob_count = before_count - len(candidates)
 
     if not candidates:
@@ -358,18 +365,23 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
         if req.max_items and len(items) >= req.max_items:
-            break
+            skipped_for_verification.append((c, "最大件数の都合で除外"))
+            continue
         stake = calc.round_to_bet_unit(c["raw_stake"])
         if stake <= 0:
             # 理論上の賭け金が最低単位(100円)に満たない(切り捨てで0円になった)
             excluded_by_min_stake_count += 1
+            skipped_for_verification.append((c, "理論上の賭け金が最低単位未満"))
             continue
         if stake > remaining_budget:
             if remaining_budget < 100:
-                break  # もう1点(最低100円)も買う余地が無いので、以降は全て予算オーバー
+                # もう1点(最低100円)も買う余地が無いので、以降は全て予算オーバー
+                skipped_for_verification.append((c, "予算超過"))
+                break
             stake = calc.round_to_bet_unit(remaining_budget)
             if stake <= 0 or stake > remaining_budget:
                 excluded_by_budget_count += 1
+                skipped_for_verification.append((c, "予算超過"))
                 continue
 
         cars = tuple(int(x) for x in c["combination"].split("-"))
@@ -379,6 +391,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             if not winning:
                 # 起こりうる結果と1つも一致しない(データ不整合)場合は安全側でスキップ
                 excluded_by_garami_count += 1
+                skipped_for_verification.append((c, "データ不整合のため除外"))
                 continue
             new_total_stake = total_stake + stake
             margin_pct = odds_safety_margins.get(c["bet_type"], purchases_router.DEFAULT_ODDS_SAFETY_MARGIN_PCT)
@@ -399,6 +412,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                         break
             if not ok:
                 excluded_by_garami_count += 1
+                skipped_for_verification.append((c, "ガミり回避のため除外"))
                 continue
             for o in winning:
                 payout_by_outcome[o] += payout_gain
@@ -437,6 +451,34 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         )
     else:
         race_hit_prob_pct = 0
+
+    # 除外した買い目を「見送り」として記録する(のんの指摘により追加)。
+    # 以前はSkippedBetテーブル・APIが存在するのに一度も自動記録されておらず、
+    # 「除外して正解だったか、本当は当たっていたのに逃したのか」を検証できていなかった。
+    # 同一の(race_id, bet_type, combination)を二重記録しないようにする。
+    if skipped_for_verification:
+        existing_skipped_keys = {
+            (s.bet_type, s.combination)
+            for s in db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race_id).all()
+        }
+        new_skipped_objs = []
+        seen_in_this_call = set()
+        for c, reason in skipped_for_verification:
+            key = (c["bet_type"], c["combination"])
+            if key in existing_skipped_keys or key in seen_in_this_call:
+                continue
+            seen_in_this_call.add(key)
+            new_skipped_objs.append(models.SkippedBet(
+                race_id=race_id,
+                bet_type=c["bet_type"],
+                combination=c["combination"],
+                win_prob_estimated=c["win_prob"],
+                ev_pct_estimated=c["ev_pct"],
+                reason=reason,
+            ))
+        if new_skipped_objs:
+            db.add_all(new_skipped_objs)
+            db.commit()
 
     return {
         "race_id": race_id,

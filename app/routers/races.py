@@ -65,11 +65,32 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
     if total_payout_delta:
         bankroll_router.adjust_balance(db, total_payout_delta)
 
+    # 見送り記録(SkippedBet)にも同じ着順を適用し、「除外して正解だったか」を検証できるようにする
+    # (のんの指摘により追加。以前はレース確定してもSkippedBetの結果が一切埋まらなかった)。
+    skipped = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.race_id == race_id, models.SkippedBet.actual_result.is_(None))
+        .all()
+    )
+    skipped_updated = 0
+    for s in skipped:
+        is_win = calc.judge_purchase_result(s.bet_type, s.combination, parsed_result)
+        s.actual_result = "win" if is_win else "lose"
+        # 見送り分は実際には購入していないため、購入時オッズが無い。想定EVから逆算した
+        # オッズ相当(1+EV%/100)/推定確率、が無理なら払戻推定はNoneのままにする。
+        if is_win and s.win_prob_estimated:
+            implied_odds = (1 + s.ev_pct_estimated / 100) / s.win_prob_estimated if s.ev_pct_estimated is not None else None
+            s.actual_payout = round(100 * implied_odds) if implied_odds else None
+        skipped_updated += 1
+    if skipped_updated:
+        db.commit()
+
     return {
         "race_id": race_id,
         "actual_result": actual_result,
         "updated_count": len(updated),
         "updated": updated,
+        "skipped_updated_count": skipped_updated,
     }
 
 
