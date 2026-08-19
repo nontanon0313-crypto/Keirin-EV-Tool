@@ -63,22 +63,43 @@ def update_purchase_result(purchase_id: int, update: schemas.PurchaseResultUpdat
 def get_calibration_factors(db: Session) -> dict:
     """
     勝率帯ごとの自動補正係数を計算する。
-    試行数が「200÷帯の代表確率」に達した帯だけ、実績に基づく補正係数を返す。
-    達していない帯はfactor=1.0(補正なし)のまま。
+    試行数が「200÷帯の代表確率」に達した帯だけ、実績に基づく補正係数を返す(段階的補正)。
+
+    重要: Purchase(実際に買った分)だけでなく、SkippedBet(大穴帯除外等で見送った分、
+    結果確定済みのもの)も合わせて集計する。以前はPurchaseしか見ておらず、
+    大穴帯は「投票から除外され続ける限りデータも永遠に貯まらない」状態になっていた。
+    見送った買い目も「予想確率 vs 実際の結果」というデータとしては全く同じ形なので、
+    的中検証・自動補正には활用できる(のんの指摘により修正。投票対象からの除外と、
+    集計・検証対象からの除外は別問題)。
     """
     purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    skipped = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None)).all()
+
+    # Purchase/SkippedBetを「予想確率・的中したか・情報源」という共通の形に正規化して結合する
+    records = [
+        (p.win_prob_at_purchase, p.result == "win", "purchase")
+        for p in purchases if p.win_prob_at_purchase is not None
+    ]
+    records += [
+        (s.win_prob_estimated, s.actual_result == "win", "skipped")
+        for s in skipped if s.win_prob_estimated is not None
+    ]
+
     result = {}
     for lo, hi, name, mid in calc.PROB_BUCKETS:
-        bucket_purchases = [p for p in purchases if p.win_prob_at_purchase is not None and lo <= p.win_prob_at_purchase < hi]
-        count = len(bucket_purchases)
+        bucket_records = [(prob, won, src) for prob, won, src in records if lo <= prob < hi]
+        count = len(bucket_records)
+        purchase_count = sum(1 for _, _, src in bucket_records if src == "purchase")
+        skipped_count = count - purchase_count
         required = calc.required_sample_size(mid)
         is_reliable = count >= required
 
         if count > 0:
-            wins = sum(1 for p in bucket_purchases if p.result == "win")
+            wins = sum(1 for _, won, _ in bucket_records if won)
             actual_win_rate = wins / count
-            predicted_avg = sum(p.win_prob_at_purchase for p in bucket_purchases) / count
+            predicted_avg = sum(prob for prob, _, _ in bucket_records) / count
         else:
+            wins = 0
             actual_win_rate = None
             predicted_avg = None
 
@@ -104,6 +125,8 @@ def get_calibration_factors(db: Session) -> dict:
 
         result[name] = {
             "sample_count": count,
+            "purchase_count": purchase_count,
+            "skipped_count": skipped_count,
             "required_sample_count": required,
             "is_reliable": is_reliable,
             "actual_win_rate_pct": round(actual_win_rate * 100, 2) if actual_win_rate is not None else None,
@@ -215,6 +238,92 @@ def source_weights(db: Session = Depends(get_db)):
         "app_brier_score": round(app_brier, 4),
         "ai_brier_score": round(ai_brier, 4),
         "reason": f"着順確定済み{len(races)}レース分の実績から算出しました(値が低いほど精度が高いBrierスコア: tipstar={round(app_brier,4)} / AI={round(ai_brier,4)})。",
+    }
+
+
+@router.get("/investment-readiness")
+def investment_readiness(db: Session = Depends(get_db)):
+    """
+    「実資金を投資してよいか」を、具体的な数値基準で自動判定する
+    (のんの要望により追加)。
+    基準:
+    1. サンプル数が十分か(統計的な結論を出すのに足る量か)
+    2. 予想と実績のズレが統計的に有意でないか(偶然の範囲に収まっているか)
+    3. 実績収支率が黒字か、レース単位でも安定してプラスが多いか
+    4. 実績の勝率・オッズで運用した場合、破産確率が十分低いか
+    """
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    if not purchases:
+        return {"ready": False, "message": "まだ確定した購入履歴がありません。"}
+
+    n_bets = len(purchases)
+    race_ids = sorted({p.race_id for p in purchases})
+    n_races = len(race_ids)
+
+    win_prob_values = [p.win_prob_at_purchase for p in purchases if p.win_prob_at_purchase is not None]
+    win_count = sum(1 for p in purchases if p.result == "win")
+    total_stake = sum(p.stake_amount for p in purchases)
+    total_payout = sum(p.payout_amount for p in purchases)
+    overall_roi_pct = round((total_payout / total_stake) * 100, 2) if total_stake else 0
+
+    race_profit_flags = []
+    for rid in race_ids:
+        race_purchases = [p for p in purchases if p.race_id == rid]
+        race_stake = sum(p.stake_amount for p in race_purchases)
+        race_payout = sum(p.payout_amount for p in race_purchases)
+        race_profit_flags.append(1 if race_payout >= race_stake else 0)
+    race_profit_rate_pct = round(sum(race_profit_flags) / n_races * 100, 1) if n_races else 0
+
+    p_value_pct = None
+    if win_prob_values:
+        avg_predicted = sum(win_prob_values) / len(win_prob_values)
+        p_value_pct = round(calc.binomial_lower_tail_p(win_count, len(win_prob_values), avg_predicted) * 100, 2)
+
+    odds_purchases = [p for p in purchases if p.odds_at_purchase is not None]
+    avg_odds = (
+        sum(p.stake_amount * p.odds_at_purchase for p in odds_purchases) / sum(p.stake_amount for p in odds_purchases)
+        if odds_purchases else None
+    )
+    win_rate = win_count / n_bets if n_bets else 0
+
+    bankruptcy = None
+    if avg_odds and win_rate > 0:
+        bankruptcy = calc.monte_carlo_bankruptcy(
+            initial_bankroll=100000, win_prob=win_rate, odds_value=avg_odds,
+            stake_fraction=0.10 / max(1, round(n_bets / max(1, n_races))),
+            num_bets_per_trial=n_bets, num_trials=3000, ruin_threshold_pct=0.5,
+        )
+
+    # 基準ごとの判定(のんの基準: サンプル十分・ズレが偶然の範囲・黒字が安定・破産しない)
+    checks = {
+        "sample_size": {
+            "pass": n_bets >= 200 and n_races >= 30,
+            "detail": f"購入{n_bets}件・{n_races}レース(目安: 200件以上・30レース以上)",
+        },
+        "calibration": {
+            "pass": p_value_pct is not None and p_value_pct >= 20,
+            "detail": f"偶然に起きる確率{p_value_pct}%(目安: 20%以上で偶然の範囲内)" if p_value_pct is not None else "データ不足",
+        },
+        "profitability": {
+            "pass": overall_roi_pct >= 100 and race_profit_rate_pct >= 40,
+            "detail": f"実績収支率{overall_roi_pct}% / レース黒字率{race_profit_rate_pct}%(目安: 収支率100%以上・黒字率40%以上)",
+        },
+        "bankruptcy_risk": {
+            "pass": bankruptcy is not None and bankruptcy["ruin_probability_pct"] <= 10,
+            "detail": (
+                f"実績ベースの破産確率{bankruptcy['ruin_probability_pct']}%(目安: 10%以下)"
+                if bankruptcy else "データ不足(平均オッズまたは的中実績が無い)"
+            ),
+        },
+    }
+    all_pass = all(c["pass"] for c in checks.values())
+
+    return {
+        "ready": all_pass,
+        "summary": "投資を始める目安を満たしています" if all_pass else "まだ目安を満たしていません(下記の未達項目を確認)",
+        "checks": checks,
+        "n_bets": n_bets,
+        "n_races": n_races,
     }
 
 

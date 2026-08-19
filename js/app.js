@@ -799,7 +799,8 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
         const cls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : "";
         pText = `<span${cls}>${info.significance_p_value_pct}%</span>`;
       }
-      html += `<tr><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
+      const sampleLabel = `${info.sample_count}<span class="note">(購入${info.purchase_count}+見送り${info.skipped_count})</span>`;
+      html += `<tr><td>${bucket}</td><td>${sampleLabel}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
     }
     html += "</table>";
     resultBox.innerHTML = html;
@@ -904,6 +905,35 @@ document.getElementById("loadSkippedStatsBtn").addEventListener("click", async (
     let html = `<p class="note">大穴帯除外・予算超過・ガミり回避・最大件数などで自動プランから除外された買い目が、実際どうなっていたかを検証します。除外が正しかった(見送り正解)割合と、逃した利益(機会損失)を確認できます。</p>`;
     html += `<p><strong>見送り正解率: ${data.correct_skip_pct}%</strong>(${data.total_skipped_evaluated}件中)</p>`;
     html += `<p>取りこぼした的中: ${data.missed_opportunities_count}件 / 逃した想定払戻合計: ${data.missed_profit_total}円</p>`;
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
+document.getElementById("loadReadinessBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/investment-readiness"));
+    const data = await res.json();
+    if (data.message) {
+      resultBox.textContent = data.message;
+      return;
+    }
+    const labels = {
+      sample_size: "① サンプル数は十分か",
+      calibration: "② 予想と実績のズレは偶然の範囲か",
+      profitability: "③ 収支は安定してプラスか",
+      bankruptcy_risk: "④ 破産確率は十分低いか",
+    };
+    let html = `<p style="font-size:16px;"><strong>${data.ready ? "✅" : "⏳"} ${data.summary}</strong></p>`;
+    html += `<table><tr><th>基準</th><th>判定</th><th>詳細</th></tr>`;
+    for (const [key, label] of Object.entries(labels)) {
+      const c = data.checks[key];
+      html += `<tr class="${c.pass ? "ev-positive" : ""}"><td>${label}</td><td>${c.pass ? "🟢達成" : "未達"}</td><td>${c.detail}</td></tr>`;
+    }
+    html += "</table>";
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
