@@ -39,7 +39,9 @@ def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
     大穴帯(必要数8000件等)は事実上ずっと補正されないままになるため、
     サンプル数に応じて段階的に補正を効かせる方式に変更した(のんの要望により修正)。
     calibration_factorsの各帯には、この段階的補正が既に反映されている。
-    戻り値: (補正後確率, その勝率帯の低確率帯かつ実績未成熟=推定誤差に注意すべきか)
+    戻り値: (補正後確率, その勝率帯の低確率帯かつ実績未成熟=推定誤差に注意すべきか, 予想精度%)
+    予想精度% = その勝率帯の試行数 ÷ 必要試行数(100%上限)。表示専用の指標であり、
+    確率計算・フィルタリング・投票内容には一切使わない(のんの要望により追加)。
     """
     bucket_name, _ = calc.get_prob_bucket(est_prob)
     info = calibration_factors.get(bucket_name)
@@ -48,10 +50,13 @@ def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
     # 大きく増幅されるため、実績が十分溜まって確信が持てるまでは特に注意が必要
     # (この警告フラグ自体は段階的補正とは別に、閾値到達までは出し続ける)。
     low_prob_warning = (bucket_name == "0-5%(大穴)") and not is_reliable
+    reliability_pct = 0.0
+    if info and info["required_sample_count"] > 0:
+        reliability_pct = round(min(1.0, info["sample_count"] / info["required_sample_count"]) * 100, 1)
     if not info:
-        return est_prob, low_prob_warning
+        return est_prob, low_prob_warning, reliability_pct
     calibrated = est_prob * info["calibration_factor"]
-    return max(0.0, min(1.0, calibrated)), low_prob_warning
+    return max(0.0, min(1.0, calibrated)), low_prob_warning, reliability_pct
 
 
 @router.post("/calculate/{race_id}")
@@ -102,7 +107,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob, low_prob_warning = _apply_calibration(est_prob, calibration_factors)
+        est_prob, low_prob_warning, _ = _apply_calibration(est_prob, calibration_factors)
         low_prob_warnings[(o.bet_type, o.combination)] = low_prob_warning
 
         market_prob = normalized_market.get(o.bet_type, {}).get(
@@ -232,7 +237,7 @@ def threshold_table(
         )
         for combo in combos:
             est_prob = _estimate_prob(win_probs, bet_type, combo)
-            est_prob, low_prob_warning = _apply_calibration(est_prob, calibration_factors)
+            est_prob, low_prob_warning, _ = _apply_calibration(est_prob, calibration_factors)
             is_skip, _ = calc.apply_min_prob_filter(est_prob, 100, min_win_prob)  # 勝率フィルターのみ判定
             if is_skip or est_prob <= 0:
                 continue
@@ -290,7 +295,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob, low_prob_warning = _apply_calibration(est_prob, calibration_factors)
+        est_prob, low_prob_warning, reliability_pct = _apply_calibration(est_prob, calibration_factors)
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
@@ -310,6 +315,10 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "win_prob": est_prob,
             "total_vote_amount": o.total_vote_amount,
             "low_prob_warning": low_prob_warning,
+            # 予想精度%(=その勝率帯の補正がどれだけデータに裏付けられているか)。
+            # 表示専用の指標であり、確率計算・フィルタリング・投票内容には使わない
+            # (のんの要望により追加)。
+            "prediction_reliability_pct": reliability_pct,
         })
 
     excluded_low_prob_count = 0
@@ -437,6 +446,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
             "low_prob_warning": c["low_prob_warning"],
+            "prediction_reliability_pct": c["prediction_reliability_pct"],
         })
 
     race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0
