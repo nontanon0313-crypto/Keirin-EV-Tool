@@ -1,0 +1,8 @@
+data/*.json
+!data/sample_*.json
+data/batch_log.txt
+data/batch_stdout.log
+data/*.lock
+__pycache__/
+*.pyc
+.venv/
