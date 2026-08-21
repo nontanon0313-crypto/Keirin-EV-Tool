@@ -1,15 +1,37 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Odds Park 競輪 スクレイパー（耐障害版）
-- 各リクエストにリトライ
-- 3連単は1着軸ごとに独立取得（途中失敗しても継続）
-- タイムアウト・接続エラーを握りつぶして可能な限りデータを残す
+Odds Park 競輪 スクレイパー（耐障害版 v2）
+
+v2での変更点(のんの報告した「オッズ欠損」「読み込みタイムアウト」を受けて全面修正):
+
+1. 致命的なバグ: オッズ値と人気順位の2セルを両方「1車番分のデータ」として
+   数えてしまい、車番の対応が1つずつズレていた。ペア単位で消費するよう修正。
+
+2. 構造の誤り: 実際のoddspark.comのページ(2026年8月に実URLで確認)を調べたところ、
+   券種ごとに全く異なる表構造だった。以前は全券種を同じ「1着/2着/3着」3項目の
+   ロジックで無理やり解釈しており、車番の対応が誤っていた。
+   - 2車複・ワイド: 車番の若い方を列、大きい方を行とした三角形の1ページ完結マトリクス
+     (例:7車立てなら21通りぴったり。軸ごとの取得は不要)
+   - 2車単: 列=1着車番、行=2着車番の全体マトリクス(1ページ完結、n×(n-1)通り)
+   - 3連単: 軸車番(1着候補)ごとに個別ページ(1〜9を並列取得して合算)
+   - 3連複: 3連単と同様、軸車番ごとに個別ページが必要と判明
+     (以前は1ページだけ取得しており、軸1相当の一部データしか取れていなかった)
+
+3. タイムアウトを(5,10)→(5,20)に延長し、リトライ回数・バックオフを強化
+   (実データ24レースの大半の欠損は"Read timed out"が原因だった)
+
+4. 軸ごと取得で失敗した軸だけをシリアルで最大2回まで追い取得する
+   (以前は1回失敗したらその軸を諦めていた)
+
+5. 選手数から券種ごとの理論組み合わせ数を計算し、実際の取得数と比較して
+   is_complete(欠損なしか)を各オッズデータに付与
+
+6. 出走表・結果の取得もタイムアウトした場合は1回だけ自動で追いリトライする
 """
 import requests
 from bs4 import BeautifulSoup
-import json, time, re, os
+import json, time, re, os, random, math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -22,6 +44,8 @@ OUTPUT_DIR = os.environ.get("KEIRIN_DATA_DIR", os.path.join(os.path.dirname(os.p
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 BET_TYPES = {5: "2車複", 6: "2車単", 7: "ワイド", 8: "3連複", 9: "3連単"}
+# 軸車番ごとにページを分けて取得する必要がある券種(2026年8月に実ページで確認)
+AXIS_BASED_BET_TYPES = {8, 9}
 
 _session = None
 
@@ -32,17 +56,18 @@ def get_session():
         _session.headers.update(HEADERS)
     return _session
 
-def get_soup(url, params=None, retries=2):
+def get_soup(url, params=None, retries=4, timeout=(5, 20)):
     last_err = None
     for i in range(retries):
         try:
-            r = get_session().get(url, params=params, timeout=(5, 10))
+            r = get_session().get(url, params=params, timeout=timeout)
             r.raise_for_status()
             r.encoding = r.apparent_encoding or "utf-8"
             return BeautifulSoup(r.text, "html.parser")
         except Exception as e:
             last_err = e
-            time.sleep(0.5 + i)
+            if i < retries - 1:
+                time.sleep(min(1.0 * (2 ** i) + random.uniform(0, 0.5), 8.0))
     raise last_err
 
 def parse_entry(jo_code, kaisai_bi, race_no):
@@ -85,8 +110,17 @@ def parse_entry(jo_code, kaisai_bi, race_no):
             unique.append(r)
     return {"race_name": race_name, "riders": sorted(unique, key=lambda x: int(x["車番"])), "url": f"{url}?joCode={jo_code}&kaisaiBi={kaisai_bi}&raceNo={race_no}"}
 
-def _parse_odds_matrix(soup, fixed_first="1"):
-    matrix = []
+def _parse_raw_grid(soup):
+    """
+    オッズ表の生データを(列車番, 行車番, オッズ値)のリストとして抽出する。
+    券種による意味づけ(1着/2着/順序の有無)は呼び出し側で行う。
+
+    実ページ構造(2026年8月に実URLで確認):
+    - 表の先頭行に列車番ヘッダー(1,2,3...)が並ぶ
+    - 各データ行は先頭セルが行車番、以降は(オッズ値, 人気順位)のペアが
+      列の順に並ぶ(該当なしの列は単に存在しない=詰めて並んでいる)
+    """
+    grid = []
     odds_table = None
     for table in soup.find_all("table"):
         if "odds" in (table.get("class") or []):
@@ -97,70 +131,177 @@ def _parse_odds_matrix(soup, fixed_first="1"):
         if len(tables) >= 2:
             odds_table = tables[1]
     if not odds_table:
-        return matrix
+        return grid
     rows = odds_table.find_all("tr")
-    header_2 = []
-    for row in rows:
-        texts = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-        nums = [t for t in texts if re.fullmatch(r"\d+", t)]
-        if len(nums) >= 5 and all(int(n) < 10 for n in nums):
-            header_2 = nums
-            break
+    if not rows:
+        return grid
+
+    header = []
+    first_row_texts = [c.get_text(strip=True) for c in rows[0].find_all(["td", "th"])]
+    first_row_nums = [t for t in first_row_texts if re.fullmatch(r"\d+", t)]
+    if len(first_row_nums) >= 2 and all(int(n) < 10 for n in first_row_nums):
+        header = first_row_nums
+    else:
+        for row in rows:
+            texts = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+            nums = [t for t in texts if re.fullmatch(r"\d+", t)]
+            if len(nums) >= 5 and all(int(n) < 10 for n in nums):
+                header = nums
+                break
+
     for row in rows:
         texts = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
         if not texts or not re.fullmatch(r"\d+", texts[0]):
             continue
-        third = texts[0]
-        numeric_vals = [t for t in texts[1:] if re.match(r"^[\d.]+$", t)]
+        row_car = texts[0]
+        data_cells = texts[1:]
+        numeric_vals = [t for t in data_cells if re.match(r"^[\d.]+$", t)]
         if numeric_vals and all(re.fullmatch(r"\d+", t) and int(t) < 10 for t in numeric_vals):
-            continue
-        val_idx = 0
-        for t in texts[1:]:
+            continue  # ヘッダー行そのもの(車番の並びだけの行)は除外
+        col_idx = 0
+        i = 0
+        while i < len(data_cells):
+            t = data_cells[i]
             if re.match(r"^[\d.]+$", t):
-                if val_idx < len(header_2):
-                    second = header_2[val_idx]
-                    if second != third:
-                        matrix.append({"1着": fixed_first, "2着": second, "3着": third, "オッズ": t})
-                val_idx += 1
+                if col_idx < len(header):
+                    col_car = header[col_idx]
+                    if col_car != row_car:
+                        grid.append({"col_car": col_car, "row_car": row_car, "odds": t})
+                col_idx += 1
+                i += 2  # (オッズ値, 人気順位)のペアで1列分。人気順位は読み飛ばす
             else:
-                val_idx += 1
-    return matrix
+                col_idx += 1
+                i += 1
+    return grid
 
-def parse_odds_3rentan(jo_code, kaisai_bi, race_no, max_cars=9):
-    """3連単を軸ごとに並列取得"""
-    url = f"{BASE}/Odds.do"
-    all_matrix = []
+def _expected_combo_count(bet_type, n_riders):
+    if n_riders is None or n_riders < 2:
+        return None
+    n = n_riders
+    if bet_type == "2車複":
+        return math.comb(n, 2) if n >= 2 else 0
+    if bet_type == "2車単":
+        return n * (n - 1) if n >= 2 else 0
+    if bet_type == "ワイド":
+        return math.comb(n, 2) if n >= 2 else 0
+    if bet_type == "3連複":
+        return math.comb(n, 3) if n >= 3 else 0
+    if bet_type == "3連単":
+        return n * (n - 1) * (n - 2) if n >= 3 else 0
+    return None
 
-    def fetch_one(car):
-        params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no, "betType": 9, "jikuCode": "1", "shaban": str(car)}
-        try:
-            soup = get_soup(url, params, retries=2)
-            return _parse_odds_matrix(soup, fixed_first=str(car))
-        except Exception:
-            return []
+def _dedup_and_validate(bet_type, combos, n_riders):
+    """
+    combosは既に券種の意味に沿って組み立てられた
+    [{"1着":.., "2着":.., ("3着":..)?, "オッズ":..}, ...] のリスト。
+    重複除去(念のための保険)と、理論組み合わせ数との突合を行う。
+    """
+    unordered = bet_type in ("2車複", "ワイド", "3連複")
+    dedup = {}
+    for item in combos:
+        if bet_type == "3連複":
+            key = tuple(sorted([item["1着"], item["2着"], item["3着"]], key=int))
+        elif unordered:
+            key = tuple(sorted([item["1着"], item["2着"]], key=int))
+        elif bet_type == "3連単":
+            key = (item["1着"], item["2着"], item["3着"])
+        else:  # 2車単
+            key = (item["1着"], item["2着"])
+        if key not in dedup:
+            dedup[key] = item
+    matrix = list(dedup.values())
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futs = {ex.submit(fetch_one, car): car for car in range(1, max_cars + 1)}
-        for fut in as_completed(futs):
-            matrix = fut.result()
-            if matrix:
-                all_matrix.extend(matrix)
+    expected = _expected_combo_count(bet_type, n_riders)
+    actual = len(matrix)
+    is_complete = (expected is not None) and (actual >= expected)
+    missing_count = max(0, expected - actual) if expected is not None else None
+    return {
+        "bet_type": bet_type,
+        "matrix_count": actual,
+        "expected_count": expected,
+        "is_complete": is_complete,
+        "missing_count": missing_count,
+        "matrix": matrix,
+    }
 
-    return {"bet_type": "3連単", "bet_code": 9, "matrix_count": len(all_matrix), "matrix": all_matrix}
-
-
-
-def parse_odds_simple(jo_code, kaisai_bi, race_no, bet_type):
+def parse_odds_simple(jo_code, kaisai_bi, race_no, bet_type, n_riders=None):
+    """
+    1ページで完結する券種向け(2車複=5, 2車単=6, ワイド=7)。
+    - 2車複・ワイド: 車番の若い方/大きい方は順不同の組み合わせとして扱う
+    - 2車単: 列車番=1着、行車番=2着(実ページで確認済みの向き)
+    """
     url = f"{BASE}/Odds.do"
     params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no, "betType": bet_type}
-    soup = get_soup(url, params, retries=1)
-    matrix = _parse_odds_matrix(soup, fixed_first="1")
-    return {"bet_type": BET_TYPES.get(bet_type, str(bet_type)), "bet_code": bet_type, "matrix_count": len(matrix), "matrix": matrix}
+    soup = get_soup(url, params, retries=4)
+    grid = _parse_raw_grid(soup)
+    name = BET_TYPES.get(bet_type, str(bet_type))
+    combos = []
+    for g in grid:
+        if name == "2車単":
+            combos.append({"1着": g["col_car"], "2着": g["row_car"], "オッズ": g["odds"]})
+        else:  # 2車複・ワイド(順不同)
+            combos.append({"1着": g["col_car"], "2着": g["row_car"], "オッズ": g["odds"]})
+    result = _dedup_and_validate(name, combos, n_riders)
+    result["bet_code"] = bet_type
+    return result
+
+def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, max_cars=9):
+    """
+    軸車番ごとにページが分かれている券種向け(3連複=8, 3連単=9)。
+    軸車番(1〜9)ごとに並列取得し、失敗した軸だけ後でシリアルに追い取得する。
+    """
+    url = f"{BASE}/Odds.do"
+    name = BET_TYPES.get(bet_type, str(bet_type))
+    results_by_axis = {}
+
+    def fetch_one(axis_car, retries=4):
+        params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no, "betType": bet_type, "jikuCode": "1", "shaban": str(axis_car)}
+        try:
+            soup = get_soup(url, params, retries=retries)
+            return _parse_raw_grid(soup)
+        except Exception:
+            return None
+
+    cars_to_try = list(range(1, max_cars + 1))
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {ex.submit(fetch_one, car): car for car in cars_to_try}
+        for fut in as_completed(futs):
+            car = futs[fut]
+            results_by_axis[car] = fut.result()
+
+    failed_axes = [c for c, g in results_by_axis.items() if g is None]
+    for attempt in range(2):
+        if not failed_axes:
+            break
+        still_failed = []
+        for axis_car in failed_axes:
+            time.sleep(0.5)
+            g = fetch_one(axis_car, retries=3)
+            if g is None:
+                still_failed.append(axis_car)
+            else:
+                results_by_axis[axis_car] = g
+        failed_axes = still_failed
+
+    combos = []
+    for axis_car, grid in results_by_axis.items():
+        if not grid:
+            continue
+        for g in grid:
+            if name == "3連単":
+                combos.append({"1着": str(axis_car), "2着": g["col_car"], "3着": g["row_car"], "オッズ": g["odds"]})
+            else:  # 3連複(順不同)
+                combos.append({"1着": str(axis_car), "2着": g["col_car"], "3着": g["row_car"], "オッズ": g["odds"]})
+
+    result = _dedup_and_validate(name, combos, n_riders)
+    result["bet_code"] = bet_type
+    result["failed_axes"] = sorted(failed_axes)
+    return result
 
 def parse_result(jo_code, kaisai_bi, race_no):
     url = f"{BASE}/RaceKekka.do"
     params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no}
-    soup = get_soup(url, params, retries=1)
+    soup = get_soup(url, params, retries=4)
     results = []
     for table in soup.find_all("table"):
         rows = table.find_all("tr")
@@ -191,32 +332,55 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
         "scraped_at": datetime.now().isoformat(),
         "entry": {}, "odds": {}, "result": {},
     }
-    try:
-        data["entry"] = parse_entry(jo_code, kaisai_bi, race_no)
-        time.sleep(0.3)
-    except Exception as e:
-        data["entry_error"] = str(e)
 
-    # 3連単（全軸）
-    try:
-        data["odds"]["3連単"] = parse_odds_3rentan(jo_code, kaisai_bi, race_no)
-        time.sleep(0.3)
-    except Exception as e:
-        data["odds"]["3連単"] = {"error": str(e), "matrix_count": 0, "matrix": []}
+    for attempt in range(2):
+        try:
+            data["entry"] = parse_entry(jo_code, kaisai_bi, race_no)
+            data.pop("entry_error", None)
+            break
+        except Exception as e:
+            data["entry_error"] = str(e)
+            data["entry"] = {}
+            if attempt == 0:
+                time.sleep(1.0)
+    time.sleep(0.3)
 
-    for code in [6, 8, 5, 7]:  # 2車単, 3連複, 2車複, ワイド
+    n_riders = len(data["entry"].get("riders", [])) if data.get("entry") else None
+
+    for code in [5, 6, 7]:  # 2車複, 2車単, ワイド(1ページ完結)
         name = BET_TYPES[code]
         try:
-            data["odds"][name] = parse_odds_simple(jo_code, kaisai_bi, race_no, code)
+            data["odds"][name] = parse_odds_simple(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
             time.sleep(0.3)
         except Exception as e:
-            data["odds"][name] = {"error": str(e), "matrix_count": 0, "matrix": []}
+            data["odds"][name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
 
-    try:
-        data["result"] = parse_result(jo_code, kaisai_bi, race_no)
-    except Exception as e:
-        data["result_error"] = str(e)
-        data["result"] = {"results": [], "payouts": []}
+    for code in [8, 9]:  # 3連複, 3連単(軸車番ごとに分割取得)
+        name = BET_TYPES[code]
+        try:
+            data["odds"][name] = parse_odds_axis_based(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
+            time.sleep(0.3)
+        except Exception as e:
+            data["odds"][name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
+
+    for attempt in range(2):
+        try:
+            data["result"] = parse_result(jo_code, kaisai_bi, race_no)
+            data.pop("result_error", None)
+            break
+        except Exception as e:
+            data["result_error"] = str(e)
+            data["result"] = {"results": [], "payouts": []}
+            if attempt == 0:
+                time.sleep(1.0)
+
+    odds_complete = {bt: info.get("is_complete", False) for bt, info in data["odds"].items()}
+    data["data_quality"] = {
+        "entry_ok": bool(data.get("entry", {}).get("riders")),
+        "result_ok": bool(data.get("result", {}).get("results")),
+        "odds_complete": odds_complete,
+        "all_complete": bool(data.get("entry", {}).get("riders")) and bool(data.get("result", {}).get("results")) and all(odds_complete.values()),
+    }
 
     fname = f"{kaisai_bi}_{jo_code}_{race_no:02d}.json"
     path = os.path.join(OUTPUT_DIR, fname)
@@ -226,4 +390,6 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
 
 if __name__ == "__main__":
     r = scrape_one_race("44", "20260818", 2)
-    print("OK", r["odds"].get("3連単", {}).get("matrix_count"), len(r["entry"].get("riders", [])))
+    print("OK riders=", len(r["entry"].get("riders", [])), "quality=", r["data_quality"])
+    for bt, info in r["odds"].items():
+        print(" ", bt, info.get("matrix_count"), "/", info.get("expected_count"))

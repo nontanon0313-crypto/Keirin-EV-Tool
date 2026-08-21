@@ -395,16 +395,23 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     }
     html += `</p>`;
     html += `<p>レース全体の回収率: ${data.race_roi_pct}%(期待利益 約${data.total_expected_profit}円) / レース全体の的中率: 約${data.race_hit_prob_pct}%</p>`;
-    html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th><th>予想精度</th></tr>`;
+    html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th><th>予想精度</th><th>充足度</th></tr>`;
     for (const it of data.items) {
       const probLabel = `${it.estimated_win_prob_pct}%${it.low_prob_warning ? " ⚠️低確率帯(未補正)" : ""}`;
-      const rel = it.prediction_reliability_pct;
-      const relColor = rel >= 90 ? "#22c55e" : (rel <= 10 ? "#ef4444" : "#f59e0b");
-      const relLabel = `<span style="color:${relColor};font-weight:bold;">${rel}%</span>`;
-      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${probLabel}</td><td>${it.odds_value}</td><td>${it.roi_pct}%</td><td>${it.stake}円</td><td>${relLabel}</td></tr>`;
+      const acc = it.prediction_accuracy_pct;
+      const accLabel = (acc === null || acc === undefined)
+        ? `<span class="note">データ無</span>`
+        : (() => {
+            const accColor = acc >= 90 ? "#22c55e" : (acc <= 70 ? "#ef4444" : "#f59e0b");
+            return `<span style="color:${accColor};font-weight:bold;">${acc}%</span>`;
+          })();
+      const suf = it.data_sufficiency_pct;
+      const sufColor = suf >= 90 ? "#22c55e" : (suf <= 10 ? "#ef4444" : "#f59e0b");
+      const sufLabel = `<span style="color:${sufColor};">${suf}%</span>`;
+      html += `<tr class="ev-positive"><td>${it.bet_type}</td><td>${it.combination}</td><td>${probLabel}</td><td>${it.odds_value}</td><td>${it.roi_pct}%</td><td>${it.stake}円</td><td>${accLabel}</td><td>${sufLabel}</td></tr>`;
     }
     html += "</table>";
-    html += `<p class="note">予想精度は、その勝率帯の自動補正がどれだけ実績データに裏付けられているか(🟢90%以上=十分な実績あり、🟡中間、🔴10%以下=ほぼ未検証)を示す表示専用の指標です。確率計算や投票内容には影響しません。</p>`;
+    html += `<p class="note">予想精度は、その勝率帯の予想確率と実績的中率がどれだけ一致しているか(🟢90%以上=よく一致、🟡中間、🔴70%以下=ズレ大)を示す指標です。充足度は、その一致度がどれだけ実績データに裏付けられているか(🟢90%以上=十分な実績あり、🟡中間、🔴10%以下=ほぼ未検証)を示します。データ無=まだその勝率帯の実績が0件。どちらも表示専用で、確率計算や投票内容には影響しません。</p>`;
     resultBox.innerHTML = html;
 
     // 「まとめて購入記録する」ボタンを動的に追加(このプランの内容を保持しておく)

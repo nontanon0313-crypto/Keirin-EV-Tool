@@ -270,6 +270,25 @@ def compute_calibration_factor(actual_win_rate: float, predicted_avg_prob: float
     return max(0.3, min(3.0, factor))
 
 
+def prediction_accuracy_pct(actual_win_rate: float, predicted_avg_prob: float) -> float:
+    """
+    「予想精度%」= 予想的中率(predicted_avg_prob)と実績的中率(actual_win_rate)の一致度。
+    以前「予想精度%」と呼んでいた指標は実際には試行数÷必要試行数(データ充足度)であり、
+    予想が当たっているかどうかとは無関係だった。こちらが本来の「精度」の指標
+    (のんの指摘により追加)。
+    min/max の対称な比率にすることで、「予想100%・実績50%」も「予想50%・実績100%」も
+    同じズレ幅として扱う。両方0(=完全一致)なら100%。
+    """
+    if actual_win_rate is None or predicted_avg_prob is None:
+        return None
+    if actual_win_rate <= 0 and predicted_avg_prob <= 0:
+        return 100.0
+    if actual_win_rate <= 0 or predicted_avg_prob <= 0:
+        return 0.0
+    ratio = min(actual_win_rate, predicted_avg_prob) / max(actual_win_rate, predicted_avg_prob)
+    return round(ratio * 100, 1)
+
+
 def shrunk_calibration_factor(raw_factor: float, sample_count: int, required_sample_count: int) -> float:
     """
     サンプル数が必要数(required_sample_count)に満たなくても、集まった分だけ

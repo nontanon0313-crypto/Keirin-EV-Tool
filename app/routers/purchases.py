@@ -123,6 +123,11 @@ def get_calibration_factors(db: Session) -> dict:
                 calc.binomial_lower_tail_p(wins, count, predicted_avg) * 100, 4
             )
 
+        # 「予想精度%」= 予想確率と実績的中率の一致度(データ充足度とは別物)。
+        # is_reliable/required_sample_countは「どれだけ実績データに裏付けられているか」であり、
+        # こちらは「予想が実際どれだけ当たっているか」を表す(のんの指摘により追加)。
+        accuracy_pct = calc.prediction_accuracy_pct(actual_win_rate, predicted_avg)
+
         result[name] = {
             "sample_count": count,
             "purchase_count": purchase_count,
@@ -134,6 +139,7 @@ def get_calibration_factors(db: Session) -> dict:
             "deviation_pct": deviation_pct,
             "significance_p_value_pct": significance_p_value_pct,
             "calibration_factor": round(factor, 3),
+            "prediction_accuracy_pct": accuracy_pct,
         }
     return result
 

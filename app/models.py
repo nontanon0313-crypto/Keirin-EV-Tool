@@ -40,6 +40,9 @@ class Race(Base):
     temperature_c = Column(Float, nullable=True)  # 気温(℃)。画面に表示があれば取得
     season = Column(String(10), nullable=True)  # 春/夏/秋/冬。解析時の日付から自動算出
     source_app = Column(String(50), nullable=True)  # 読み取り元アプリ(分かれば)
+    external_ref = Column(String(100), nullable=True, unique=True, index=True)  # 例: "oddspark:44:20260818:12"
+    # スクレイパー等の外部データ取り込みで、同じレースを二重登録しないための一意キー
+    # (のんの要望=スクレイパー連携により追加)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     bank = relationship("BankMaster", back_populates="races")

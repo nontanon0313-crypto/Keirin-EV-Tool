@@ -32,6 +32,39 @@ def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict =
     return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost)
 
 
+def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list) -> None:
+    """
+    見送った買い目を「見送り」として記録する(のんの指摘により追加)。
+    以前はSkippedBetテーブル・APIが存在するのに一度も自動記録されておらず、
+    「除外して正解だったか、本当は当たっていたのに逃したのか」を検証できていなかった。
+    同一の(race_id, bet_type, combination)を二重記録しないようにする。
+    """
+    if not skipped_for_verification:
+        return
+    existing_skipped_keys = {
+        (s.bet_type, s.combination)
+        for s in db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race_id).all()
+    }
+    new_skipped_objs = []
+    seen_in_this_call = set()
+    for c, reason in skipped_for_verification:
+        key = (c["bet_type"], c["combination"])
+        if key in existing_skipped_keys or key in seen_in_this_call:
+            continue
+        seen_in_this_call.add(key)
+        new_skipped_objs.append(models.SkippedBet(
+            race_id=race_id,
+            bet_type=c["bet_type"],
+            combination=c["combination"],
+            win_prob_estimated=c["win_prob"],
+            ev_pct_estimated=c["ev_pct"],
+            reason=reason,
+        ))
+    if new_skipped_objs:
+        db.add_all(new_skipped_objs)
+        db.commit()
+
+
 def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
     """
     購入実績に基づく自動補正係数を適用する。
@@ -39,9 +72,14 @@ def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
     大穴帯(必要数8000件等)は事実上ずっと補正されないままになるため、
     サンプル数に応じて段階的に補正を効かせる方式に変更した(のんの要望により修正)。
     calibration_factorsの各帯には、この段階的補正が既に反映されている。
-    戻り値: (補正後確率, その勝率帯の低確率帯かつ実績未成熟=推定誤差に注意すべきか, 予想精度%)
-    予想精度% = その勝率帯の試行数 ÷ 必要試行数(100%上限)。表示専用の指標であり、
-    確率計算・フィルタリング・投票内容には一切使わない(のんの要望により追加)。
+    戻り値: (補正後確率, その勝率帯の低確率帯かつ実績未成熟=推定誤差に注意すべきか,
+             データ充足度%, 予想精度%)
+    データ充足度% = その勝率帯の試行数 ÷ 必要試行数(100%上限)。「どれだけ実績データに
+    裏付けられた補正か」を示す指標。
+    予想精度% = 予想確率と実績的中率の一致度。「予想がどれだけ当たっているか」を示す指標。
+    以前はこの2つを混同して「予想精度%」という1つの名前でデータ充足度の方を表示していた
+    (のんの指摘により分離)。どちらも表示専用で、確率計算・フィルタリング・投票内容には
+    一切使わない(のんの要望により追加)。
     """
     bucket_name, _ = calc.get_prob_bucket(est_prob)
     info = calibration_factors.get(bucket_name)
@@ -50,13 +88,14 @@ def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
     # 大きく増幅されるため、実績が十分溜まって確信が持てるまでは特に注意が必要
     # (この警告フラグ自体は段階的補正とは別に、閾値到達までは出し続ける)。
     low_prob_warning = (bucket_name == "0-5%(大穴)") and not is_reliable
-    reliability_pct = 0.0
+    data_sufficiency_pct = 0.0
     if info and info["required_sample_count"] > 0:
-        reliability_pct = round(min(1.0, info["sample_count"] / info["required_sample_count"]) * 100, 1)
+        data_sufficiency_pct = round(min(1.0, info["sample_count"] / info["required_sample_count"]) * 100, 1)
+    accuracy_pct = info["prediction_accuracy_pct"] if info else None
     if not info:
-        return est_prob, low_prob_warning, reliability_pct
+        return est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct
     calibrated = est_prob * info["calibration_factor"]
-    return max(0.0, min(1.0, calibrated)), low_prob_warning, reliability_pct
+    return max(0.0, min(1.0, calibrated)), low_prob_warning, data_sufficiency_pct, accuracy_pct
 
 
 @router.post("/calculate/{race_id}")
@@ -107,7 +146,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob, low_prob_warning, _ = _apply_calibration(est_prob, calibration_factors)
+        est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob, calibration_factors)
         low_prob_warnings[(o.bet_type, o.combination)] = low_prob_warning
 
         market_prob = normalized_market.get(o.bet_type, {}).get(
@@ -237,7 +276,7 @@ def threshold_table(
         )
         for combo in combos:
             est_prob = _estimate_prob(win_probs, bet_type, combo)
-            est_prob, low_prob_warning, _ = _apply_calibration(est_prob, calibration_factors)
+            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob, calibration_factors)
             is_skip, _ = calc.apply_min_prob_filter(est_prob, 100, min_win_prob)  # 勝率フィルターのみ判定
             if is_skip or est_prob <= 0:
                 continue
@@ -291,14 +330,25 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         raise HTTPException(400, "オッズデータがありません")
 
     candidates = []
+    # 買い示唆が1件も無かった場合でも、評価は全て済んでいるこの組み合わせ群を
+    # SkippedBetとして記録できるよう保持しておく(のんの指摘によるバグ修正)。
+    # 以前はcandidates(=is_recommendedを通ったものだけ)が空だと即returnし、
+    # そのレースの評価結果が一切記録・検証対象にならなかった。
+    all_evaluated = []
     calibration_factors = purchases_router.get_calibration_factors(db)
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob, low_prob_warning, reliability_pct = _apply_calibration(est_prob, calibration_factors)
+        est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(est_prob, calibration_factors)
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
+        all_evaluated.append({
+            "bet_type": o.bet_type,
+            "combination": o.combination,
+            "win_prob": est_prob,
+            "ev_pct": round(ev_pct, 2),
+        })
         if not is_recommended:
             continue
 
@@ -315,10 +365,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "win_prob": est_prob,
             "total_vote_amount": o.total_vote_amount,
             "low_prob_warning": low_prob_warning,
-            # 予想精度%(=その勝率帯の補正がどれだけデータに裏付けられているか)。
-            # 表示専用の指標であり、確率計算・フィルタリング・投票内容には使わない
-            # (のんの要望により追加)。
-            "prediction_reliability_pct": reliability_pct,
+            # データ充足度%(=その勝率帯の補正がどれだけ実績データに裏付けられているか)と、
+            # 予想精度%(=予想確率と実績的中率がどれだけ一致しているか)。
+            # どちらも表示専用の指標であり、確率計算・フィルタリング・投票内容には使わない
+            # (のんの要望により追加、のんの指摘により2指標に分離)。
+            "data_sufficiency_pct": data_sufficiency_pct,
+            "prediction_accuracy_pct": accuracy_pct,
         })
 
     excluded_low_prob_count = 0
@@ -335,6 +387,14 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         excluded_low_prob_count = before_count - len(candidates)
 
     if not candidates:
+        # バグ修正: 以前はここで即returnしていたため、買い示唆が0件のレースは
+        # 結果確定してもSkippedBetが1件も作られず、確率帯ごとのキャリブレーション・
+        # 見送り検証データに一切反映されなかった(のんの指摘により修正)。
+        # 評価済みの全組み合わせ(all_evaluated)を「買い示唆なし」として見送り記録する。
+        _save_skipped_bets(
+            db, race_id,
+            [(c, "買い示唆なし(EV/確率が閾値未満)") for c in all_evaluated],
+        )
         return {
             "race_id": race_id,
             "message": "安全マージンを満たす買い示唆がありませんでした(見送り推奨)",
@@ -446,7 +506,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "self_impact_pct": self_impact_pct,
             "self_impact_warning": self_impact_pct is not None and self_impact_pct >= 2.0,
             "low_prob_warning": c["low_prob_warning"],
-            "prediction_reliability_pct": c["prediction_reliability_pct"],
+            "data_sufficiency_pct": c["data_sufficiency_pct"],
+            "prediction_accuracy_pct": c["prediction_accuracy_pct"],
         })
 
     race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0
@@ -462,33 +523,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     else:
         race_hit_prob_pct = 0
 
-    # 除外した買い目を「見送り」として記録する(のんの指摘により追加)。
-    # 以前はSkippedBetテーブル・APIが存在するのに一度も自動記録されておらず、
-    # 「除外して正解だったか、本当は当たっていたのに逃したのか」を検証できていなかった。
-    # 同一の(race_id, bet_type, combination)を二重記録しないようにする。
-    if skipped_for_verification:
-        existing_skipped_keys = {
-            (s.bet_type, s.combination)
-            for s in db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race_id).all()
-        }
-        new_skipped_objs = []
-        seen_in_this_call = set()
-        for c, reason in skipped_for_verification:
-            key = (c["bet_type"], c["combination"])
-            if key in existing_skipped_keys or key in seen_in_this_call:
-                continue
-            seen_in_this_call.add(key)
-            new_skipped_objs.append(models.SkippedBet(
-                race_id=race_id,
-                bet_type=c["bet_type"],
-                combination=c["combination"],
-                win_prob_estimated=c["win_prob"],
-                ev_pct_estimated=c["ev_pct"],
-                reason=reason,
-            ))
-        if new_skipped_objs:
-            db.add_all(new_skipped_objs)
-            db.commit()
+    _save_skipped_bets(db, race_id, skipped_for_verification)
 
     return {
         "race_id": race_id,
