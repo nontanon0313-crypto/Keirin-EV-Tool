@@ -154,21 +154,31 @@ def _parse_raw_grid(soup, debug=False):
                 header = nums
                 break
 
+    ODDS_RE = re.compile(r"^\d+(\.\d+)?(-\d+(\.\d+)?)?$")
+    # 通常の数値(52.3)に加え、ワイドの範囲表記(8.7-10.1)も実データとして認識する。
+    # 以前は"[\d.]+"のみにマッチしており、範囲表記が「空白」と誤判定され、
+    # 後続の人気順位の数字を誤ってオッズ値として拾ってしまっていた
+    # (のんの実機検証で判明)。
+
     for row in rows:
         texts = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
         if not texts or not re.fullmatch(r"\d+", texts[0]):
             continue
         row_car = texts[0]
         data_cells = texts[1:]
-        numeric_vals = [t for t in data_cells if re.match(r"^[\d.]+$", t)]
+        numeric_vals = [t for t in data_cells if ODDS_RE.match(t)]
         if numeric_vals and all(re.fullmatch(r"\d+", t) and int(t) < 10 for t in numeric_vals):
             continue  # ヘッダー行そのもの(車番の並びだけの行)は除外
         col_idx = 0
         i = 0
         row_grid_entries = []
+        # 重要: セルは常に「オッズ値, 人気順位」の2つ1組(ペア)で並んでいる。
+        # 空白(該当なしの列)も同様に2セル1組(空,空)で並ぶ。以前は空白セルを
+        # 1セルごとに数えてしまい、空白ペア(2セル)を列2つ分と誤カウントして
+        # 以降の車番の対応がすべて1つずつズレていた(のんの実機検証で判明)。
         while i < len(data_cells):
             t = data_cells[i]
-            if re.match(r"^[\d.]+$", t):
+            if ODDS_RE.match(t):
                 if col_idx < len(header):
                     col_car = header[col_idx]
                     if col_car != row_car:
@@ -178,8 +188,10 @@ def _parse_raw_grid(soup, debug=False):
                 col_idx += 1
                 i += 2  # (オッズ値, 人気順位)のペアで1列分。人気順位は読み飛ばす
             else:
+                # 空白(該当なしの列)も「空,空」の2セル1組。ここを1セルずつ
+                # 数えると、その後の全ての列対応が1つずつズレる(確定したバグ)。
                 col_idx += 1
-                i += 1
+                i += 2
         if debug:
             debug_rows.append({"row_car": row_car, "raw_cells": data_cells, "header": header, "parsed": row_grid_entries})
 

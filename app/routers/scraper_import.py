@@ -43,6 +43,20 @@ def _to_float(v):
         return None
 
 
+def _to_odds_float(v):
+    """
+    オッズ値を数値に変換する。ワイドは「8.7-10.1」のような範囲表記のことがあり、
+    その場合は下限値を使う(実際の払い戻しがどちらに転ぶか分からないため、
+    期待値を過大評価しない安全側の選択。のんの実機検証を受けて追加)。
+    """
+    if v is None:
+        return None
+    s = str(v)
+    if "-" in s:
+        s = s.split("-")[0]
+    return _to_float(s)
+
+
 @router.post("/race")
 def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     jo_code = str(payload.get("jo_code", ""))
@@ -139,7 +153,7 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
                 })
                 continue
             for item in info.get("matrix", []):
-                odds_v = _to_float(item.get("オッズ"))
+                odds_v = _to_odds_float(item.get("オッズ"))
                 if odds_v is None:
                     continue
                 if bet_type == "3連単" or bet_type == "3連複":
