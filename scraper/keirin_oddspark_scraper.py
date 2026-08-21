@@ -110,7 +110,7 @@ def parse_entry(jo_code, kaisai_bi, race_no):
             unique.append(r)
     return {"race_name": race_name, "riders": sorted(unique, key=lambda x: int(x["車番"])), "url": f"{url}?joCode={jo_code}&kaisaiBi={kaisai_bi}&raceNo={race_no}"}
 
-def _parse_raw_grid(soup):
+def _parse_raw_grid(soup, debug=False):
     """
     オッズ表の生データを(列車番, 行車番, オッズ値)のリストとして抽出する。
     券種による意味づけ(1着/2着/順序の有無)は呼び出し側で行う。
@@ -119,8 +119,13 @@ def _parse_raw_grid(soup):
     - 表の先頭行に列車番ヘッダー(1,2,3...)が並ぶ
     - 各データ行は先頭セルが行車番、以降は(オッズ値, 人気順位)のペアが
       列の順に並ぶ(該当なしの列は単に存在しない=詰めて並んでいる)
+
+    debug=Trueの場合、各行の生セル内容も一緒に返す(のんの実機検証で判明した
+    「2車単・ワイドが毎回同じ件数で足りない」という謎の原因調査用に追加。
+    生セルと変換結果を突き合わせられるようにする)。
     """
     grid = []
+    debug_rows = []
     odds_table = None
     for table in soup.find_all("table"):
         if "odds" in (table.get("class") or []):
@@ -131,10 +136,10 @@ def _parse_raw_grid(soup):
         if len(tables) >= 2:
             odds_table = tables[1]
     if not odds_table:
-        return grid
+        return (grid, debug_rows) if debug else grid
     rows = odds_table.find_all("tr")
     if not rows:
-        return grid
+        return (grid, debug_rows) if debug else grid
 
     header = []
     first_row_texts = [c.get_text(strip=True) for c in rows[0].find_all(["td", "th"])]
@@ -160,18 +165,26 @@ def _parse_raw_grid(soup):
             continue  # ヘッダー行そのもの(車番の並びだけの行)は除外
         col_idx = 0
         i = 0
+        row_grid_entries = []
         while i < len(data_cells):
             t = data_cells[i]
             if re.match(r"^[\d.]+$", t):
                 if col_idx < len(header):
                     col_car = header[col_idx]
                     if col_car != row_car:
-                        grid.append({"col_car": col_car, "row_car": row_car, "odds": t})
+                        entry = {"col_car": col_car, "row_car": row_car, "odds": t}
+                        grid.append(entry)
+                        row_grid_entries.append(entry)
                 col_idx += 1
                 i += 2  # (オッズ値, 人気順位)のペアで1列分。人気順位は読み飛ばす
             else:
                 col_idx += 1
                 i += 1
+        if debug:
+            debug_rows.append({"row_car": row_car, "raw_cells": data_cells, "header": header, "parsed": row_grid_entries})
+
+    if debug:
+        return grid, debug_rows
     return grid
 
 def _expected_combo_count(bet_type, n_riders):
@@ -253,16 +266,37 @@ def parse_odds_simple(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, max_
     return result
 
 def _expected_axis_count(bet_type, n_riders, axis_car):
-    """軸車番1本あたりの理論組み合わせ数(軸ごとの完全性チェック用)。"""
+    """
+    軸車番1本あたりの理論組み合わせ数(軸ごとの完全性チェック用)。
+
+    のんの実機検証で発覚したバグの修正:
+    1. 3連複(順不同)は「軸車番=組み合わせの中で一番小さい車番」という規則で
+       ページが分かれていると考えられる。そのため軸が大きくなるほど、組み合わせを
+       作れる残り車番(自分より大きい車番)が減っていく。以前は常に「残り車番から
+       2台選ぶ数」を一律計算しており、軸5〜7のような本来0件や少数件のはずの軸まで
+       「足りない」と誤判定し、無駄なリトライを繰り返していた
+       (is_complete=Trueなのにfailed_axesが空でない、という矛盾の原因)
+    2. 3連単・3連複とも、出走していない車番(例:7車立てで軸8・9)を存在するものとして
+       期待件数を計算しており、絶対に届かない期待値に対して無限にリトライしていた
+       (3連単が長時間化・未完了に終わった主因と考えられる)
+    """
     if n_riders is None or n_riders < 3:
         return None
-    remaining = n_riders - 1  # 軸車番を除いた残り台数
-    if remaining < 2:
-        return 0
+    try:
+        axis_num = int(axis_car)
+    except (TypeError, ValueError):
+        return None
+    if axis_num > n_riders:
+        return 0  # このレースに存在しない車番の軸は、最初から0件が正解
     if bet_type == "3連単":
-        return remaining * (remaining - 1)
+        # 順序ありなので、軸車番の大小に関わらず「他の全車番」との組み合わせが有効
+        remaining = n_riders - 1
+        return remaining * (remaining - 1) if remaining >= 2 else 0
     if bet_type == "3連複":
-        return math.comb(remaining, 2)
+        # 順不同。軸=組み合わせ中の最小車番という規則(実ページの挙動から推定)。
+        # 軸より大きい車番の中から2台を選ぶ数だけが、その軸のページに載る
+        larger = n_riders - axis_num
+        return math.comb(larger, 2) if larger >= 2 else 0
     return None
 
 def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, max_cars=9):
@@ -295,7 +329,9 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
             return False
         return len(grid) < expected
 
-    cars_to_try = list(range(1, max_cars + 1))
+    # 実在する車番(n_riders)までしか軸を試さない。不明な場合のみ従来通り最大9まで試す
+    upper = n_riders if n_riders else max_cars
+    cars_to_try = list(range(1, upper + 1))
     with ThreadPoolExecutor(max_workers=2) as ex:  # 同時接続数を減らし、サイト側の混雑を避ける
         futs = {}
         for car in cars_to_try:
