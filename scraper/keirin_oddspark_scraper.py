@@ -224,31 +224,56 @@ def _dedup_and_validate(bet_type, combos, n_riders):
         "matrix": matrix,
     }
 
-def parse_odds_simple(jo_code, kaisai_bi, race_no, bet_type, n_riders=None):
+def parse_odds_simple(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, max_attempts=3):
     """
     1ページで完結する券種向け(2車複=5, 2車単=6, ワイド=7)。
     - 2車複・ワイド: 車番の若い方/大きい方は順不同の組み合わせとして扱う
     - 2車単: 列車番=1着、行車番=2着(実ページで確認済みの向き)
+
+    「通信は成功したが理論値に届かない」場合(のんの実機検証で判明したパターン)は、
+    ページ全体を待ち時間を延ばしながら最大max_attempts回まで取り直す。
+    以前は通信エラー(例外)時しか取り直しておらず、200 OKだが中身が不完全な
+    ケースを一度も再取得していなかった。
     """
     url = f"{BASE}/Odds.do"
     params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no, "betType": bet_type}
-    soup = get_soup(url, params, retries=4)
-    grid = _parse_raw_grid(soup)
     name = BET_TYPES.get(bet_type, str(bet_type))
-    combos = []
-    for g in grid:
-        if name == "2車単":
-            combos.append({"1着": g["col_car"], "2着": g["row_car"], "オッズ": g["odds"]})
-        else:  # 2車複・ワイド(順不同)
-            combos.append({"1着": g["col_car"], "2着": g["row_car"], "オッズ": g["odds"]})
-    result = _dedup_and_validate(name, combos, n_riders)
-    result["bet_code"] = bet_type
+    expected = _expected_combo_count(name, n_riders)
+
+    result = None
+    for attempt in range(max_attempts):
+        soup = get_soup(url, params, retries=4)
+        grid = _parse_raw_grid(soup)
+        combos = [{"1着": g["col_car"], "2着": g["row_car"], "オッズ": g["odds"]} for g in grid]
+        result = _dedup_and_validate(name, combos, n_riders)
+        result["bet_code"] = bet_type
+        if result["is_complete"] or expected is None:
+            break
+        time.sleep(1.5 + attempt * 1.0)  # 試行を重ねるごとに待ち時間を延ばして取り直す
     return result
+
+def _expected_axis_count(bet_type, n_riders, axis_car):
+    """軸車番1本あたりの理論組み合わせ数(軸ごとの完全性チェック用)。"""
+    if n_riders is None or n_riders < 3:
+        return None
+    remaining = n_riders - 1  # 軸車番を除いた残り台数
+    if remaining < 2:
+        return 0
+    if bet_type == "3連単":
+        return remaining * (remaining - 1)
+    if bet_type == "3連複":
+        return math.comb(remaining, 2)
+    return None
 
 def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, max_cars=9):
     """
     軸車番ごとにページが分かれている券種向け(3連複=8, 3連単=9)。
     軸車番(1〜9)ごとに並列取得し、失敗した軸だけ後でシリアルに追い取得する。
+
+    「取得自体は失敗していない(例外なし)が、件数が理論値に届いていない」軸
+    (=ページは返ってきたが中身が不完全、という"静かな失敗")も追い取得の対象にする。
+    以前は通信エラー(例外)でしか失敗と判定しておらず、こうした静かな失敗を
+    見逃していた(のんの実機検証で判明)。
     """
     url = f"{BASE}/Odds.do"
     name = BET_TYPES.get(bet_type, str(bet_type))
@@ -262,22 +287,33 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
         except Exception:
             return None
 
+    def is_axis_incomplete(axis_car, grid):
+        if grid is None:
+            return True
+        expected = _expected_axis_count(name, n_riders, axis_car)
+        if expected is None:
+            return False
+        return len(grid) < expected
+
     cars_to_try = list(range(1, max_cars + 1))
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futs = {ex.submit(fetch_one, car): car for car in cars_to_try}
+    with ThreadPoolExecutor(max_workers=2) as ex:  # 同時接続数を減らし、サイト側の混雑を避ける
+        futs = {}
+        for car in cars_to_try:
+            futs[ex.submit(fetch_one, car)] = car
+            time.sleep(0.15)  # 発射間隔を空けて連続アクセスの負荷を下げる
         for fut in as_completed(futs):
             car = futs[fut]
             results_by_axis[car] = fut.result()
 
-    failed_axes = [c for c, g in results_by_axis.items() if g is None]
-    for attempt in range(2):
+    failed_axes = [c for c in cars_to_try if is_axis_incomplete(c, results_by_axis.get(c))]
+    for attempt in range(3):  # 静かな失敗も拾うため、追い取得の回数を2→3に増やす
         if not failed_axes:
             break
         still_failed = []
         for axis_car in failed_axes:
-            time.sleep(0.5)
+            time.sleep(1.0 + attempt * 0.5)  # 試行を重ねるごとに待ち時間を延ばす
             g = fetch_one(axis_car, retries=3)
-            if g is None:
+            if is_axis_incomplete(axis_car, g):
                 still_failed.append(axis_car)
             else:
                 results_by_axis[axis_car] = g
@@ -288,10 +324,7 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
         if not grid:
             continue
         for g in grid:
-            if name == "3連単":
-                combos.append({"1着": str(axis_car), "2着": g["col_car"], "3着": g["row_car"], "オッズ": g["odds"]})
-            else:  # 3連複(順不同)
-                combos.append({"1着": str(axis_car), "2着": g["col_car"], "3着": g["row_car"], "オッズ": g["odds"]})
+            combos.append({"1着": str(axis_car), "2着": g["col_car"], "3着": g["row_car"], "オッズ": g["odds"]})
 
     result = _dedup_and_validate(name, combos, n_riders)
     result["bet_code"] = bet_type
@@ -343,7 +376,7 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
             data["entry"] = {}
             if attempt == 0:
                 time.sleep(1.0)
-    time.sleep(0.3)
+    time.sleep(1.0)
 
     n_riders = len(data["entry"].get("riders", [])) if data.get("entry") else None
 
@@ -351,7 +384,7 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
         name = BET_TYPES[code]
         try:
             data["odds"][name] = parse_odds_simple(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
-            time.sleep(0.3)
+            time.sleep(1.0)
         except Exception as e:
             data["odds"][name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
 
@@ -359,7 +392,7 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
         name = BET_TYPES[code]
         try:
             data["odds"][name] = parse_odds_axis_based(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
-            time.sleep(0.3)
+            time.sleep(1.0)
         except Exception as e:
             data["odds"][name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
 
