@@ -29,9 +29,24 @@ def log(msg):
     print(f"[pipeline] {msg}", flush=True)
 
 
+def warmup_backend():
+    """
+    Renderの無料プランはしばらくアクセスが無いとスリープし、次のアクセスで
+    起動に30秒以上かかることがある。パイプライン開始前に軽いGETリクエストで
+    先にウォームアップしておくことで、以降の各ステップのタイムアウトを
+    短いままにできる(のんの実機検証でimportがタイムアウトした件を受けて追加)。
+    """
+    log("バックエンドをウォームアップ中(コールドスタート対策)...")
+    try:
+        requests.get(f"{API_BASE}/docs", timeout=90)
+        log("  ウォームアップ完了")
+    except Exception as e:
+        log(f"  ウォームアップ失敗(続行します): {e}")
+
+
 def step1_import(payload):
     """1. データ取得(登録): スクレイパーJSONをバックエンドに取り込む"""
-    r = requests.post(f"{API_BASE}/scraper-import/race", json=payload, timeout=30)
+    r = requests.post(f"{API_BASE}/scraper-import/race", json=payload, timeout=90)
     r.raise_for_status()
     return r.json()
 
@@ -48,7 +63,7 @@ def step3_race_plan(race_id, bankroll):
     body = {"race_id": race_id}
     if bankroll is not None:
         body["bankroll"] = bankroll
-    r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, timeout=60)
+    r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, timeout=90)
     r.raise_for_status()
     return r.json()
 
@@ -72,7 +87,7 @@ def step4_record_purchases(race_id, plan):
             for it in items
         ],
     }
-    r = requests.post(f"{API_BASE}/purchases/bulk", json=body, timeout=30)
+    r = requests.post(f"{API_BASE}/purchases/bulk", json=body, timeout=90)
     r.raise_for_status()
     return {"recorded": len(items), "response": r.json()}
 
@@ -89,7 +104,7 @@ def step5_confirm_result(race_id, race_json):
     r = requests.post(
         f"{API_BASE}/races/{race_id}/confirm-result",
         params={"actual_result": actual_result},
-        timeout=30,
+        timeout=90,
     )
     r.raise_for_status()
     return r.json()
@@ -162,6 +177,8 @@ def main():
         files = sorted(glob.glob(os.path.join(args.dir, "*.json")))
     else:
         ap.error("--file か --dir のどちらかを指定してください")
+
+    warmup_backend()
 
     bankroll = args.bankroll
     if bankroll is None and not args.dry_run:
