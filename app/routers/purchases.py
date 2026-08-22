@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 from typing import Optional
 
 from ..database import get_db
@@ -568,6 +569,48 @@ def list_pending_purchases(db: Session = Depends(get_db)):
             "odds_at_purchase": p.odds_at_purchase,
         })
     return result
+
+
+@router.get("/races-awaiting-result")
+def list_races_awaiting_result(db: Session = Depends(get_db), limit: int = 30):
+    """
+    結果(actual_result)がまだ記録されていないレースの一覧。
+    購入(Purchase)が0件のレース(=買い示唆なしで見送ったレース)も含む。
+
+    以前は「未確定の購入を読み込む」画面がPurchaseテーブルだけを見ており、
+    買い目が1件も無かったレースはこの一覧に出てこなかった。結果として、
+    投票しなかったレースの結果を記録する入り口が無く、検証データ
+    (的中率検証・キャリブレーション)が蓄積できなかった
+    (のんの指摘により追加)。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.is_(None))
+        .order_by(models.Race.race_date.desc().nullslast(), models.Race.id.desc())
+        .limit(limit)
+        .all()
+    )
+    race_ids = [r.id for r in races]
+    purchase_counts = {}
+    if race_ids:
+        rows = (
+            db.query(models.Purchase.race_id, func.count(models.Purchase.id))
+            .filter(models.Purchase.race_id.in_(race_ids))
+            .group_by(models.Purchase.race_id)
+            .all()
+        )
+        purchase_counts = {race_id: count for race_id, count in rows}
+    return [
+        {
+            "race_id": r.id,
+            "venue_name": r.venue_name,
+            "race_number": r.race_number,
+            "race_date": r.race_date,
+            "event_title": r.event_title,
+            "purchase_count": purchase_counts.get(r.id, 0),
+        }
+        for r in races
+    ]
 
 
 @router.get("/")

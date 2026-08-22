@@ -533,16 +533,16 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
   const box = document.getElementById("pendingList");
   box.textContent = "読み込み中...";
   try {
-    const res = await fetch(apiUrl("/purchases/pending"));
-    const data = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(data));
+    const [pendingRes, awaitingRes] = await Promise.all([
+      fetch(apiUrl("/purchases/pending")),
+      fetch(apiUrl("/purchases/races-awaiting-result")),
+    ]);
+    const data = await pendingRes.json();
+    if (!pendingRes.ok) throw new Error(JSON.stringify(data));
+    const awaitingRaces = await awaitingRes.json();
+    if (!awaitingRes.ok) throw new Error(JSON.stringify(awaitingRaces));
 
-    if (!data.length) {
-      box.textContent = "未確定の購入はありません。";
-      return;
-    }
-
-    // レースごとにグループ化
+    // レースごとにグループ化(購入がある分)
     const byRace = {};
     for (const p of data) {
       if (!byRace[p.race_id]) {
@@ -550,19 +550,33 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
       }
       byRace[p.race_id].items.push(p);
     }
+    // 購入0件だったレースも一覧に加える(買い示唆なし・見送りだったレースの結果記録用。
+    // 以前はここに出てこず、結果を記録する手段が無かった。のんの指摘により追加)
+    for (const r of awaitingRaces) {
+      if (!byRace[r.race_id]) {
+        byRace[r.race_id] = { venue_name: r.venue_name, race_number: r.race_number, items: [] };
+      }
+    }
+
+    if (!Object.keys(byRace).length) {
+      box.textContent = "結果未記録のレースはありません。";
+      return;
+    }
 
     box.innerHTML = "";
     for (const [raceId, group] of Object.entries(byRace)) {
       const div = document.createElement("div");
       div.style.borderBottom = "1px solid #334155";
       div.style.padding = "10px 0";
-      let itemsHtml = group.items.map(p => `${p.bet_type} ${p.combination}(${p.stake_amount}円)`).join(" / ");
+      const itemsHtml = group.items.length
+        ? group.items.map(p => `${p.bet_type} ${p.combination}(${p.stake_amount}円)`).join(" / ")
+        : "(このレースは買い示唆なし・購入なしでした)";
       div.innerHTML = `
         <p><strong>${group.venue_name} ${group.race_number}R</strong><br>未確定: ${itemsHtml}</p>
         <label>実際の着順(例: 2-5-1 = 1着2番,2着5番,3着1番。同着は"="で区切る 例: 7-14=9)</label>
         <input type="text" placeholder="2-5-1(同着なら 7-14=9)" id="result_${raceId}">
         <button data-race="${raceId}" class="confirmResultBtn">この着順で一括確定する</button>
-        <button data-race="${raceId}" class="discardPendingBtn" style="background:#64748b;">実際は投票しなかった(この分を破棄)</button>
+        ${group.items.length ? `<button data-race="${raceId}" class="discardPendingBtn" style="background:#64748b;">実際は投票しなかった(この分を破棄)</button>` : ""}
         <div id="confirmMsg_${raceId}" class="result-box"></div>
       `;
       box.appendChild(div);
