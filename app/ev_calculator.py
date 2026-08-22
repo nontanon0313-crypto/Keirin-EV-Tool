@@ -222,6 +222,37 @@ def normalize_market_probs(odds_map: Dict[str, float]) -> Dict[str, float]:
     return {k: v / total for k, v in raw.items()}
 
 
+def market_win_prob_by_car(odds_rows: list) -> Dict[int, float]:
+    """
+    車番ごとの「市場が織り込んでいる1着確率」を、2車単・3連単(順序ありの券種)の
+    オッズから逆算する。odds_rowsは [{"bet_type":.., "combination":.., "odds_value":..}, ...]。
+
+    2車単・3連単それぞれの組み合わせ文字列(例:"1-3","1-3-5")の先頭車番が「1着」に
+    対応する(スクレイパー取り込み・EV計算の両方で一貫している表記)。順不同の券種
+    (2車複・ワイド・3連複)は「1着」の位置に意味が無いため使わない。
+
+    AIの予想プロンプトに「市場の見立て」を参考情報として渡すために追加
+    (のんの要望=市場確率をAIの外側で機械的にブレンドするのではなく、AI自身に
+    総合判断させる、という方針を受けて実装)。
+    """
+    for bet_type in ("2車単", "3連単"):
+        rows = [r for r in odds_rows if r.get("bet_type") == bet_type and r.get("odds_value")]
+        if not rows:
+            continue
+        odds_map = {r["combination"]: r["odds_value"] for r in rows}
+        normalized = normalize_market_probs(odds_map)
+        by_car: Dict[int, float] = {}
+        for combo, prob in normalized.items():
+            try:
+                first_car = int(combo.split("-")[0])
+            except (ValueError, IndexError):
+                continue
+            by_car[first_car] = by_car.get(first_car, 0.0) + prob
+        if by_car:
+            return by_car
+    return {}
+
+
 def calc_ev_pct(estimated_prob: float, odds_value: float, rebate_pct: float = 0.0) -> float:
     """
     期待値%。 (推定確率 × オッズ + 還元率 - 1) × 100

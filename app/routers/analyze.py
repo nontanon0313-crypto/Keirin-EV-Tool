@@ -9,6 +9,7 @@ import json
 from ..database import get_db
 from .. import models
 from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities, simulate_race_development
+from .. import ev_calculator as calc
 from ..keirin_data import is_local_player, get_current_weather, normalize_venue_name
 from . import purchases as purchases_router
 
@@ -328,6 +329,15 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
     if not entries:
         raise HTTPException(400, "このレースには選手データがまだありません")
 
+    odds_rows_for_market = [
+        {"bet_type": o.bet_type, "combination": o.combination, "odds_value": o.odds_value}
+        for o in db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
+    ]
+    market_probs_by_car = calc.market_win_prob_by_car(odds_rows_for_market)
+    # 市場(オッズ)が織り込んでいる1着確率を、AIへの参考情報として渡す。
+    # 以前はこれをAIの外側で機械的にブレンドしていなかった(=完全に未使用だった)。
+    # 後付けの数値ブレンドではなく、AI自身が他の判断材料と合わせて総合判断できるよう、
+    # プロンプトの入力データの一部として渡す方針にした(のんの要望により追加)。
     entries_payload = [
         {
             "car_number": e.car_number,
@@ -348,6 +358,7 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
             "line_group": e.line_group,
             "is_local": e.is_local,
             "pre_race_comment": e.pre_race_comment,
+            "market_win_prob_pct": round(market_probs_by_car[e.car_number] * 100, 1) if e.car_number in market_probs_by_car else None,
         }
         for e in entries
     ]
