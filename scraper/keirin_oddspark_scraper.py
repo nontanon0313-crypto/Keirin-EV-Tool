@@ -126,6 +126,7 @@ def _parse_raw_grid(soup, debug=False):
     """
     grid = []
     debug_rows = []
+    all_raw_rows = []
     odds_table = None
     for table in soup.find_all("table"):
         if "odds" in (table.get("class") or []):
@@ -136,10 +137,19 @@ def _parse_raw_grid(soup, debug=False):
         if len(tables) >= 2:
             odds_table = tables[1]
     if not odds_table:
-        return (grid, debug_rows) if debug else grid
+        return (grid, debug_rows, all_raw_rows) if debug else grid
     rows = odds_table.find_all("tr")
     if not rows:
-        return (grid, debug_rows) if debug else grid
+        return (grid, debug_rows, all_raw_rows) if debug else grid
+
+    # デバッグ用: フィルタで弾かれた行も含め、表の全<tr>の生の中身を記録する。
+    # 「特定の行(例:行車番=1)がまるごと無い」という現象が、HTML自体に
+    # その行が存在しないのか、パース側でスキップされているだけなのかを
+    # 区別するために追加(のんの実機検証で判明した謎の切り分け用)。
+    if debug:
+        for idx, row in enumerate(rows):
+            texts = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+            all_raw_rows.append({"row_index": idx, "cells": texts})
 
     header = []
     first_row_texts = [c.get_text(strip=True) for c in rows[0].find_all(["td", "th"])]
@@ -196,7 +206,7 @@ def _parse_raw_grid(soup, debug=False):
             debug_rows.append({"row_car": row_car, "raw_cells": data_cells, "header": header, "parsed": row_grid_entries})
 
     if debug:
-        return grid, debug_rows
+        return grid, debug_rows, all_raw_rows
     return grid
 
 def _expected_combo_count(bet_type, n_riders):
