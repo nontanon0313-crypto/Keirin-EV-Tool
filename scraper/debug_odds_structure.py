@@ -46,7 +46,11 @@ def main():
     print(f"取得URL: {url}?{'&'.join(f'{k}={v}' for k, v in params.items())}")
 
     soup = get_soup(url, params, retries=4)
-    grid, debug_rows, all_raw_rows = _parse_raw_grid(soup, debug=True)
+    exclude_car = str(args.axis) if args.axis is not None else None
+    grid, debug_rows, all_raw_rows = _parse_raw_grid(soup, debug=True, exclude_car=exclude_car)
+
+    total_cells_in_table = sum(len(r["cells"]) for r in all_raw_rows)
+    print(f"表の総セル数(参考。中身が薄い応答だったかの目安): {total_cells_in_table}")
 
     name = BET_TYPES.get(args.bet_type, str(args.bet_type))
     label = f"{name}" + (f" (軸車番={args.axis})" if args.axis is not None else "")

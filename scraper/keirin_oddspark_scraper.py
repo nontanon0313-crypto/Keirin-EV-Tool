@@ -110,19 +110,28 @@ def parse_entry(jo_code, kaisai_bi, race_no):
             unique.append(r)
     return {"race_name": race_name, "riders": sorted(unique, key=lambda x: int(x["車番"])), "url": f"{url}?joCode={jo_code}&kaisaiBi={kaisai_bi}&raceNo={race_no}"}
 
-def _parse_raw_grid(soup, debug=False):
+def _parse_raw_grid(soup, debug=False, exclude_car=None):
     """
     オッズ表の生データを(列車番, 行車番, オッズ値)のリストとして抽出する。
     券種による意味づけ(1着/2着/順序の有無)は呼び出し側で行う。
 
-    実ページ構造(2026年8月に実URLで確認):
-    - 表の先頭行に列車番ヘッダー(1,2,3...)が並ぶ
-    - 各データ行は先頭セルが行車番、以降は(オッズ値, 人気順位)のペアが
-      列の順に並ぶ(該当なしの列は単に存在しない=詰めて並んでいる)
+    exclude_car: 行car・自分自身に加えて、常に無効な列として除外する車番
+    (軸ベース取得(3連単・3連複)で、軸車番自身を列として除外するために使う)。
 
-    debug=Trueの場合、各行の生セル内容も一緒に返す(のんの実機検証で判明した
-    「2車単・ワイドが毎回同じ件数で足りない」という謎の原因調査用に追加。
-    生セルと変換結果を突き合わせられるようにする)。
+    実データ抽出方針(のんの実機検証で判明した2つの問題を受けて再設計):
+    1. 表の最初のデータ行には、本来1回だけ表示される見出しラベル
+       (例:「2着」「3着」)がセルとして紛れ込んでいることがあり、
+       そのままだと「先頭セルが車番の数字ではない」ため行ごと
+       スキップされてしまっていた(2車単の行車番=1が消えていた原因)。
+       → 先頭セルが数字でない場合、2番目のセルが有効な車番かを確認する。
+    2. 空白(該当なしの列)の幅が、常に「オッズ値・人気順位」と同じ2セル分とは
+       限らないケースがあった(軸ベース取得のページで確認)。空白の幅を数えて
+       列を対応づける方式だと、幅がずれた時点で以降の車番対応が総崩れになる。
+       → 空白の幅を数えるのをやめ、「実データが何個見つかったか」を数え、
+       本来その行にあるべき車番の並び(ヘッダーから自分自身・軸車番を除いたもの)に
+       見つかった順番で当てはめる方式に変更。空白の幅に依存しないため頑健。
+
+    debug=Trueの場合、各行の生セル内容・表の全<tr>の中身も一緒に返す。
     """
     grid = []
     debug_rows = []
@@ -142,10 +151,6 @@ def _parse_raw_grid(soup, debug=False):
     if not rows:
         return (grid, debug_rows, all_raw_rows) if debug else grid
 
-    # デバッグ用: フィルタで弾かれた行も含め、表の全<tr>の生の中身を記録する。
-    # 「特定の行(例:行車番=1)がまるごと無い」という現象が、HTML自体に
-    # その行が存在しないのか、パース側でスキップされているだけなのかを
-    # 区別するために追加(のんの実機検証で判明した謎の切り分け用)。
     if debug:
         for idx, row in enumerate(rows):
             texts = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
@@ -165,49 +170,59 @@ def _parse_raw_grid(soup, debug=False):
                 break
 
     ODDS_RE = re.compile(r"^\d+(\.\d+)?(-\d+(\.\d+)?)?$")
-    # 通常の数値(52.3)に加え、ワイドの範囲表記(8.7-10.1)も実データとして認識する。
-    # 以前は"[\d.]+"のみにマッチしており、範囲表記が「空白」と誤判定され、
-    # 後続の人気順位の数字を誤ってオッズ値として拾ってしまっていた
-    # (のんの実機検証で判明)。
+    header_set = set(header)
 
     for row in rows:
         texts = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-        if not texts or not re.fullmatch(r"\d+", texts[0]):
+        if not texts:
             continue
-        row_car = texts[0]
-        data_cells = texts[1:]
+        row_car = None
+        data_cells = None
+        if re.fullmatch(r"\d+", texts[0]) and texts[0] in header_set:
+            row_car = texts[0]
+            data_cells = texts[1:]
+        elif len(texts) >= 2 and re.fullmatch(r"\d+", texts[1]) and texts[1] in header_set:
+            # 先頭セルが「2着」等の見出しラベルで、車番は2番目のセルにあるケース
+            row_car = texts[1]
+            data_cells = texts[2:]
+        if row_car is None:
+            continue
+
         numeric_vals = [t for t in data_cells if ODDS_RE.match(t)]
         if numeric_vals and all(re.fullmatch(r"\d+", t) and int(t) < 10 for t in numeric_vals):
             continue  # ヘッダー行そのもの(車番の並びだけの行)は除外
-        col_idx = 0
+
+        # この行で有効な列(=本来データがあるはずの車番)を、ヘッダー順に求める
+        expected_cols = [h for h in header if h != row_car and h != exclude_car]
+
+        # 空白の幅に依存せず、実データ(オッズ値)を見つかった順に抽出する
+        found_values = []
         i = 0
-        row_grid_entries = []
-        # 重要: セルは常に「オッズ値, 人気順位」の2つ1組(ペア)で並んでいる。
-        # 空白(該当なしの列)も同様に2セル1組(空,空)で並ぶ。以前は空白セルを
-        # 1セルごとに数えてしまい、空白ペア(2セル)を列2つ分と誤カウントして
-        # 以降の車番の対応がすべて1つずつズレていた(のんの実機検証で判明)。
         while i < len(data_cells):
             t = data_cells[i]
             if ODDS_RE.match(t):
-                if col_idx < len(header):
-                    col_car = header[col_idx]
-                    if col_car != row_car:
-                        entry = {"col_car": col_car, "row_car": row_car, "odds": t}
-                        grid.append(entry)
-                        row_grid_entries.append(entry)
-                col_idx += 1
-                i += 2  # (オッズ値, 人気順位)のペアで1列分。人気順位は読み飛ばす
+                found_values.append(t)
+                i += 2  # (オッズ値, 人気順位)のペア。人気順位は読み飛ばす
             else:
-                # 空白(該当なしの列)も「空,空」の2セル1組。ここを1セルずつ
-                # 数えると、その後の全ての列対応が1つずつズレる(確定したバグ)。
-                col_idx += 1
-                i += 2
+                i += 1  # 空白は1セルずつ進める(幅を仮定しない)
+
+        row_grid_entries = []
+        for col_car, odds_val in zip(expected_cols, found_values):
+            entry = {"col_car": col_car, "row_car": row_car, "odds": odds_val}
+            grid.append(entry)
+            row_grid_entries.append(entry)
+
         if debug:
-            debug_rows.append({"row_car": row_car, "raw_cells": data_cells, "header": header, "parsed": row_grid_entries})
+            debug_rows.append({
+                "row_car": row_car, "raw_cells": data_cells, "header": header,
+                "expected_cols": expected_cols, "found_values_count": len(found_values),
+                "expected_cols_count": len(expected_cols), "parsed": row_grid_entries,
+            })
 
     if debug:
         return grid, debug_rows, all_raw_rows
     return grid
+
 
 def _expected_combo_count(bet_type, n_riders):
     if n_riders is None or n_riders < 2:
@@ -339,7 +354,7 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
         params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no, "betType": bet_type, "jikuCode": "1", "shaban": str(axis_car)}
         try:
             soup = get_soup(url, params, retries=retries)
-            return _parse_raw_grid(soup)
+            return _parse_raw_grid(soup, exclude_car=str(axis_car))
         except Exception:
             return None
 
