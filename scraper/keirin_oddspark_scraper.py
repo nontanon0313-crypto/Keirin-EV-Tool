@@ -75,10 +75,27 @@ def parse_entry(jo_code, kaisai_bi, race_no):
     params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no}
     soup = get_soup(url, params)
     title = soup.title.string if soup.title else ""
-    race_name = ""
+    race_name = ""  # 実際にはS級準決勝等の「級班+ステージ」を指すことが多い
     m = re.search(r"【出走表】(.+?)｜", title or "")
     if m:
         race_name = m.group(1).strip()
+
+    # グレード(ＧⅠ/ＧⅡ/ＧⅢ/ＦⅠ/ＦⅡ等)と大会名を、ページ全体のテキストから探す。
+    # 例:「大垣競輪場 ＦⅠ デイリースポーツ杯」のような見出し行から抽出する
+    # (のんの指摘=バンク・グレード等の未設定を受けて追加)。
+    grade = None
+    event_title = None
+    page_text = soup.get_text(" ", strip=True)
+    grade_m = re.search(r"([ＧGgｇ][ⅠⅡⅢ123]|[ＦFｆ][ⅠⅡ12])(?:[\s　]*)([^\s　]{2,20}杯|[^\s　]{2,20}記念|[^\s　]{2,20}選抜)?", page_text)
+    if grade_m:
+        raw_grade = grade_m.group(1)
+        grade = (
+            raw_grade.replace("Ｇ", "G").replace("Ｆ", "F")
+            .replace("Ⅰ", "1").replace("Ⅱ", "2").replace("Ⅲ", "3")
+        )
+        if grade_m.group(2):
+            event_title = grade_m.group(2)
+
     riders = []
     for table in soup.find_all("table"):
         for row in table.find_all("tr"):
@@ -108,7 +125,11 @@ def parse_entry(jo_code, kaisai_bi, race_no):
         if r["車番"] not in seen and r["選手名"]:
             seen.add(r["車番"])
             unique.append(r)
-    return {"race_name": race_name, "riders": sorted(unique, key=lambda x: int(x["車番"])), "url": f"{url}?joCode={jo_code}&kaisaiBi={kaisai_bi}&raceNo={race_no}"}
+    return {
+        "race_name": race_name, "grade": grade, "event_title": event_title,
+        "riders": sorted(unique, key=lambda x: int(x["車番"])),
+        "url": f"{url}?joCode={jo_code}&kaisaiBi={kaisai_bi}&raceNo={race_no}",
+    }
 
 def _parse_raw_grid(soup, debug=False, exclude_car=None):
     """

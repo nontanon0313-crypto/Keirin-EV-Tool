@@ -60,6 +60,34 @@ def _to_odds_float(v):
     return _to_float(s)
 
 
+def _season_from_date(dt):
+    """開催日から季節を自動算出する(3-5月=春、6-8月=夏、9-11月=秋、12-2月=冬)。"""
+    if dt is None:
+        return None
+    m = dt.month
+    if m in (3, 4, 5):
+        return "春"
+    if m in (6, 7, 8):
+        return "夏"
+    if m in (9, 10, 11):
+        return "秋"
+    return "冬"
+
+
+def _normalize_race_stage(raw):
+    """
+    スクレイパーが取得した「Ｓ級準決勝」等の全角表記を、既存データの表記
+    (半角)に揃える。空なら None のまま返す
+    (のんの指摘=バンク・グレード等の未設定を受けて追加)。
+    """
+    if not raw:
+        return None
+    return (
+        raw.replace("Ｓ", "S").replace("Ａ", "A").replace("Ｌ", "L")
+        .replace("Ⅰ", "1").replace("Ⅱ", "2").replace("Ⅲ", "3")
+    )
+
+
 @router.post("/race")
 def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     jo_code = str(payload.get("jo_code", ""))
@@ -87,21 +115,41 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     except ValueError:
         pass
 
+    season = _season_from_date(race_date)
+    bank = db.query(models.BankMaster).filter(models.BankMaster.name == venue_name).first()
+    if bank is None:
+        warnings.append(f"バンクマスタに「{venue_name}」が見つからず、バンク特性(先行有利度等)は未設定のままです")
+    grade = entry.get("grade")
+    race_stage = _normalize_race_stage(entry.get("race_name"))
+    event_title = entry.get("event_title") or entry.get("race_name")
+
     if race is None:
         race = models.Race(
             venue_name=venue_name,
             race_number=int(race_no),
-            event_title=entry.get("race_name") or None,
+            event_title=event_title,
             race_date=race_date,
             source_app="oddspark_scraper",
             external_ref=external_ref,
+            season=season,
+            bank_id=bank.id if bank else None,
+            grade=grade,
+            race_stage=race_stage,
         )
         db.add(race)
         db.flush()
     else:
         # 再取り込み時は出走表由来の情報だけ更新する(手動で編集した他の項目は上書きしない)
-        if entry.get("race_name"):
-            race.event_title = entry["race_name"]
+        if event_title:
+            race.event_title = event_title
+        if season and not race.season:
+            race.season = season
+        if bank and not race.bank_id:
+            race.bank_id = bank.id
+        if grade and not race.grade:
+            race.grade = grade
+        if race_stage and not race.race_stage:
+            race.race_stage = race_stage
 
     # --- 出走表(entry)の取り込み ---
     entries_created = 0
