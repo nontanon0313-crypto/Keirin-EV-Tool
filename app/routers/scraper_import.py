@@ -10,6 +10,9 @@ Race/Entry/Oddsテーブルに取り込むためのルーター。
 - 出走表(entry)・結果(result)は取れている分をそのまま取り込む
   (賭け金に直結しないため、多少の欠けがあっても価値がある)
 - オッズ(odds)は券種ごとにis_complete=Trueのものだけ取り込む
+  (is_complete=通信エラーなく取得できたかを表す。理論上の組み合わせ数との
+  一致は求めない。人気のない組み合わせに1票も入らずオッズが存在しない
+  ことは正常であり、欠損ではないと判明したため)
   (欠損・誤った組み合わせのオッズがEV計算に混入するとベット判断を誤らせるため、
   不完全なデータは安全側に倒して取り込まない)
 - jo_code(場コード)がJO_CODE_VERIFIED_BLOCKSに無い場合は取り込みを拒否せず、
@@ -137,7 +140,8 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     else:
         warnings.append("出走表データが空でした(スクレイパー側でentry_errorが出ていないか確認してください)")
 
-    # --- オッズ(odds)の取り込み: is_complete=Trueの券種のみ ---
+    # --- オッズ(odds)の取り込み: 通信エラーなく取得できた券種のみ ---
+    # (件数が理論値より少ないのは、票が入らなかった組み合わせがあるだけで正常)
     odds_created = 0
     odds_skipped_bet_types = []
     odds_payload = payload.get("odds") or {}
@@ -168,7 +172,7 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
                 ))
                 odds_created += 1
         if odds_skipped_bet_types:
-            warnings.append(f"以下の券種はデータ不完全のため取り込みませんでした: {odds_skipped_bet_types}")
+            warnings.append(f"以下の券種は通信エラーのため取り込みませんでした: {odds_skipped_bet_types}")
 
     # --- 結果(result)の取り込み ---
     result_payload = payload.get("result") or {}

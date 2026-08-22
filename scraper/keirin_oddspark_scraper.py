@@ -240,11 +240,20 @@ def _expected_combo_count(bet_type, n_riders):
         return n * (n - 1) * (n - 2) if n >= 3 else 0
     return None
 
-def _dedup_and_validate(bet_type, combos, n_riders):
+def _dedup_and_validate(bet_type, combos, n_riders, fetch_ok=True):
     """
     combosは既に券種の意味に沿って組み立てられた
     [{"1着":.., "2着":.., ("3着":..)?, "オッズ":..}, ...] のリスト。
-    重複除去(念のための保険)と、理論組み合わせ数との突合を行う。
+    重複除去(念のための保険)を行う。
+
+    is_complete の意味を変更(のんの実機検証で判明): 理論上の組み合わせ数
+    (nCr計算)は「全通りに票が入っている場合の上限」に過ぎず、実際には
+    人気のない組み合わせに1票も入らず、その組み合わせのオッズ自体が
+    サイト上に存在しないことがある(スクリーンショットで実際の画面を
+    確認し、欠けているのではなく元々表示されていないと確定)。
+    そのため理論値との一致をもって「完全」とするのは誤った前提だった。
+    is_completeは「通信エラーなく正常に取得できたか」のみを表す。
+    件数が理論値より少ないこと自体はエラーではない。
     """
     unordered = bet_type in ("2車複", "ワイド", "3連複")
     dedup = {}
@@ -263,88 +272,55 @@ def _dedup_and_validate(bet_type, combos, n_riders):
 
     expected = _expected_combo_count(bet_type, n_riders)
     actual = len(matrix)
-    is_complete = (expected is not None) and (actual >= expected)
     missing_count = max(0, expected - actual) if expected is not None else None
     return {
         "bet_type": bet_type,
         "matrix_count": actual,
-        "expected_count": expected,
-        "is_complete": is_complete,
-        "missing_count": missing_count,
+        "expected_count": expected,  # 参考値(理論上の上限)。一致しなくても正常
+        "is_complete": fetch_ok,  # 通信エラーなく取得できたかのみを表す
+        "missing_count": missing_count,  # 参考値。票が入らなかった組み合わせの数の可能性が高い
         "matrix": matrix,
     }
 
-def parse_odds_simple(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, max_attempts=3):
+def parse_odds_simple(jo_code, kaisai_bi, race_no, bet_type, n_riders=None):
     """
     1ページで完結する券種向け(2車複=5, 2車単=6, ワイド=7)。
     - 2車複・ワイド: 車番の若い方/大きい方は順不同の組み合わせとして扱う
     - 2車単: 列車番=1着、行車番=2着(実ページで確認済みの向き)
 
-    「通信は成功したが理論値に届かない」場合(のんの実機検証で判明したパターン)は、
-    ページ全体を待ち時間を延ばしながら最大max_attempts回まで取り直す。
-    以前は通信エラー(例外)時しか取り直しておらず、200 OKだが中身が不完全な
-    ケースを一度も再取得していなかった。
+    通信エラー時のみ取り直す(通常のretries機構に任せる)。以前は件数が
+    理論値に届かないことを理由に何度も取り直していたが、それは誤った
+    前提(票が入らない組み合わせは元々表示されない)に基づく無駄なリトライ
+    だった(のんの実機検証・スクリーンショットで確認)。
     """
     url = f"{BASE}/Odds.do"
     params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no, "betType": bet_type}
     name = BET_TYPES.get(bet_type, str(bet_type))
-    expected = _expected_combo_count(name, n_riders)
 
-    result = None
-    for attempt in range(max_attempts):
+    try:
         soup = get_soup(url, params, retries=4)
         grid = _parse_raw_grid(soup)
-        combos = [{"1着": g["col_car"], "2着": g["row_car"], "オッズ": g["odds"]} for g in grid]
-        result = _dedup_and_validate(name, combos, n_riders)
-        result["bet_code"] = bet_type
-        if result["is_complete"] or expected is None:
-            break
-        time.sleep(1.5 + attempt * 1.0)  # 試行を重ねるごとに待ち時間を延ばして取り直す
+        fetch_ok = True
+    except Exception:
+        grid = []
+        fetch_ok = False
+
+    combos = [{"1着": g["col_car"], "2着": g["row_car"], "オッズ": g["odds"]} for g in grid]
+    result = _dedup_and_validate(name, combos, n_riders, fetch_ok=fetch_ok)
+    result["bet_code"] = bet_type
     return result
-
-def _expected_axis_count(bet_type, n_riders, axis_car):
-    """
-    軸車番1本あたりの理論組み合わせ数(軸ごとの完全性チェック用)。
-
-    のんの実機検証で発覚したバグの修正:
-    1. 3連複(順不同)は「軸車番=組み合わせの中で一番小さい車番」という規則で
-       ページが分かれていると考えられる。そのため軸が大きくなるほど、組み合わせを
-       作れる残り車番(自分より大きい車番)が減っていく。以前は常に「残り車番から
-       2台選ぶ数」を一律計算しており、軸5〜7のような本来0件や少数件のはずの軸まで
-       「足りない」と誤判定し、無駄なリトライを繰り返していた
-       (is_complete=Trueなのにfailed_axesが空でない、という矛盾の原因)
-    2. 3連単・3連複とも、出走していない車番(例:7車立てで軸8・9)を存在するものとして
-       期待件数を計算しており、絶対に届かない期待値に対して無限にリトライしていた
-       (3連単が長時間化・未完了に終わった主因と考えられる)
-    """
-    if n_riders is None or n_riders < 3:
-        return None
-    try:
-        axis_num = int(axis_car)
-    except (TypeError, ValueError):
-        return None
-    if axis_num > n_riders:
-        return 0  # このレースに存在しない車番の軸は、最初から0件が正解
-    if bet_type == "3連単":
-        # 順序ありなので、軸車番の大小に関わらず「他の全車番」との組み合わせが有効
-        remaining = n_riders - 1
-        return remaining * (remaining - 1) if remaining >= 2 else 0
-    if bet_type == "3連複":
-        # 順不同。軸=組み合わせ中の最小車番という規則(実ページの挙動から推定)。
-        # 軸より大きい車番の中から2台を選ぶ数だけが、その軸のページに載る
-        larger = n_riders - axis_num
-        return math.comb(larger, 2) if larger >= 2 else 0
-    return None
 
 def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, max_cars=9):
     """
     軸車番ごとにページが分かれている券種向け(3連複=8, 3連単=9)。
-    軸車番(1〜9)ごとに並列取得し、失敗した軸だけ後でシリアルに追い取得する。
+    軸車番(1〜9)ごとに並列取得し、通信エラーで失敗した軸だけ後で追い取得する。
 
-    「取得自体は失敗していない(例外なし)が、件数が理論値に届いていない」軸
-    (=ページは返ってきたが中身が不完全、という"静かな失敗")も追い取得の対象にする。
-    以前は通信エラー(例外)でしか失敗と判定しておらず、こうした静かな失敗を
-    見逃していた(のんの実機検証で判明)。
+    以前は「軸ごとの理論組み合わせ数」と実際の件数を比較し、届かない軸を
+    無限にリトライしていたが、これは誤った前提に基づく無駄なリトライだった。
+    人気のない組み合わせには1票も入らず、その分のオッズがサイト上に
+    そもそも存在しない(スクリーンショットで実際の画面を確認し、確定)。
+    現在は通信エラー(例外)が起きた軸だけを再取得の対象にする
+    (のんの実機検証・スクリーンショットでの確認を受けて修正)。
     """
     url = f"{BASE}/Odds.do"
     name = BET_TYPES.get(bet_type, str(bet_type))
@@ -356,15 +332,7 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
             soup = get_soup(url, params, retries=retries)
             return _parse_raw_grid(soup, exclude_car=str(axis_car))
         except Exception:
-            return None
-
-    def is_axis_incomplete(axis_car, grid):
-        if grid is None:
-            return True
-        expected = _expected_axis_count(name, n_riders, axis_car)
-        if expected is None:
-            return False
-        return len(grid) < expected
+            return None  # Noneは通信失敗、[]は正常だが該当なし(票が入らなかった)
 
     # 実在する車番(n_riders)までしか軸を試さない。不明な場合のみ従来通り最大9まで試す
     upper = n_riders if n_riders else max_cars
@@ -378,19 +346,21 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
             car = futs[fut]
             results_by_axis[car] = fut.result()
 
-    failed_axes = [c for c in cars_to_try if is_axis_incomplete(c, results_by_axis.get(c))]
-    for attempt in range(3):  # 静かな失敗も拾うため、追い取得の回数を2→3に増やす
+    failed_axes = [c for c in cars_to_try if results_by_axis.get(c) is None]
+    for attempt in range(2):
         if not failed_axes:
             break
         still_failed = []
         for axis_car in failed_axes:
-            time.sleep(1.0 + attempt * 0.5)  # 試行を重ねるごとに待ち時間を延ばす
+            time.sleep(1.0 + attempt * 0.5)
             g = fetch_one(axis_car, retries=3)
-            if is_axis_incomplete(axis_car, g):
+            if g is None:
                 still_failed.append(axis_car)
             else:
                 results_by_axis[axis_car] = g
         failed_axes = still_failed
+
+    fetch_ok = len(failed_axes) == 0
 
     combos = []
     for axis_car, grid in results_by_axis.items():
@@ -399,10 +369,11 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
         for g in grid:
             combos.append({"1着": str(axis_car), "2着": g["col_car"], "3着": g["row_car"], "オッズ": g["odds"]})
 
-    result = _dedup_and_validate(name, combos, n_riders)
+    result = _dedup_and_validate(name, combos, n_riders, fetch_ok=fetch_ok)
     result["bet_code"] = bet_type
-    result["failed_axes"] = sorted(failed_axes)
+    result["failed_axes"] = sorted(failed_axes)  # 通信エラーで取得できなかった軸(空なら全軸成功)
     return result
+
 
 def parse_result(jo_code, kaisai_bi, race_no):
     url = f"{BASE}/RaceKekka.do"
