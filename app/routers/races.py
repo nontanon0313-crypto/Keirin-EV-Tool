@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
 
 from ..database import get_db
 from .. import models
@@ -321,3 +322,111 @@ def list_races_for_reanalysis(db: Session = Depends(get_db), limit: int = 100):
         for r in races
         if len(r.entries) > 0
     ]
+
+
+def _jst_now_naive():
+    """
+    JSTの「壁時計時刻」をタイムゾーン情報無しのdatetimeで返す。
+    post_timeもJSTのタイムゾーン情報無しで保存しているため、比較の基準を揃える
+    (のんの要望=当日・直前レース抽出機能により追加)。
+    """
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Asia/Tokyo")).replace(tzinfo=None)
+
+
+@router.get("/today")
+def list_races_today(db: Session = Depends(get_db)):
+    """
+    本日(JST)のレース一覧。発走時刻順に並べる。
+    予想済みか(AI勝率が入っているか)も含める(のんの要望により追加)。
+    """
+    now = _jst_now_naive()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.race_date >= today_start, models.Race.race_date < today_end)
+        .all()
+    )
+    result = []
+    for r in races:
+        entries = r.entries
+        predicted = any(e.blended_win_prob is not None for e in entries)
+        result.append({
+            "race_id": r.id,
+            "venue_name": r.venue_name,
+            "race_number": r.race_number,
+            "event_title": r.event_title,
+            "post_time": r.post_time.strftime("%H:%M") if r.post_time else None,
+            "riders_count": len(entries),
+            "predicted": predicted,
+            "actual_result": r.actual_result,
+        })
+    result.sort(key=lambda x: (x["post_time"] is None, x["post_time"] or ""))
+    return result
+
+
+@router.get("/upcoming")
+def list_races_upcoming(within_min: int = 30, db: Session = Depends(get_db)):
+    """発走予定時刻まで指定分数(既定30分)以内のレース一覧(のんの要望により追加)。"""
+    now = _jst_now_naive()
+    until = now + timedelta(minutes=within_min)
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.post_time.isnot(None))
+        .filter(models.Race.post_time >= now, models.Race.post_time <= until)
+        .order_by(models.Race.post_time.asc())
+        .all()
+    )
+    result = []
+    for r in races:
+        entries = r.entries
+        predicted = any(e.blended_win_prob is not None for e in entries)
+        mins_to_post = int((r.post_time - now).total_seconds() // 60)
+        result.append({
+            "race_id": r.id,
+            "venue_name": r.venue_name,
+            "race_number": r.race_number,
+            "post_time": r.post_time.strftime("%H:%M"),
+            "mins_to_post": mins_to_post,
+            "riders_count": len(entries),
+            "predicted": predicted,
+        })
+    return result
+
+
+@router.get("/favorites")
+def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db)):
+    """
+    予想済み(AI勝率算出済み)の全レースを横断し、本命候補(推定勝率が高い選手)を
+    勝率降順で返す。結果確定済みのレースは対象外(もう投票できないため)
+    (のんの要望により追加)。
+    """
+    entries = (
+        db.query(models.Entry)
+        .filter(models.Entry.blended_win_prob.isnot(None))
+        .filter(models.Entry.blended_win_prob >= min_win_prob)
+        .all()
+    )
+    race_ids = {e.race_id for e in entries}
+    races_by_id = {
+        r.id: r
+        for r in db.query(models.Race).filter(models.Race.id.in_(race_ids), models.Race.actual_result.is_(None)).all()
+    } if race_ids else {}
+
+    result = []
+    for e in entries:
+        race = races_by_id.get(e.race_id)
+        if race is None:
+            continue  # 結果確定済み、または存在しないレースは除外
+        result.append({
+            "race_id": race.id,
+            "venue_name": race.venue_name,
+            "race_number": race.race_number,
+            "post_time": race.post_time.strftime("%H:%M") if race.post_time else None,
+            "car_number": e.car_number,
+            "player_name": e.player_name,
+            "win_prob_pct": round(e.blended_win_prob * 100, 1),
+        })
+    result.sort(key=lambda x: -x["win_prob_pct"])
+    return result

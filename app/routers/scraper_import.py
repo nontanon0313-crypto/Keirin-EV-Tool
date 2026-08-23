@@ -109,6 +109,20 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
 
     entry = payload.get("entry") or {}
     riders = entry.get("riders") or []
+    odds_payload_check = payload.get("odds") or {}
+    result_payload_check = (payload.get("result") or {}).get("results") or []
+    if race is None and not riders and not odds_payload_check and not result_payload_check:
+        # 出走表・オッズ・結果のいずれも無い(=そのjo/rnにレース自体が存在しない)場合、
+        # 空のレコードを作らずにスキップする。fetch_today_entry.py等が全場×1-12Rを
+        # 網羅的に試すため、開催が無いコマも含まれることがある(のんの要望により追加)
+        return {
+            "race_id": None,
+            "external_ref": external_ref,
+            "venue_name": venue_name,
+            "skipped": True,
+            "reason": "出走表・オッズ・結果のいずれも無いため、レースを作成せずスキップしました",
+        }
+
     race_date = None
     try:
         race_date = datetime.strptime(kaisai_bi, "%Y%m%d")
@@ -122,6 +136,13 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     grade = entry.get("grade")
     race_stage = _normalize_race_stage(entry.get("race_name"))
     event_title = entry.get("event_title") or entry.get("race_name")
+    post_time = None
+    post_time_iso = entry.get("post_time_iso")
+    if post_time_iso:
+        try:
+            post_time = datetime.fromisoformat(post_time_iso).replace(tzinfo=None)
+        except ValueError:
+            warnings.append(f"発走時刻(post_time_iso)の形式が想定外でした: {post_time_iso}")
 
     if race is None:
         race = models.Race(
@@ -129,6 +150,7 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
             race_number=int(race_no),
             event_title=event_title,
             race_date=race_date,
+            post_time=post_time,
             source_app="oddspark_scraper",
             external_ref=external_ref,
             season=season,
@@ -142,6 +164,8 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
         # 再取り込み時は出走表由来の情報だけ更新する(手動で編集した他の項目は上書きしない)
         if event_title:
             race.event_title = event_title
+        if post_time and not race.post_time:
+            race.post_time = post_time
         if season and not race.season:
             race.season = season
         if bank and not race.bank_id:

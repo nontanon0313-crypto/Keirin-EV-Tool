@@ -38,6 +38,11 @@
 
   <section class="card">
     <h2>② レース選択・期待値計算</h2>
+    <div style="display:flex;gap:6px;margin-bottom:8px;">
+      <button id="raceFilterAllBtn" style="width:auto;padding:6px 12px;font-size:13px;">全件</button>
+      <button id="raceFilterTodayBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">本日</button>
+      <button id="raceFilterUpcomingBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">直前30分</button>
+    </div>
     <select id="raceSelect"></select>
     <button id="refreshRaceListBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">🔄一覧を更新</button>
     <div id="raceDetailResult" class="result-box"></div>
@@ -98,6 +103,15 @@
 </div>
 
 <div id="tab-verify" class="tab-content">
+
+  <section class="card">
+    <h2>🏆 本命一覧(予想済み・全レース横断)</h2>
+    <p class="note">予想済みで、まだ結果が確定していない全レースを横断し、推定勝率が高い選手を一覧表示します。</p>
+    <label>最低勝率(%)</label>
+    <input type="number" id="favoritesMinProb" value="25" style="width:80px;">
+    <button id="loadFavoritesBtn">本命候補を表示</button>
+    <div id="favoritesResult" class="result-box"></div>
+  </section>
 
   <section class="card">
     <h2>🔁 予想を再実行(スクレイピングし直さない)</h2>

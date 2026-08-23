@@ -47,6 +47,7 @@ def init_db():
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS development_simulation TEXT",
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS actual_result VARCHAR(30)",
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS external_ref VARCHAR(100)",
+        "ALTER TABLE races ADD COLUMN IF NOT EXISTS post_time TIMESTAMP",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_races_external_ref_unique ON races (external_ref) WHERE external_ref IS NOT NULL",
     ]
     from sqlalchemy import text

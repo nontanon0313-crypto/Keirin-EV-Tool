@@ -182,15 +182,40 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
 });
 
 // ---------- ② レース選択・期待値計算 ----------
+let raceListScope = "all"; // "all" | "today" | "upcoming"
+
 async function loadRaces(selectRaceId) {
   const select = document.getElementById("raceSelect");
   const previousValue = select.value;
   try {
-    const res = await fetch(apiUrl("/races/"));
-    const races = await res.json();
+    let races;
+    if (raceListScope === "today") {
+      const res = await fetch(apiUrl("/races/today"));
+      const data = await res.json();
+      races = data.map(r => ({
+        id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
+        entry_count: r.riders_count, odds_count: null,
+        label_extra: `${r.post_time ? r.post_time + " " : ""}${r.predicted ? "予想済み" : "未予想"}${r.actual_result ? " ・結果確定済み" : ""}`,
+      }));
+    } else if (raceListScope === "upcoming") {
+      const res = await fetch(apiUrl("/races/upcoming?within_min=30"));
+      const data = await res.json();
+      races = data.map(r => ({
+        id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
+        entry_count: r.riders_count, odds_count: null,
+        label_extra: `あと${r.mins_to_post}分(${r.post_time}) ${r.predicted ? "予想済み" : "未予想"}`,
+      }));
+    } else {
+      const res = await fetch(apiUrl("/races/"));
+      const data = await res.json();
+      races = data.map(r => ({ ...r, label_extra: null }));
+    }
     select.innerHTML = races.map(r =>
-      `<option value="${r.id}">${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R (選手${r.entry_count}/オッズ${r.odds_count})</option>`
+      `<option value="${r.id}">${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R${r.label_extra ? " " + r.label_extra : ` (選手${r.entry_count}/オッズ${r.odds_count})`}</option>`
     ).join("");
+    if (!races.length) {
+      select.innerHTML = `<option value="">(該当レースなし)</option>`;
+    }
     // アップロード直後は今回反映したレースを、それ以外は元々選ばれていたレースを維持する
     const target = selectRaceId ?? previousValue;
     if (target && races.some(r => String(r.id) === String(target))) {
@@ -201,6 +226,45 @@ async function loadRaces(selectRaceId) {
     console.error(e);
   }
 }
+
+function setRaceFilterButtons(active) {
+  const map = { all: "raceFilterAllBtn", today: "raceFilterTodayBtn", upcoming: "raceFilterUpcomingBtn" };
+  for (const [key, id] of Object.entries(map)) {
+    document.getElementById(id).style.background = key === active ? "" : "#475569";
+  }
+}
+document.getElementById("raceFilterAllBtn").addEventListener("click", () => {
+  raceListScope = "all"; setRaceFilterButtons("all"); loadRaces();
+});
+document.getElementById("raceFilterTodayBtn").addEventListener("click", () => {
+  raceListScope = "today"; setRaceFilterButtons("today"); loadRaces();
+});
+document.getElementById("raceFilterUpcomingBtn").addEventListener("click", () => {
+  raceListScope = "upcoming"; setRaceFilterButtons("upcoming"); loadRaces();
+});
+
+document.getElementById("loadFavoritesBtn").addEventListener("click", async () => {
+  const box = document.getElementById("favoritesResult");
+  box.textContent = "読み込み中...";
+  const minProb = (parseFloat(document.getElementById("favoritesMinProb").value) || 25) / 100;
+  try {
+    const res = await fetch(apiUrl(`/races/favorites?min_win_prob=${minProb}`));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    if (!data.length) {
+      box.textContent = "該当する本命候補はありません。";
+      return;
+    }
+    let html = `<table><tr><th>会場</th><th>発走</th><th>車番</th><th>選手名</th><th>勝率</th></tr>`;
+    for (const f of data) {
+      html += `<tr><td>${f.venue_name}${f.race_number}R</td><td>${f.post_time || "-"}</td><td>${f.car_number}</td><td>${f.player_name}</td><td>${f.win_prob_pct}%</td></tr>`;
+    }
+    html += "</table>";
+    box.innerHTML = html;
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+});
 
 
 document.getElementById("deleteRaceBtn").addEventListener("click", async () => {

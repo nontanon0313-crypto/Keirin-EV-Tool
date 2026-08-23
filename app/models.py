@@ -35,6 +35,7 @@ class Race(Base):
     lines_data = Column(JSON, nullable=True)  # ライン構成 例: [[1,2],[3],[4,5,6],[7]] (各配列が1ライン、並び順=先行→番手→3番手)
     development_simulation = Column(Text, nullable=True)  # AIによる展開予想(誰が先行/番手/追込か、展開のポイント等)
     race_date = Column(DateTime, nullable=True)
+    post_time = Column(DateTime, nullable=True)  # 発走予定時刻(JST)。当日・直前レース抽出用
     deadline_time = Column(DateTime, nullable=True)
     weather = Column(String(20), nullable=True)  # 晴/曇/雨/雪等。画面に表示があれば取得
     temperature_c = Column(Float, nullable=True)  # 気温(℃)。画面に表示があれば取得
