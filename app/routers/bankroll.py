@@ -53,10 +53,20 @@ def get_current_balance(db: Session) -> float:
 
 
 def adjust_balance(db: Session, delta: float):
-    """購入時(マイナス)・払戻時(プラス)に残高を増減する。"""
-    state = db.query(models.BankrollState).get(1)
-    if not state:
-        return
-    state.current_balance += delta
-    state.updated_at = datetime.utcnow()
+    """
+    購入時(マイナス)・払戻時(プラス)に残高を増減する。
+
+    以前は「Pythonで読み込んで加算し、書き戻す」形だったため、複数レースを
+    同時に処理すると更新が競合し、一部の増減が失われる可能性があった
+    (再予想の並列実行に対応するため、のんの要望により修正)。
+    DB側で「current_balance = current_balance + delta」という原子的な更新に
+    することで、同時に複数のリクエストが来ても正しく積み上がるようにした。
+    """
+    from sqlalchemy import update
+    result = db.execute(
+        update(models.BankrollState)
+        .where(models.BankrollState.id == 1)
+        .values(current_balance=models.BankrollState.current_balance + delta, updated_at=datetime.utcnow())
+    )
     db.commit()
+    return result.rowcount > 0

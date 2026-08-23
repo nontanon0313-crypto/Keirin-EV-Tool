@@ -21,12 +21,16 @@ Claude(コーディングサンドボックス)にはRenderバックエンドや
 """
 import argparse, glob, json, os, sys, time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 API_BASE = os.environ.get("KEIRIN_API_BASE", "https://keirin-ev-tool.onrender.com")
+_log_lock = Lock()
 
 
 def log(msg):
-    print(f"[pipeline] {msg}", flush=True)
+    with _log_lock:  # 並列実行時にログ行が混ざらないようにする
+        print(f"[pipeline] {msg}", flush=True)
 
 
 def warmup_backend():
@@ -68,11 +72,25 @@ def get_race(race_id):
     return r.json()
 
 
-def step2_estimate(race_id):
-    """2. 予想: Gemini 2段階分析(展開シミュレーション→勝率推定)"""
-    r = requests.post(f"{API_BASE}/analyze/estimate/{race_id}", timeout=120)
-    r.raise_for_status()
-    return r.json()
+def step2_estimate(race_id, max_retries=5):
+    """
+    2. 予想: Gemini 2段階分析(展開シミュレーション→勝率推定)。
+
+    Geminiの利用枠(RPM/RPD)を超えると429が返ってくることがある。データが
+    壊れるわけではないので、待ってから自動リトライする(のんの要望により追加。
+    実際の枠はGoogle AI Studio等で要確認、ここでは上限の値は決め打ちしない)。
+    """
+    url = f"{API_BASE}/analyze/estimate/{race_id}"
+    for attempt in range(max_retries):
+        r = requests.post(url, timeout=120)
+        if r.status_code == 429:
+            wait = min(10 * (2 ** attempt), 120)
+            log(f"   race_id={race_id}: Gemini利用枠の制限(429)。{wait}秒待って再試行します({attempt + 1}/{max_retries})")
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        return r.json()
+    raise RuntimeError(f"race_id={race_id}: 429が{max_retries}回続いたため断念しました。利用枠の状況を確認してください")
 
 
 def step3_race_plan(race_id, bankroll):
@@ -219,6 +237,7 @@ def main():
     ap.add_argument("--no-reset", action="store_true", help="--race-ids使用時、リセットせずに(=既存の購入記録に追加する形で)再予想する。通常は指定しない")
     ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。未指定ならバックエンドの現在値を使用")
     ap.add_argument("--dry-run", action="store_true", help="データ取得(登録)までで止める")
+    ap.add_argument("--concurrency", type=int, default=1, help="同時に処理するレース数(既定1=逐次)。Geminiの利用枠に応じて調整してください")
     args = ap.parse_args()
 
     warmup_backend()
@@ -229,16 +248,27 @@ def main():
 
     summary = []
 
+    def run_with_summary(task_label, fn):
+        try:
+            result = fn()
+            summary.append({"file": task_label, **result})
+        except Exception as e:
+            log(f"   エラー({task_label}): {e}")
+            summary.append({"file": task_label, "stage": "error", "error": str(e)})
+
     if args.race_ids:
         race_ids = [int(x.strip()) for x in args.race_ids.split(",") if x.strip()]
-        for rid in race_ids:
-            try:
-                result = run_reanalysis_for_race(rid, bankroll, reset=not args.no_reset)
-                summary.append({"file": f"race_id={rid}", **result})
-            except Exception as e:
-                log(f"   エラー: {e}")
-                summary.append({"file": f"race_id={rid}", "stage": "error", "error": str(e)})
-            time.sleep(0.5)
+        log(f"対象レース数: {len(race_ids)}件(同時実行数: {args.concurrency})")
+        if args.concurrency <= 1:
+            for rid in race_ids:
+                run_with_summary(f"race_id={rid}", lambda rid=rid: run_reanalysis_for_race(rid, bankroll, reset=not args.no_reset))
+                time.sleep(0.3)
+        else:
+            with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+                futs = {ex.submit(run_reanalysis_for_race, rid, bankroll, not args.no_reset): rid for rid in race_ids}
+                for fut in as_completed(futs):
+                    rid = futs[fut]
+                    run_with_summary(f"race_id={rid}", lambda fut=fut: fut.result())
         log("=== サマリ ===")
         for s in summary:
             log(f"  {s['file']}: {s['stage']}")
@@ -252,16 +282,24 @@ def main():
     else:
         ap.error("--file か --dir か --race-ids のいずれかを指定してください")
 
-    for fp in files:
-        with open(fp, encoding="utf-8") as f:
-            race_json = json.load(f)
-        try:
-            result = run_one_race(race_json, bankroll, dry_run=args.dry_run)
-            summary.append({"file": fp, **result})
-        except Exception as e:
-            log(f"   エラー: {e}")
-            summary.append({"file": fp, "stage": "error", "error": str(e)})
-        time.sleep(0.5)
+    log(f"対象ファイル数: {len(files)}件(同時実行数: {args.concurrency})")
+    if args.concurrency <= 1:
+        for fp in files:
+            with open(fp, encoding="utf-8") as f:
+                race_json = json.load(f)
+            run_with_summary(fp, lambda race_json=race_json: run_one_race(race_json, bankroll, dry_run=args.dry_run))
+            time.sleep(0.3)
+    else:
+        def load_and_run(fp):
+            with open(fp, encoding="utf-8") as f:
+                race_json = json.load(f)
+            return run_one_race(race_json, bankroll, dry_run=args.dry_run)
+
+        with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+            futs = {ex.submit(load_and_run, fp): fp for fp in files}
+            for fut in as_completed(futs):
+                fp = futs[fut]
+                run_with_summary(fp, lambda fut=fut: fut.result())
 
     log("=== サマリ ===")
     for s in summary:
