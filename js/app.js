@@ -715,6 +715,68 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
       }
     }
     log(`=== 完了: ${doneCount}件成功 / ${errorCount}件エラー ===`);
+
+    log("\n--- 更新後の集計(実績検証) ---");
+    try {
+      const stats = await (await fetch(apiUrl("/purchases/stats"))).json();
+      if (stats.message) {
+        log(`集計を表示: ${stats.message}`);
+      } else {
+        log(`集計を表示: 実績収支率${stats.overall_roi_pct}%(想定${stats.expected_roi_pct ?? "-"}%) / 的中率${stats.overall_win_rate_pct}%(想定${stats.expected_win_rate_pct ?? "-"}%) / 総ベット${stats.total_bets}件`);
+        if (stats.calibration_significance) {
+          const cs = stats.calibration_significance;
+          log(`  統計的有意性: p値${cs.p_value_pct}% / ${cs.judgement || ""}`);
+        }
+      }
+    } catch (e) { log(`集計を表示: エラー(${e.message})`); }
+
+    try {
+      const cal = await (await fetch(apiUrl("/purchases/calibration"))).json();
+      if (cal.overall) {
+        const o = cal.overall;
+        log(`自動補正の状態: 実績的中率${o.actual_win_rate_pct}% vs 予想${o.predicted_avg_prob_pct}%(乖離${o.deviation_pct > 0 ? "+" : ""}${o.deviation_pct}pt, サンプル${o.sample_count}件)`);
+      } else {
+        log("自動補正の状態: データ不足");
+      }
+    } catch (e) { log(`自動補正の状態: エラー(${e.message})`); }
+
+    try {
+      const sw = await (await fetch(apiUrl("/purchases/source-weights"))).json();
+      log(`tipstar/AI重み付け: AI ${Math.round((sw.ai_weight ?? 0) * 100)}% / tipstar ${Math.round((sw.app_weight ?? 0) * 100)}%`);
+    } catch (e) { log(`tipstar/AI重み付け: エラー(${e.message})`); }
+
+    try {
+      const big = await (await fetch(apiUrl("/purchases/big-expected-bets"))).json();
+      const n = Array.isArray(big) ? big.length : (big.items ? big.items.length : 0);
+      log(`想定利益が大きい買い目: ${n}件`);
+    } catch (e) { log(`想定利益が大きい買い目: エラー(${e.message})`); }
+
+    try {
+      const cp = await (await fetch(apiUrl("/purchases/car-pick-accuracy"))).json();
+      if (cp.message) {
+        log(`核となる車番予想の精度: ${cp.message}`);
+      } else {
+        log(`核となる車番予想の精度: n_races=${cp.n_races} 勝率${cp.win_rate_pct}% top3率${cp.top3_rate_pct}% / ${cp.judgement || ""}`);
+      }
+    } catch (e) { log(`核となる車番予想の精度: エラー(${e.message})`); }
+
+    try {
+      const sk = await (await fetch(apiUrl("/purchases/skipped/stats"))).json();
+      log(`見送り検証: 見送り正解率${sk.correct_skip_pct ?? "-"}%(${sk.total_skipped_evaluated ?? "-"}件中) 機会損失${sk.missed_opportunities_count ?? "-"}件`);
+    } catch (e) { log(`見送り検証: エラー(${e.message})`); }
+
+    try {
+      const ready = await (await fetch(apiUrl("/purchases/investment-readiness"))).json();
+      if (ready.message) {
+        log(`投資判断チェック: ${ready.message}`);
+      } else {
+        const checks = Object.values(ready.checks || {});
+        const passCount = checks.filter(c => c.pass).length;
+        log(`投資判断チェック: ${passCount}/${checks.length}基準クリア / ${ready.summary || ""}`);
+      }
+    } catch (e) { log(`投資判断チェック: エラー(${e.message})`); }
+
+    log("\n(各項目の詳細は下のボタンから個別に確認できます)");
   } catch (e) {
     box.textContent += "\nエラー: " + e.message;
   } finally {
