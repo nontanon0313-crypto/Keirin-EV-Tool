@@ -22,7 +22,7 @@ Claude(コーディングサンドボックス)にはRenderバックエンドや
 import argparse, glob, json, os, sys, time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from threading import Lock, Event
 
 API_BASE = os.environ.get("KEIRIN_API_BASE", "https://keirin-ev-tool.onrender.com")
 _log_lock = Lock()
@@ -72,13 +72,22 @@ def get_race(race_id):
     return r.json()
 
 
+class RateLimitExhausted(Exception):
+    """Geminiの利用枠が(一時的リトライでは解消しない程度に)尽きたと判断した時に送出する。
+    このエラーが出たら、そのレースだけでなく処理全体を止める(のんの要望により追加)。"""
+    pass
+
+
 def step2_estimate(race_id, max_retries=5):
     """
     2. 予想: Gemini 2段階分析(展開シミュレーション→勝率推定)。
 
     Geminiの利用枠(RPM/RPD)を超えると429が返ってくることがある。データが
-    壊れるわけではないので、待ってから自動リトライする(のんの要望により追加。
-    実際の枠はGoogle AI Studio等で要確認、ここでは上限の値は決め打ちしない)。
+    壊れるわけではないので、まず待ってから自動リトライする。それでも
+    max_retries回連続で429が続く場合は「一時的な混雑ではなく、日次上限等に
+    達した可能性が高い」と判断し、RateLimitExhaustedを送出して処理全体を
+    止める(のんの要望により追加。実際の枠はGoogle AI Studio等で要確認、
+    ここでは上限の値は決め打ちしない)。
     """
     url = f"{API_BASE}/analyze/estimate/{race_id}"
     for attempt in range(max_retries):
@@ -90,7 +99,7 @@ def step2_estimate(race_id, max_retries=5):
             continue
         r.raise_for_status()
         return r.json()
-    raise RuntimeError(f"race_id={race_id}: 429が{max_retries}回続いたため断念しました。利用枠の状況を確認してください")
+    raise RateLimitExhausted(f"race_id={race_id}: 429が{max_retries}回連続しました。利用枠(日次上限等)に達した可能性があります")
 
 
 def step3_race_plan(race_id, bankroll):
@@ -175,14 +184,33 @@ def run_one_race(race_json, bankroll, dry_run=False):
     return run_predict_and_confirm(race_id, bankroll)
 
 
-def run_reanalysis_for_race(race_id, bankroll, reset=True):
+REANALYSIS_FIXED_BANKROLL = 1_000_000  # 再予想を始める前に、証拠金をこの額に一度だけリセットする
+
+
+def reset_bankroll_to_fixed():
+    """
+    再予想バッチの開始前に、証拠金を固定額にリセットする。
+    各レースのrace-planに固定値を都度渡す方式だと、投票プラン計算(仮の額)と
+    実際の購入記録時の残高増減(実際の残高)がズレてしまうため、実際の残高
+    そのものを最初に揃えてから、あとは通常通り自然に増減させる方式にした
+    (のんの要望を受けて修正)。
+    """
+    r = requests.post(f"{API_BASE}/bankroll/set", json={"initial_balance": REANALYSIS_FIXED_BANKROLL}, timeout=90)
+    r.raise_for_status()
+    log(f"証拠金を{REANALYSIS_FIXED_BANKROLL:,}円にリセットしました")
+
+
+def run_reanalysis_for_race(race_id, bankroll=None, reset=True):
     """
     既にDBに登録済みのレース(出走表・オッズ・結果あり)を、スクレイピングし直さずに
-    再予想する。予想ロジック(AIプロンプト等)を変更した後の再検証用
-    (のんの要望により追加)。
+    再予想する。予想ロジック(AIプロンプト等)を変更した後の再検証用。
+
+    証拠金は、この関数の呼び出し前に(main側で)固定額にリセットされている前提。
+    ここでのbankroll引数はrace-planに渡さず、サーバー側の実際の残高(=リセット後の
+    値から自然に増減したもの)をそのまま使う。
     """
     label = f"race_id={race_id}"
-    log(f"=== {label}(再予想) ===")
+    log(f"=== {label}(再予想、証拠金{REANALYSIS_FIXED_BANKROLL:,}円固定) ===")
 
     if reset:
         log("0. 予想関連データをリセット(出走表・オッズ・結果は保持)...")
@@ -193,7 +221,7 @@ def run_reanalysis_for_race(race_id, bankroll, reset=True):
     if not race.get("actual_result"):
         log("   このレースはまだ結果が確定していません。結果記録(手順5)はスキップします")
 
-    result = run_predict_and_confirm(race_id, bankroll, actual_result=race.get("actual_result"))
+    result = run_predict_and_confirm(race_id, None, actual_result=race.get("actual_result"))
     return result
 
 
@@ -229,29 +257,70 @@ def run_predict_and_confirm(race_id, bankroll, actual_result=None):
     return {"race_id": race_id, "stage": "done"}
 
 
+PROGRESS_DEFAULT_PATH = "pipeline_progress.json"
+_stop_event = Event()  # Gemini利用枠切れを検知したら立てる。以降の新規タスク開始を止める
+
+
+def load_progress(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_progress(path, progress):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(progress, f, ensure_ascii=False, indent=2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="1レース分のJSONファイル")
     ap.add_argument("--dir", help="複数レース分のJSONファイルが入ったディレクトリ")
     ap.add_argument("--race-ids", help="既存のrace_id(カンマ区切り)を再予想する。スクレイピングは行わない(例: 46,47,48)")
     ap.add_argument("--no-reset", action="store_true", help="--race-ids使用時、リセットせずに(=既存の購入記録に追加する形で)再予想する。通常は指定しない")
-    ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。未指定ならバックエンドの現在値を使用")
+    ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。--dir/--fileの新規取り込みで使用(未指定ならバックエンドの現在値)。--race-ids(再予想)は常に100万円固定で、この指定は無視される")
     ap.add_argument("--dry-run", action="store_true", help="データ取得(登録)までで止める")
     ap.add_argument("--concurrency", type=int, default=1, help="同時に処理するレース数(既定1=逐次)。Geminiの利用枠に応じて調整してください")
+    ap.add_argument("--progress-file", default=PROGRESS_DEFAULT_PATH, help=f"進捗記録ファイル(既定: {PROGRESS_DEFAULT_PATH})。既に成功済みのタスクは自動でスキップし、Gemini利用枠切れで停止した後の再実行では続きから再開する")
     args = ap.parse_args()
 
     warmup_backend()
 
     bankroll = args.bankroll
     if bankroll is None and not args.dry_run:
-        log("証拠金は未指定のため、バックエンド側の現在の証拠金残高を自動使用します")
+        log("証拠金(--dir/--file用)は未指定のため、バックエンド側の現在の証拠金残高を自動使用します")
 
+    progress = load_progress(args.progress_file)
     summary = []
+    stopped_for_rate_limit = False
 
-    def run_with_summary(task_label, fn):
+    # 成功とみなす("done"扱いにして次回スキップする)ステージ一覧。
+    # エラー・レート制限切れは含めない(次回また試すため)
+    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "imported_only"}
+
+    def run_with_summary(task_key, task_label, fn):
+        nonlocal stopped_for_rate_limit
+        if _stop_event.is_set():
+            return
+        if progress.get(task_key) == "done":
+            log(f"   スキップ({task_label}): 進捗ファイルに完了記録あり")
+            return
         try:
             result = fn()
             summary.append({"file": task_label, **result})
+            if result.get("stage") in SUCCESS_STAGES:
+                progress[task_key] = "done"
+                save_progress(args.progress_file, progress)
+        except RateLimitExhausted as e:
+            log(f"   停止(Gemini利用枠切れ): {e}")
+            log("   処理全体を停止します。利用枠が回復してから、同じコマンドをもう一度実行してください(完了済みの分は自動でスキップされます)")
+            _stop_event.set()
+            stopped_for_rate_limit = True
+            summary.append({"file": task_label, "stage": "rate_limit_stopped", "error": str(e)})
         except Exception as e:
             log(f"   エラー({task_label}): {e}")
             summary.append({"file": task_label, "stage": "error", "error": str(e)})
@@ -259,19 +328,35 @@ def main():
     if args.race_ids:
         race_ids = [int(x.strip()) for x in args.race_ids.split(",") if x.strip()]
         log(f"対象レース数: {len(race_ids)}件(同時実行数: {args.concurrency})")
+        if not progress:
+            log(f"初回実行のため、証拠金を{REANALYSIS_FIXED_BANKROLL:,}円にリセットします")
+            reset_bankroll_to_fixed()
+        else:
+            log(f"進捗ファイルに既存の記録があるため、証拠金はリセットしません(前回の続きから再開)")
         if args.concurrency <= 1:
             for rid in race_ids:
-                run_with_summary(f"race_id={rid}", lambda rid=rid: run_reanalysis_for_race(rid, bankroll, reset=not args.no_reset))
+                if _stop_event.is_set():
+                    break
+                run_with_summary(f"reanalysis:{rid}", f"race_id={rid}", lambda rid=rid: run_reanalysis_for_race(rid, reset=not args.no_reset))
                 time.sleep(0.3)
         else:
             with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-                futs = {ex.submit(run_reanalysis_for_race, rid, bankroll, not args.no_reset): rid for rid in race_ids}
+                futs = {}
+                for rid in race_ids:
+                    if _stop_event.is_set():
+                        break
+                    if progress.get(f"reanalysis:{rid}") == "done":
+                        continue
+                    futs[ex.submit(run_reanalysis_for_race, rid, None, not args.no_reset)] = rid
                 for fut in as_completed(futs):
                     rid = futs[fut]
-                    run_with_summary(f"race_id={rid}", lambda fut=fut: fut.result())
+                    run_with_summary(f"reanalysis:{rid}", f"race_id={rid}", lambda fut=fut: fut.result())
         log("=== サマリ ===")
         for s in summary:
             log(f"  {s['file']}: {s['stage']}")
+        if stopped_for_rate_limit:
+            log("(Gemini利用枠切れで途中停止しました。回復後に同じコマンドで再実行してください)")
+            sys.exit(2)
         return
 
     files = []
@@ -285,9 +370,11 @@ def main():
     log(f"対象ファイル数: {len(files)}件(同時実行数: {args.concurrency})")
     if args.concurrency <= 1:
         for fp in files:
+            if _stop_event.is_set():
+                break
             with open(fp, encoding="utf-8") as f:
                 race_json = json.load(f)
-            run_with_summary(fp, lambda race_json=race_json: run_one_race(race_json, bankroll, dry_run=args.dry_run))
+            run_with_summary(f"file:{fp}", fp, lambda race_json=race_json: run_one_race(race_json, bankroll, dry_run=args.dry_run))
             time.sleep(0.3)
     else:
         def load_and_run(fp):
@@ -296,14 +383,23 @@ def main():
             return run_one_race(race_json, bankroll, dry_run=args.dry_run)
 
         with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
-            futs = {ex.submit(load_and_run, fp): fp for fp in files}
+            futs = {}
+            for fp in files:
+                if _stop_event.is_set():
+                    break
+                if progress.get(f"file:{fp}") == "done":
+                    continue
+                futs[ex.submit(load_and_run, fp)] = fp
             for fut in as_completed(futs):
                 fp = futs[fut]
-                run_with_summary(fp, lambda fut=fut: fut.result())
+                run_with_summary(f"file:{fp}", fp, lambda fut=fut: fut.result())
 
     log("=== サマリ ===")
     for s in summary:
         log(f"  {os.path.basename(s['file'])}: {s['stage']}")
+    if stopped_for_rate_limit:
+        log("(Gemini利用枠切れで途中停止しました。回復後に同じコマンドで再実行してください)")
+        sys.exit(2)
 
 
 if __name__ == "__main__":

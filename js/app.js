@@ -702,11 +702,20 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
   const btn = document.getElementById("reanalyzeAllBtn");
   const log = (msg) => { box.textContent += msg + "\n"; box.scrollTop = box.scrollHeight; };
 
-  if (!confirm("全レースの予想・購入記録・EV結果をリセットして再実行します。よろしいですか？")) return;
+  if (!confirm("全レースの予想・購入記録・EV結果をリセットして再実行します。証拠金は100万円にリセットされます。よろしいですか？")) return;
 
   btn.disabled = true;
   box.textContent = "";
   try {
+    log("証拠金を100万円にリセット中...");
+    const brRes = await fetch(apiUrl("/bankroll/set"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial_balance: 1000000 }),
+    });
+    if (!brRes.ok) throw new Error(JSON.stringify(await brRes.json()));
+    log("  完了\n");
+
     log("レース一覧を取得中...");
     const listRes = await fetch(apiUrl("/races/for-reanalysis"));
     const races = await listRes.json();
