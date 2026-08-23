@@ -109,18 +109,22 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
 
     entry = payload.get("entry") or {}
     riders = entry.get("riders") or []
-    odds_payload_check = payload.get("odds") or {}
-    result_payload_check = (payload.get("result") or {}).get("results") or []
-    if race is None and not riders and not odds_payload_check and not result_payload_check:
-        # 出走表・オッズ・結果のいずれも無い(=そのjo/rnにレース自体が存在しない)場合、
-        # 空のレコードを作らずにスキップする。fetch_today_entry.py等が全場×1-12Rを
-        # 網羅的に試すため、開催が無いコマも含まれることがある(のんの要望により追加)
+    if race is None and not riders:
+        # そのjo/rnに出走選手が1人もいない(=レース自体が存在しない枠)場合は、
+        # 空のレコードを作らずにスキップする。
+        #
+        # 以前は「出走表・オッズ・結果が全て空の場合のみ」スキップする条件にしていたが、
+        # 実際にはriders=0のレースでもオッズ取得処理自体は動作し、券種ごとの空の枠
+        # (matrix=0件)がpayloadに残るため、この条件は常にFalseになり実質機能して
+        # いなかった。riders(出走選手)の有無だけで判定するよう修正した
+        # (のんの実機運用で判明。「レースが無い場合は予想と検証の元になるデータに
+        # 含まない」という明確な要望に基づく)。
         return {
             "race_id": None,
             "external_ref": external_ref,
             "venue_name": venue_name,
             "skipped": True,
-            "reason": "出走表・オッズ・結果のいずれも無いため、レースを作成せずスキップしました",
+            "reason": "出走選手がいない(レースが存在しない枠)ため、レースを作成せずスキップしました",
         }
 
     race_date = None

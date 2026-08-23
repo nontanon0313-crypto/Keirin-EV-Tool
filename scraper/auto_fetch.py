@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-joblist.txt の全ジョブを順処理。取得済み(JSON>MIN_SIZE)はスキップ。
+joblist.txt の全ジョブを順処理。取得済み(JSONの構造が正常)はスキップ。
 例外・タイムアウトでも次へ進み、未完了なら周回再開。
 
 環境変数:
@@ -20,7 +20,6 @@ JOBLIST = OUT / "joblist.txt"
 LOG = OUT / "fetch.log"
 WATCH = OUT / "watchdog.log"
 STATUS = OUT / "status.json"
-MIN_SIZE = 2000
 RACE_TIMEOUT = 300
 SLEEP_BETWEEN = 1
 SLEEP_RESTART = 5
@@ -49,8 +48,27 @@ def json_path(day: str, jo: str, rn: int) -> Path:
     return OUT / f"{day}_{jo}_{rn:02d}.json"
 
 def is_done(day: str, jo: str, rn: int) -> bool:
+    """
+    完了判定をファイルサイズ(旧: MIN_SIZE超か)ではなく、JSONの中身の構造で行う。
+
+    のんの実機運用で判明したバグ: そのjo/rnにレース自体が無い(riders=0)場合、
+    JSONは正常に書けているのにファイルサイズが2000バイトを下回り、
+    「未完了」と誤判定されて同じジョブを無限に再取得し続けていた。
+    レースが無いこと自体は正常な結果であり、失敗ではない。
+    ここでは「JSONとして読め、scraped_atがあり、entry.ridersがlist型である」
+    ことだけを完了の条件にする(riders=[]でも構わない=それが正しい結果)。
+    """
     p = json_path(day, jo, rn)
-    return p.is_file() and p.stat().st_size > MIN_SIZE
+    if not p.is_file():
+        return False
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return False  # 壊れたJSON(書き込み途中でのクラッシュ等)は未完了扱いにして取り直す
+    if "scraped_at" not in d:
+        return False
+    riders = (d.get("entry") or {}).get("riders")
+    return isinstance(riders, list)
 
 def progress(jobs):
     pending = [(d, j, r) for d, j, r in jobs if not is_done(d, j, r)]
