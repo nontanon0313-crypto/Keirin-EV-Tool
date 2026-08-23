@@ -132,6 +132,7 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
 
     return {
         "id": race.id,
+        "actual_result": race.actual_result,
         "venue_name": race.venue_name,
         "race_number": race.race_number,
         "grade": race.grade,
@@ -218,3 +219,77 @@ def delete_all_races(db: Session = Depends(get_db)):
     db.query(models.Race).delete()
     db.commit()
     return {"deleted_all": True}
+
+
+@router.post("/{race_id}/reset-for-reanalysis")
+def reset_race_for_reanalysis(race_id: int, db: Session = Depends(get_db)):
+    """
+    出走表・オッズ・レース結果はそのまま残し、予想に関わるデータ(AI勝率・購入記録・
+    見送り記録・EV計算結果)だけを削除して、そのレースを「取り込み直後」の状態に戻す。
+
+    レース取得(スクレイピング)は1日分で数時間かかるため、予想ロジック(AIプロンプト等)を
+    変更するたびに新規データを取り直すのは非現実的。既存の出走表・オッズ・結果を
+    再利用したまま「予想→投票→結果検証→予想精度確認」のループを再実行できるように
+    するために追加した(のんの要望により追加)。
+
+    購入記録の削除に伴い、証拠金への影響(購入時に引かれた分・結果確定で戻った分)を
+    正しく巻き戻す。
+    """
+    from . import bankroll as bankroll_router
+
+    race = db.query(models.Race).filter(models.Race.id == race_id).first()
+    if not race:
+        raise HTTPException(status_code=404, detail="レースが見つかりません")
+
+    purchases = db.query(models.Purchase).filter(models.Purchase.race_id == race_id).all()
+    bankroll_delta = 0.0
+    for p in purchases:
+        # 購入時に引かれた投票額を戻す
+        bankroll_delta += p.stake_amount
+        # 結果確定済みで払戻が入っていれば、その分を取り消す
+        if p.result != "pending" and p.payout_amount:
+            bankroll_delta -= p.payout_amount
+    if bankroll_delta:
+        bankroll_router.adjust_balance(db, bankroll_delta)
+
+    purchases_deleted = len(purchases)
+    skipped_deleted = db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race_id).delete()
+    ev_results_deleted = db.query(models.EvResult).filter(models.EvResult.race_id == race_id).delete()
+    db.query(models.Purchase).filter(models.Purchase.race_id == race_id).delete()
+
+    entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
+    for e in entries:
+        e.ai_win_prob = None
+        e.blended_win_prob = None
+
+    db.commit()
+
+    return {
+        "race_id": race_id,
+        "purchases_deleted": purchases_deleted,
+        "skipped_bets_deleted": skipped_deleted,
+        "ev_results_deleted": ev_results_deleted,
+        "entries_reset": len(entries),
+        "bankroll_adjustment": bankroll_delta,
+        "message": "出走表・オッズ・結果は保持したまま、予想関連データをリセットしました。/analyze/estimateから再実行できます",
+    }
+
+
+@router.post("/reset-for-reanalysis/batch")
+def reset_races_for_reanalysis_batch(payload: dict, db: Session = Depends(get_db)):
+    """複数レースをまとめてリセットする。payload={"race_ids":[..]}。1件の失敗が他を止めないようにする。"""
+    race_ids = payload.get("race_ids", [])
+    results = []
+    for rid in race_ids:
+        try:
+            results.append(reset_race_for_reanalysis(rid, db))
+        except HTTPException as e:
+            results.append({"race_id": rid, "error": e.detail})
+        except Exception as e:
+            results.append({"race_id": rid, "error": str(e)})
+    return {
+        "total": len(race_ids),
+        "succeeded": sum(1 for r in results if "error" not in r),
+        "failed": sum(1 for r in results if "error" in r),
+        "results": results,
+    }

@@ -51,6 +51,23 @@ def step1_import(payload):
     return r.json()
 
 
+def reset_race(race_id):
+    """
+    出走表・オッズ・結果は残したまま、予想関連データ(AI勝率・購入・見送り・EV結果)
+    だけを削除する。予想ロジックを変えて再検証したい時、スクレイピングをやり直さずに
+    使う(のんの要望により追加)。
+    """
+    r = requests.post(f"{API_BASE}/races/{race_id}/reset-for-reanalysis", timeout=90)
+    r.raise_for_status()
+    return r.json()
+
+
+def get_race(race_id):
+    r = requests.get(f"{API_BASE}/races/{race_id}", timeout=90)
+    r.raise_for_status()
+    return r.json()
+
+
 def step2_estimate(race_id):
     """2. 予想: Gemini 2段階分析(展開シミュレーション→勝率推定)"""
     r = requests.post(f"{API_BASE}/analyze/estimate/{race_id}", timeout=120)
@@ -137,6 +154,33 @@ def run_one_race(race_json, bankroll, dry_run=False):
         log("   出走表データが無いため予想をスキップします")
         return {"race_id": race_id, "stage": "no_entries"}
 
+    return run_predict_and_confirm(race_id, bankroll)
+
+
+def run_reanalysis_for_race(race_id, bankroll, reset=True):
+    """
+    既にDBに登録済みのレース(出走表・オッズ・結果あり)を、スクレイピングし直さずに
+    再予想する。予想ロジック(AIプロンプト等)を変更した後の再検証用
+    (のんの要望により追加)。
+    """
+    label = f"race_id={race_id}"
+    log(f"=== {label}(再予想) ===")
+
+    if reset:
+        log("0. 予想関連データをリセット(出走表・オッズ・結果は保持)...")
+        r = reset_race(race_id)
+        log(f"   購入{r['purchases_deleted']}件・見送り{r['skipped_bets_deleted']}件・EV結果{r['ev_results_deleted']}件を削除、証拠金を{r['bankroll_adjustment']:+.0f}円調整")
+
+    race = get_race(race_id)
+    if not race.get("actual_result"):
+        log("   このレースはまだ結果が確定していません。結果記録(手順5)はスキップします")
+
+    result = run_predict_and_confirm(race_id, bankroll, actual_result=race.get("actual_result"))
+    return result
+
+
+def run_predict_and_confirm(race_id, bankroll, actual_result=None):
+    """2〜5. 予想→投票プラン作成→投票→結果記録(race_json不要版)"""
     log("2. 予想(Gemini 2段階分析)...")
     try:
         est = step2_estimate(race_id)
@@ -154,10 +198,15 @@ def run_one_race(race_json, bankroll, dry_run=False):
     rec = step4_record_purchases(race_id, plan)
     log(f"   記録件数: {rec.get('recorded', n_items)}")
 
+    if not actual_result:
+        log("5. 結果記録...スキップ(結果未確定)")
+        return {"race_id": race_id, "stage": "predicted_no_result"}
+
     log("5. 結果記録...")
-    conf = step5_confirm_result(race_id, race_json)
-    if conf:
-        log(f"   確定: {conf.get('actual_result', conf)}")
+    r = requests.post(f"{API_BASE}/races/{race_id}/confirm-result", params={"actual_result": actual_result}, timeout=90)
+    r.raise_for_status()
+    conf = r.json()
+    log(f"   確定: {conf.get('actual_result', conf)}")
 
     return {"race_id": race_id, "stage": "done"}
 
@@ -166,17 +215,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="1レース分のJSONファイル")
     ap.add_argument("--dir", help="複数レース分のJSONファイルが入ったディレクトリ")
+    ap.add_argument("--race-ids", help="既存のrace_id(カンマ区切り)を再予想する。スクレイピングは行わない(例: 46,47,48)")
+    ap.add_argument("--no-reset", action="store_true", help="--race-ids使用時、リセットせずに(=既存の購入記録に追加する形で)再予想する。通常は指定しない")
     ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。未指定ならバックエンドの現在値を使用")
     ap.add_argument("--dry-run", action="store_true", help="データ取得(登録)までで止める")
     args = ap.parse_args()
-
-    files = []
-    if args.file:
-        files = [args.file]
-    elif args.dir:
-        files = sorted(glob.glob(os.path.join(args.dir, "*.json")))
-    else:
-        ap.error("--file か --dir のどちらかを指定してください")
 
     warmup_backend()
 
@@ -185,6 +228,30 @@ def main():
         log("証拠金は未指定のため、バックエンド側の現在の証拠金残高を自動使用します")
 
     summary = []
+
+    if args.race_ids:
+        race_ids = [int(x.strip()) for x in args.race_ids.split(",") if x.strip()]
+        for rid in race_ids:
+            try:
+                result = run_reanalysis_for_race(rid, bankroll, reset=not args.no_reset)
+                summary.append({"file": f"race_id={rid}", **result})
+            except Exception as e:
+                log(f"   エラー: {e}")
+                summary.append({"file": f"race_id={rid}", "stage": "error", "error": str(e)})
+            time.sleep(0.5)
+        log("=== サマリ ===")
+        for s in summary:
+            log(f"  {s['file']}: {s['stage']}")
+        return
+
+    files = []
+    if args.file:
+        files = [args.file]
+    elif args.dir:
+        files = sorted(glob.glob(os.path.join(args.dir, "*.json")))
+    else:
+        ap.error("--file か --dir か --race-ids のいずれかを指定してください")
+
     for fp in files:
         with open(fp, encoding="utf-8") as f:
             race_json = json.load(f)
