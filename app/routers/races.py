@@ -293,3 +293,31 @@ def reset_races_for_reanalysis_batch(payload: dict, db: Session = Depends(get_db
         "failed": sum(1 for r in results if "error" in r),
         "results": results,
     }
+
+
+@router.get("/for-reanalysis")
+def list_races_for_reanalysis(db: Session = Depends(get_db), limit: int = 100):
+    """
+    再予想(reset-for-reanalysis)の対象になりうるレース一覧。
+    結果確定済み・出走表のみのレースも含め、出走表があるレース全てを対象にする
+    (画面から手でコマンドを打たずに再予想できるようにするため、のんの要望により追加)。
+    """
+    races = (
+        db.query(models.Race)
+        .order_by(models.Race.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "venue_name": r.venue_name,
+            "race_number": r.race_number,
+            "race_date": r.race_date.strftime("%m/%d") if r.race_date else None,
+            "entry_count": len(r.entries),
+            "odds_count": len(r.odds_list),
+            "actual_result": r.actual_result,
+        }
+        for r in races
+        if len(r.entries) > 0
+    ]

@@ -84,6 +84,13 @@
     <div id="pendingList" class="result-box"></div>
   </section>
 
+  <section class="card">
+    <h2>🔁 予想を再実行(スクレイピングし直さない)</h2>
+    <p class="note">出走表・オッズ・結果はそのまま使い、AIの予想ロジックを変更した後に「予想→投票→結果確定」だけをやり直します。既存の購入記録・EV結果は自動でリセットされます。レース数が多いと時間がかかるので、実行中はこの画面を閉じないでください。</p>
+    <button id="reanalyzeAllBtn">全レースを再予想する</button>
+    <div id="reanalyzeProgress" class="result-box"></div>
+  </section>
+
 </div>
 
 <div id="tab-bankroll" class="tab-content">

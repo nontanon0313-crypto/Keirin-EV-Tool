@@ -632,6 +632,96 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
   }
 });
 
+// ---------- 🔁 予想を再実行(スクレイピングし直さない) ----------
+document.getElementById("reanalyzeAllBtn").addEventListener("click", async () => {
+  const box = document.getElementById("reanalyzeProgress");
+  const btn = document.getElementById("reanalyzeAllBtn");
+  const log = (msg) => { box.textContent += msg + "\n"; box.scrollTop = box.scrollHeight; };
+
+  if (!confirm("全レースの予想・購入記録・EV結果をリセットして再実行します。よろしいですか？")) return;
+
+  btn.disabled = true;
+  box.textContent = "";
+  try {
+    log("レース一覧を取得中...");
+    const listRes = await fetch(apiUrl("/races/for-reanalysis"));
+    const races = await listRes.json();
+    if (!listRes.ok) throw new Error(JSON.stringify(races));
+    log(`対象レース: ${races.length}件\n`);
+
+    let doneCount = 0, errorCount = 0;
+    for (const race of races) {
+      const label = `${race.venue_name}${race.race_number}R(id=${race.id})`;
+      log(`--- ${label} ---`);
+      try {
+        log("  0. リセット中...");
+        const resetRes = await fetch(apiUrl(`/races/${race.id}/reset-for-reanalysis`), { method: "POST" });
+        const resetData = await resetRes.json();
+        if (!resetRes.ok) throw new Error(JSON.stringify(resetData));
+
+        log("  1. 予想(Gemini)中...");
+        const estRes = await fetch(apiUrl(`/analyze/estimate/${race.id}`), { method: "POST" });
+        const estData = await estRes.json();
+        if (!estRes.ok) throw new Error(JSON.stringify(estData));
+
+        log("  2. 投票プラン作成中...");
+        const planRes = await fetch(apiUrl(`/ev/race-plan/${race.id}`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ race_id: race.id }),
+        });
+        const plan = await planRes.json();
+        if (!planRes.ok) throw new Error(JSON.stringify(plan));
+        const items = plan.items || [];
+        log(`     買い示唆 ${items.length}件`);
+
+        if (items.length) {
+          log("  3. 投票記録中...");
+          const bulkBody = {
+            items: items.map((it) => ({
+              race_id: race.id,
+              bet_type: it.bet_type,
+              combination: it.combination,
+              stake_amount: it.stake,
+              odds_at_purchase: it.odds_value,
+              win_prob_at_purchase: it.win_prob !== undefined ? it.win_prob : (it.estimated_win_prob_pct || 0) / 100,
+              ev_pct_at_purchase: it.ev_pct,
+            })),
+          };
+          const bulkRes = await fetch(apiUrl("/purchases/bulk"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bulkBody),
+          });
+          if (!bulkRes.ok) throw new Error(JSON.stringify(await bulkRes.json()));
+        }
+
+        if (race.actual_result) {
+          log("  4. 結果確定中...");
+          const confRes = await fetch(
+            apiUrl(`/races/${race.id}/confirm-result?actual_result=${encodeURIComponent(race.actual_result)}`),
+            { method: "POST" }
+          );
+          if (!confRes.ok) throw new Error(JSON.stringify(await confRes.json()));
+        } else {
+          log("  4. 結果未確定のためスキップ");
+        }
+
+        log("  → 完了\n");
+        doneCount++;
+      } catch (e) {
+        log(`  → エラー: ${e.message}\n`);
+        errorCount++;
+      }
+    }
+    log(`=== 完了: ${doneCount}件成功 / ${errorCount}件エラー ===`);
+  } catch (e) {
+    box.textContent += "\nエラー: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 // ---------- ④ 資金管理シミュレーション ----------
 
 // 検証タブを開いた時、実績の的中率・投資額加重平均オッズを自動入力する
