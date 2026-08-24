@@ -19,7 +19,7 @@ Claude(コーディングサンドボックス)にはRenderバックエンドや
   KEIRIN_API_BASE  … バックエンドのURL(既定: https://keirin-ev-tool.onrender.com)
   KEIRIN_BANKROLL  … 投票プラン作成に使う証拠金(円)。未指定なら/bankroll/currentを使う
 """
-import argparse, glob, json, os, sys, time
+import argparse, glob, json, os, re, sys, time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Event
@@ -167,20 +167,29 @@ def run_one_race(race_json, bankroll, dry_run=False):
 
     log("1. データ取得(登録)...")
     imp = step1_import(race_json)
-    race_id = imp["race_id"]
-    log(f"   race_id={race_id} venue={imp['venue_name']} entries+={imp['entries_created']} odds+={imp['odds_created']}")
+    race_id = imp.get("race_id")
+
+    if imp.get("skipped"):
+        # 出走選手がいない(そのjo/rnにレースが存在しない)枠。以前はここで
+        # entries_created等の存在しないキーを直読みしてKeyErrorになっていた
+        # (のんの実機運用で判明した不具合を受けて修正)。
+        log(f"   スキップ: {imp.get('reason', '出走表データが無いため')}")
+        return {"race_id": race_id, "stage": "skipped_empty"}
+
+    log(f"   race_id={race_id} venue={imp.get('venue_name')} entries+={imp.get('entries_created', 0)} odds+={imp.get('odds_created', 0)}")
     if imp.get("warnings"):
         for w in imp["warnings"]:
             log(f"   警告: {w}")
 
     if dry_run:
-        log("   --dry-run のためここで終了")
+        log("   --dry-run のためここで終了(予想は実行していません)")
         return {"race_id": race_id, "stage": "imported_only"}
 
-    if imp["entries_created"] == 0 and imp["entries_updated"] == 0:
+    if imp.get("entries_created", 0) == 0 and imp.get("entries_updated", 0) == 0:
         log("   出走表データが無いため予想をスキップします")
         return {"race_id": race_id, "stage": "no_entries"}
 
+    log("   (--dry-run無し: このまま予想〜結果確定まで実行します)")
     return run_predict_and_confirm(race_id, bankroll)
 
 
@@ -303,7 +312,7 @@ def main():
 
     # 成功とみなす("done"扱いにして次回スキップする)ステージ一覧。
     # エラー・レート制限切れは含めない(次回また試すため)
-    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "imported_only", "skipped_no_odds"}
+    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "imported_only", "skipped_no_odds", "skipped_empty"}
 
     def run_with_summary(task_key, task_label, fn):
         nonlocal stopped_for_rate_limit
@@ -366,7 +375,12 @@ def main():
     if args.file:
         files = [args.file]
     elif args.dir:
-        files = sorted(glob.glob(os.path.join(args.dir, "*.json")))
+        all_json = glob.glob(os.path.join(args.dir, "*.json"))
+        race_file_re = re.compile(r"^\d{8}_\d+_\d{2}\.json$")
+        files = sorted(f for f in all_json if race_file_re.match(os.path.basename(f)))
+        excluded = len(all_json) - len(files)
+        if excluded:
+            log(f"({excluded}件のファイルはレースJSONの命名パターン(YYYYMMDD_jo_RR.json)に一致しないため除外しました。例: status.json, debug_*.json)")
     else:
         ap.error("--file か --dir か --race-ids のいずれかを指定してください")
 
