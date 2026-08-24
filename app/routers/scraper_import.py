@@ -109,6 +109,7 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
 
     entry = payload.get("entry") or {}
     riders = entry.get("riders") or []
+    lines = entry.get("lines") or entry.get("lines_data") or None
     if race is None and not riders:
         # そのjo/rnに出走選手が1人もいない(=レース自体が存在しない枠)場合は、
         # 空のレコードを作らずにスキップする。
@@ -161,6 +162,7 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
             bank_id=bank.id if bank else None,
             grade=grade,
             race_stage=race_stage,
+            lines_data=lines if lines else None,
         )
         db.add(race)
         db.flush()
@@ -178,6 +180,8 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
             race.grade = grade
         if race_stage and not race.race_stage:
             race.race_stage = race_stage
+        if lines:
+            race.lines_data = lines
 
     # --- 出走表(entry)の取り込み ---
     entries_created = 0
@@ -190,27 +194,44 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
                 continue
             leg_style_raw = r.get("脚質") or ""
             leg_style = LEG_STYLE_MAP.get(leg_style_raw, leg_style_raw or None)
+            finish = r.get("直近着順") or {}
+            if not isinstance(finish, dict):
+                finish = {}
+            fields = dict(
+                player_name=r.get("選手名"),
+                region=r.get("地区") or None,
+                player_class=r.get("級班") or None,
+                age=_to_int(r.get("年齢")),
+                period=r.get("期") or None,
+                race_score=_to_float(r.get("競走得点")),
+                leg_style=leg_style,
+                waku_number=_to_int(r.get("枠番")),
+                s_count=_to_int(r.get("S")),
+                h_count=_to_int(r.get("H")),
+                b_count=_to_int(r.get("B")),
+                kimarite_nige=_to_int(r.get("逃")),
+                kimarite_makuri=_to_int(r.get("捲")),
+                kimarite_sashi=_to_int(r.get("差")),
+                kimarite_mark=_to_int(r.get("マ")),
+                finish_1st=_to_int(finish.get("1着")),
+                finish_2nd=_to_int(finish.get("2着")),
+                finish_3rd=_to_int(finish.get("3着")),
+                app_win_rate=_to_float(r.get("勝率")),
+                app_2nd_rate=_to_float(r.get("2連対率")),
+                app_3rd_rate=_to_float(r.get("3連対率")),
+                gear_ratio=_to_float(r.get("ギア倍数")),
+            )
             existing = existing_entries.get(car_no)
             if existing:
-                existing.player_name = r.get("選手名") or existing.player_name
-                existing.region = r.get("地区") or existing.region
-                existing.player_class = r.get("級班") or existing.player_class
-                existing.age = _to_int(r.get("年齢")) or existing.age
-                existing.period = r.get("期") or existing.period
-                existing.race_score = _to_float(r.get("競走得点")) or existing.race_score
-                existing.leg_style = leg_style or existing.leg_style
+                for k, v in fields.items():
+                    if v is not None:
+                        setattr(existing, k, v)
                 entries_updated += 1
             else:
                 db.add(models.Entry(
                     race_id=race.id,
                     car_number=car_no,
-                    player_name=r.get("選手名"),
-                    region=r.get("地区") or None,
-                    player_class=r.get("級班") or None,
-                    age=_to_int(r.get("年齢")),
-                    period=r.get("期") or None,
-                    race_score=_to_float(r.get("競走得点")),
-                    leg_style=leg_style,
+                    **{k: v for k, v in fields.items()},
                 ))
                 entries_created += 1
     else:

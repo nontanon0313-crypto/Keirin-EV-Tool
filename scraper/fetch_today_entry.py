@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from keirin_oddspark_scraper import parse_entry, get_soup, BASE
+from keirin_oddspark_scraper import parse_entry, parse_sp_race_info, merge_sp_into_entry, get_soup, BASE
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -57,6 +57,11 @@ def main():
             path = out / f"{today}_{jo}_{rn:02d}_entry.json"
             try:
                 entry = parse_entry(jo, today, rn)
+                try:
+                    sp = parse_sp_race_info(jo, today, rn)
+                    entry = merge_sp_into_entry(entry, sp)
+                except Exception:
+                    entry.setdefault("lines", [])
                 n = len(entry.get("riders", []))
                 post = close = post_iso = close_iso = None
                 if n > 0:

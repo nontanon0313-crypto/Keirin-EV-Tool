@@ -28,6 +28,12 @@ v2での変更点(のんの報告した「オッズ欠損」「読み込みタ�
    is_complete(欠損なしか)を各オッズデータに付与
 
 6. 出走表・結果の取得もタイムアウトした場合は1回だけ自動で追いリトライする
+
+7. スマホ版(SpRaceInfo.do)から並び予想(lines)・S/H/B・決まり手回数・着順履歴・
+   勝率等を追加取得するようにした(以前は「PC版のページに無い」と誤認していたが、
+   実際はスマホ版に存在し、未ログインでも取得できることを確認して追加)。
+   このパッチ適用前に取得済みの過去JSONにはこれらのフィールドが含まれていない。
+   必要な場合は出走表だけでも再取得すれば反映される。
 """
 import requests
 from bs4 import BeautifulSoup
@@ -130,6 +136,297 @@ def parse_entry(jo_code, kaisai_bi, race_no):
         "riders": sorted(unique, key=lambda x: int(x["車番"])),
         "url": f"{url}?joCode={jo_code}&kaisaiBi={kaisai_bi}&raceNo={race_no}",
     }
+
+
+SP_BASE = "https://sp.oddspark.com/keirin"
+
+
+def _sp_get_soup(jo_code, kaisai_bi, race_no):
+    """スマホ版 SpRaceInfo.do を取得"""
+    params = {
+        "kaisaiBi": str(kaisai_bi),
+        "joCode": str(jo_code),
+        "joCd": str(jo_code),
+        "raceNo": str(race_no),
+    }
+    url = f"{SP_BASE}/SpRaceInfo.do"
+    sess = get_session()
+    last_err = None
+    headers = {
+        **HEADERS,
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        ),
+    }
+    for i in range(3):
+        try:
+            r = sess.get(url, params=params, headers=headers, timeout=(5, 20))
+            r.raise_for_status()
+            r.encoding = r.apparent_encoding or "utf-8"
+            return BeautifulSoup(r.text, "html.parser"), (
+                f"{url}?kaisaiBi={kaisai_bi}&joCode={jo_code}&joCd={jo_code}&raceNo={race_no}"
+            )
+        except Exception as e:
+            last_err = e
+            if i < 2:
+                time.sleep(1.0 * (i + 1))
+    raise RuntimeError(f"SpRaceInfo取得失敗: {last_err}")
+
+
+def _parse_order_arrival_cell(td):
+    """着順1-2-3-外 と 勝率・2連対・3連対 を分離"""
+    raw = td.get_text(" ", strip=True) if td else ""
+    raw = re.sub(r"\s+", " ", raw)
+    finish = {"1着": None, "2着": None, "3着": None, "着外": None}
+    win_rate = second_rate = third_rate = None
+    # 例: 6-11-2-9 21.4% 60.7% 67.9%
+    m = re.search(
+        r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*"
+        r"([\d.]+)\s*%\s*([\d.]+)\s*%\s*([\d.]+)\s*%",
+        raw,
+    )
+    if m:
+        finish = {"1着": int(m.group(1)), "2着": int(m.group(2)), "3着": int(m.group(3)), "着外": int(m.group(4))}
+        win_rate = float(m.group(5))
+        second_rate = float(m.group(6))
+        third_rate = float(m.group(7))
+    else:
+        m2 = re.search(r"(\d+)\s*-\s*(\d+)\s*-\s*(\d+)\s*-\s*(\d+)", raw)
+        if m2:
+            finish = {
+                "1着": int(m2.group(1)),
+                "2着": int(m2.group(2)),
+                "3着": int(m2.group(3)),
+                "着外": int(m2.group(4)),
+            }
+        pcts = re.findall(r"([\d.]+)\s*%", raw)
+        if len(pcts) >= 1:
+            win_rate = float(pcts[0])
+        if len(pcts) >= 2:
+            second_rate = float(pcts[1])
+        if len(pcts) >= 3:
+            third_rate = float(pcts[2])
+    return finish, win_rate, second_rate, third_rate, raw
+
+
+def _parse_name_full(text):
+    """例: 佐藤慎太郎 (福島) 46歳/78期/S級S班"""
+    text = (text or "").replace("\u3000", " ").replace("　", " ")
+    name = pref = age = period = klass = ""
+    m = re.search(
+        r"^(.+?)\s*[（(]\s*([^)）]+)\s*[)）]\s*(\d+)歳\s*/\s*(\d+)期\s*/\s*(.+)?$",
+        text.strip(),
+    )
+    if m:
+        name = m.group(1).strip()
+        pref = m.group(2).strip()
+        age = m.group(3)
+        period = m.group(4)
+        klass = (m.group(5) or "").strip()
+    else:
+        name = text.strip()
+    return name, pref, age, period, klass
+
+
+def parse_sp_race_info(jo_code, kaisai_bi, race_no):
+    """
+    スマホ版 SpRaceInfo.do から:
+      - 並び予想（ライン）
+      - 選手基本情報（S/H/B・決まり手・着順・勝率・ギア・コメント等）
+    を取得する。
+    """
+    soup, sp_url = _sp_get_soup(jo_code, kaisai_bi, race_no)
+    out = {
+        "lines": [],
+        "lines_detail": [],
+        "narabi_comment": None,
+        "riders_sp": [],
+        "sp_url": sp_url,
+    }
+
+    # --- 並び予想 ---
+    table = soup.select_one("table.narabi-table")
+    if table:
+        icon_tr = table.select_one("tr.narabi-icon")
+        txt_tr = table.select_one("tr.narabi-txt")
+        if icon_tr:
+            icon_cells = icon_tr.find_all("td")
+            leg_cells = txt_tr.find_all("td") if txt_tr else []
+            current_cars, current_roles = [], []
+            lines, details = [], []
+
+            def flush():
+                nonlocal current_cars, current_roles
+                if current_cars:
+                    lines.append(list(current_cars))
+                    details.append({"cars": list(current_cars), "roles": list(current_roles)})
+                    current_cars, current_roles = [], []
+
+            for i, td in enumerate(icon_cells):
+                img = td.find("img")
+                car = None
+                if img and img.get("src"):
+                    m = re.search(r"num0?([1-9])\.svg", img["src"])
+                    if m:
+                        car = int(m.group(1))
+                role = ""
+                if i < len(leg_cells):
+                    span = leg_cells[i].find("span", class_="spanLeg")
+                    role = (span.get_text(strip=True) if span else leg_cells[i].get_text(strip=True)) or ""
+                if car is None:
+                    flush()
+                    continue
+                current_cars.append(car)
+                current_roles.append(role)
+            flush()
+            out["lines"] = lines
+            out["lines_detail"] = details
+        p = table.find_next("p")
+        if p:
+            c = p.get_text(" ", strip=True)
+            if c:
+                out["narabi_comment"] = c
+
+    # --- 選手コメント ---
+    comments = {}
+    ct = soup.select_one("table.commentTable")
+    if ct:
+        for row in ct.find_all("tr")[1:]:
+            cells = row.find_all(["td", "th"])
+            if len(cells) < 4:
+                continue
+            car = re.sub(r"\D", "", cells[1].get_text(strip=True) or cells[0].get_text(strip=True))
+            if car:
+                comments[car] = cells[-1].get_text(" ", strip=True)
+
+    # --- 基本情報テーブル（S/H/B・決まり手・着順・勝率等） ---
+    bet_table = None
+    for t in soup.find_all("table"):
+        cls = " ".join(t.get("class") or [])
+        if "bet-table" in cls or "newTb02" in cls:
+            bet_table = t
+            break
+    if bet_table:
+        for row in bet_table.find_all("tr"):
+            ban = row.select_one("td.newStcBan, td.p0.newStcBan")
+            if not ban:
+                # class に newStcBan を含む td
+                for td in row.find_all("td"):
+                    if "newStcBan" in (td.get("class") or []):
+                        ban = td
+                        break
+            if not ban:
+                continue
+            car_s = re.sub(r"\D", "", ban.get_text(strip=True))
+            if not car_s or not re.fullmatch(r"[1-9]", car_s):
+                continue
+
+            def cell(sel):
+                el = row.select_one(sel)
+                return el.get_text(" ", strip=True) if el else ""
+
+            def cell_int(sel):
+                t = cell(sel)
+                m = re.search(r"-?\d+", t.replace(",", ""))
+                return int(m.group()) if m else None
+
+            def cell_float(sel):
+                t = cell(sel)
+                m = re.search(r"\d+(?:\.\d+)?", t.replace(",", ""))
+                return float(m.group()) if m else None
+
+            name_full = cell("td.tdNameFull, td.stcNameFull")
+            name, pref, age, period, klass = _parse_name_full(name_full)
+            if not name:
+                name = cell("td.tdNameS, td.newStcNameS")
+
+            order_td = row.select_one("td.tdOrderArrival")
+            finish, win_rate, second_rate, third_rate, order_raw = _parse_order_arrival_cell(order_td)
+
+            waku_el = row.select_one("td.newStcWakuban")
+            waku = None
+            if waku_el:
+                wm = re.search(r"\d+", waku_el.get_text(strip=True))
+                waku = int(wm.group()) if wm else None
+
+            rider = {
+                "車番": car_s,
+                "枠番": waku,
+                "選手名": name,
+                "地区": pref,
+                "年齢": age,
+                "期": period,
+                "級班": klass,
+                "競走得点": cell("td.tdRaceScore") or None,
+                "脚質": cell("td.tdLeg") or None,
+                "逃": cell_int("td.tdEscape"),
+                "捲": cell_int("td.tdTurnOver"),
+                "差": cell_int("td.tdSashi"),
+                "マ": cell_int("td.tdMa"),
+                "S": cell_int("td.tdS"),
+                "H": cell_int("td.tdH"),
+                "B": cell_int("td.tdB"),
+                "ギア倍数": cell_float("td.tdGear"),
+                "直近着順": finish,
+                "直近着順_raw": order_raw,
+                "勝率": win_rate,
+                "2連対率": second_rate,
+                "3連対率": third_rate,
+                "コメント": comments.get(car_s),
+                "今場所前場所": cell("td.tdPlace") or None,
+            }
+            out["riders_sp"].append(rider)
+
+    return out
+
+
+def parse_narabi_from_sp(jo_code, kaisai_bi, race_no):
+    """後方互換: 並びだけ欲しい場合"""
+    info = parse_sp_race_info(jo_code, kaisai_bi, race_no)
+    return {
+        "lines": info.get("lines") or [],
+        "lines_detail": info.get("lines_detail") or [],
+        "narabi_comment": info.get("narabi_comment"),
+        "sp_url": info.get("sp_url"),
+    }
+
+
+def merge_sp_into_entry(entry, sp_info):
+    """PC出走表 entry に SP のライン・選手詳細をマージ"""
+    if not entry:
+        entry = {}
+    entry["lines"] = sp_info.get("lines") or []
+    entry["lines_detail"] = sp_info.get("lines_detail") or []
+    entry["narabi_comment"] = sp_info.get("narabi_comment")
+    entry["sp_url"] = sp_info.get("sp_url")
+
+    by_car = {str(r.get("車番")): r for r in (sp_info.get("riders_sp") or [])}
+    riders = entry.get("riders") or []
+    if not riders and by_car:
+        # SPだけで出走表を構成
+        entry["riders"] = sorted(by_car.values(), key=lambda x: int(x["車番"]))
+        return entry
+
+    merged = []
+    for r in riders:
+        car = str(r.get("車番"))
+        sp = by_car.get(car) or {}
+        for k, v in sp.items():
+            if v is None or v == "":
+                continue
+            if k == "選手名" and r.get("選手名"):
+                continue  # PC側の正式名を優先
+            r[k] = v
+        merged.append(r)
+    # SPにだけいる車番
+    have = {str(r.get("車番")) for r in merged}
+    for car, sp in by_car.items():
+        if car not in have:
+            merged.append(sp)
+    entry["riders"] = sorted(merged, key=lambda x: int(x["車番"]))
+    return entry
+
 
 def _parse_raw_grid(soup, debug=False, exclude_car=None):
     """
@@ -441,6 +738,19 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
             data["entry"] = {}
             if attempt == 0:
                 time.sleep(1.0)
+
+    # SP版: 並び予想 + S/H/B・決まり手・着順・勝率・コメント等
+    if data.get("entry") is not None:
+        try:
+            sp_info = parse_sp_race_info(jo_code, kaisai_bi, race_no)
+            data["entry"] = merge_sp_into_entry(data.get("entry") or {}, sp_info)
+            data.pop("sp_error", None)
+        except Exception as e:
+            data["sp_error"] = str(e)
+            if data.get("entry") is not None:
+                data["entry"].setdefault("lines", [])
+        time.sleep(0.5)
+
     time.sleep(1.0)
 
     n_riders = len(data["entry"].get("riders", [])) if data.get("entry") else None
@@ -476,6 +786,11 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
     data["data_quality"] = {
         "entry_ok": bool(data.get("entry", {}).get("riders")),
         "result_ok": bool(data.get("result", {}).get("results")),
+        "lines_ok": bool(data.get("entry", {}).get("lines")),
+        "sp_stats_ok": any(
+            (r.get("S") is not None or r.get("逃") is not None)
+            for r in (data.get("entry", {}).get("riders") or [])
+        ),
         "odds_complete": odds_complete,
         "all_complete": bool(data.get("entry", {}).get("riders")) and bool(data.get("result", {}).get("results")) and all(odds_complete.values()),
     }

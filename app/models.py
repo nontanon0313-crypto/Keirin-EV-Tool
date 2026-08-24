@@ -70,11 +70,11 @@ class Entry(Base):
     evaluation_rank = Column(String(20), nullable=True)  # No.1クラウン等
     race_score = Column(Float, nullable=True)  # 競走得点
     leg_style = Column(String(20), nullable=True)  # 脚質: 逃/追込/両/自力等
-    s_count = Column(Integer, nullable=True)
+    s_count = Column(Integer, nullable=True)  # S(失格等のペナルティ回数。逃げ回数ではない)
 
     # 直近成績
-    h_count = Column(Integer, nullable=True)  # 逃げ回数
-    b_count = Column(Integer, nullable=True)  # まくり回数
+    h_count = Column(Integer, nullable=True)  # H(落車等のペナルティ回数)
+    b_count = Column(Integer, nullable=True)  # B(妨害等のペナルティ回数)
     kimarite_nige = Column(Integer, nullable=True)
     kimarite_makuri = Column(Integer, nullable=True)
     kimarite_sashi = Column(Integer, nullable=True)
