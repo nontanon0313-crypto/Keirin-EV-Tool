@@ -311,8 +311,13 @@ def main():
     stopped_for_rate_limit = False
 
     # 成功とみなす("done"扱いにして次回スキップする)ステージ一覧。
-    # エラー・レート制限切れは含めない(次回また試すため)
-    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "imported_only", "skipped_no_odds", "skipped_empty"}
+    # エラー・レート制限切れは含めない(次回また試すため)。
+    # "imported_only"(--dry-runで意図的にそこで止めた状態)は含めない。
+    # 以前は含めていたため、--dry-runで一度動かした後にdry-run無しで
+    # 再実行すると、登録済みだった分が「もう完了済み」と誤認され、
+    # 一度も予想が実行されないまま進捗ファイル上だけ完了扱いになっていた
+    # (のんの実機運用で判明した不具合を受けて修正)。
+    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "skipped_no_odds", "skipped_empty"}
 
     def run_with_summary(task_key, task_label, fn):
         nonlocal stopped_for_rate_limit
@@ -324,7 +329,7 @@ def main():
         try:
             result = fn()
             summary.append({"file": task_label, **result})
-            if result.get("stage") in SUCCESS_STAGES:
+            if not args.dry_run and result.get("stage") in SUCCESS_STAGES:
                 progress[task_key] = "done"
                 save_progress(args.progress_file, progress)
         except RateLimitExhausted as e:
@@ -354,12 +359,16 @@ def main():
         else:
             with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
                 futs = {}
+                skipped_count = 0
                 for rid in race_ids:
                     if _stop_event.is_set():
                         break
                     if progress.get(f"reanalysis:{rid}") == "done":
+                        skipped_count += 1
                         continue
                     futs[ex.submit(run_reanalysis_for_race, rid, None, not args.no_reset)] = rid
+                if skipped_count:
+                    log(f"({skipped_count}件は進捗ファイルに完了記録があるためスキップします)")
                 for fut in as_completed(futs):
                     rid = futs[fut]
                     run_with_summary(f"reanalysis:{rid}", f"race_id={rid}", lambda fut=fut: fut.result())
@@ -401,12 +410,16 @@ def main():
 
         with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
             futs = {}
+            skipped_count = 0
             for fp in files:
                 if _stop_event.is_set():
                     break
                 if progress.get(f"file:{fp}") == "done":
+                    skipped_count += 1
                     continue
                 futs[ex.submit(load_and_run, fp)] = fp
+            if skipped_count:
+                log(f"({skipped_count}件は進捗ファイルに完了記録があるためスキップします)")
             for fut in as_completed(futs):
                 fp = futs[fut]
                 run_with_summary(f"file:{fp}", fp, lambda fut=fut: fut.result())
