@@ -745,6 +745,11 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
         });
         const plan = await planRes.json();
         if (!planRes.ok) throw new Error(JSON.stringify(plan));
+        if (plan.skipped_no_odds) {
+          log("  → オッズデータが無いためスキップ\n");
+          doneCount++;
+          continue;
+        }
         const items = plan.items || [];
         log(`     買い示唆 ${items.length}件`);
 

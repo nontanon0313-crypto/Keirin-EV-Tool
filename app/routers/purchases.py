@@ -104,15 +104,8 @@ def get_calibration_factors(db: Session) -> dict:
             actual_win_rate = None
             predicted_avg = None
 
-        # 以前は「必要数に達するまで補正係数1.0」のon/off切り替えだったが、
-        # これだと大穴帯(必要数8000件等)は事実上永遠に補正されない。
-        # サンプル数に応じて段階的に補正を効かせる方式に変更(のんの要望により修正)。
-        factor = 1.0
-        if count > 0 and predicted_avg:
-            raw_factor = calc.compute_calibration_factor(actual_win_rate, predicted_avg)
-            factor = calc.shrunk_calibration_factor(raw_factor, count, required)
-
         deviation_pct = None
+        significance_p_value = None
         significance_p_value_pct = None
         if actual_win_rate is not None and predicted_avg is not None:
             # 実績的中率 - 予想平均確率。プラス=予想が実際より低め(過小評価)、
@@ -120,9 +113,18 @@ def get_calibration_factors(db: Session) -> dict:
             deviation_pct = round((actual_win_rate - predicted_avg) * 100, 2)
             # このズレが単なる偶然のブレなのか、統計的に有意なのかを二項検定で判定する
             # (のんの指摘により追加)。小さいほど「偶然では説明しにくい」。
-            significance_p_value_pct = round(
-                calc.binomial_lower_tail_p(wins, count, predicted_avg) * 100, 4
-            )
+            significance_p_value = calc.binomial_lower_tail_p(wins, count, predicted_avg)
+            significance_p_value_pct = round(significance_p_value * 100, 4)
+
+        # 以前は「必要数に達するまで補正係数1.0」のon/off切り替えだったが、
+        # これだと大穴帯(必要数8000件等)は事実上永遠に補正されない。
+        # サンプル数に応じて段階的に補正を効かせる方式に変更。
+        # さらに、統計的証拠(p値)が強い場合はサンプル数不足でも早めに補正を
+        # 効かせるようにした(のんの実機検証=組み合わせ確率の系統的過大評価を受けて追加)。
+        factor = 1.0
+        if count > 0 and predicted_avg:
+            raw_factor = calc.compute_calibration_factor(actual_win_rate, predicted_avg)
+            factor = calc.shrunk_calibration_factor(raw_factor, count, required, p_value=significance_p_value)
 
         # 「予想精度%」= 予想確率と実績的中率の一致度(データ充足度とは別物)。
         # is_reliable/required_sample_countは「どれだけ実績データに裏付けられているか」であり、

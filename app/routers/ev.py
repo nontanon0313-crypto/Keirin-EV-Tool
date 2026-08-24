@@ -327,7 +327,18 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
-        raise HTTPException(400, "オッズデータがありません")
+        # 以前は400エラーで止めていたが、再予想バッチ処理中にオッズ無しレースが
+        # 混ざっていると、そこでバッチ全体がエラー扱いになってしまっていた。
+        # オッズが無いのはこのレース固有の事情(取得漏れ等)であり、買い示唆が
+        # 出せないだけなので、正常応答としてスキップ可能な形にした
+        # (のんの実機運用で判明した問題を受けて修正)。
+        return {
+            "race_id": race_id,
+            "message": "オッズデータがないため、このレースは投票プランを作成できません(スキップ)",
+            "items": [],
+            "total_stake": 0,
+            "skipped_no_odds": True,
+        }
 
     candidates = []
     # 買い示唆が1件も無かった場合でも、評価は全て済んでいるこの組み合わせ群を

@@ -237,6 +237,9 @@ def run_predict_and_confirm(race_id, bankroll, actual_result=None):
 
     log("3. 投票プラン作成...")
     plan = step3_race_plan(race_id, bankroll)
+    if plan.get("skipped_no_odds"):
+        log("   オッズデータが無いためスキップします")
+        return {"race_id": race_id, "stage": "skipped_no_odds"}
     n_items = len(plan.get("items", []))
     log(f"   買い示唆 {n_items}件 (総額{plan.get('total_stake', 0)}円)")
 
@@ -300,7 +303,7 @@ def main():
 
     # 成功とみなす("done"扱いにして次回スキップする)ステージ一覧。
     # エラー・レート制限切れは含めない(次回また試すため)
-    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "imported_only"}
+    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "imported_only", "skipped_no_odds"}
 
     def run_with_summary(task_key, task_label, fn):
         nonlocal stopped_for_rate_limit

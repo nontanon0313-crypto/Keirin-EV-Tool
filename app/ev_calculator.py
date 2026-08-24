@@ -320,7 +320,7 @@ def prediction_accuracy_pct(actual_win_rate: float, predicted_avg_prob: float) -
     return round(ratio * 100, 1)
 
 
-def shrunk_calibration_factor(raw_factor: float, sample_count: int, required_sample_count: int) -> float:
+def shrunk_calibration_factor(raw_factor: float, sample_count: int, required_sample_count: int, p_value: float = None) -> float:
     """
     サンプル数が必要数(required_sample_count)に満たなくても、集まった分だけ
     段階的に補正を効かせる(のんの要望により追加)。
@@ -329,10 +329,33 @@ def shrunk_calibration_factor(raw_factor: float, sample_count: int, required_sam
     実質永遠に補正されないままになる。
     ここでは shrinkage(サンプル数の割合)で「1.0(無補正)」と「実績ベースの係数」を
     滑らかに按分する。データが少ないうちは無補正に近く、データが増えるほど実績を信頼する。
+
+    p_value(統計的有意性)による重み引き上げを追加(のんの実機検証で判明した、
+    組み合わせ確率の系統的な過大評価を受けて追加)。
+    「補正にどれだけのサンプル数が必要か」と「補正が必要だという統計的証拠が
+    どれだけ強いか」は別の問題。サンプル数ベースのweightだけだと、p値が
+    ほぼ0%(=偶然では説明できないほど明確なズレ)であっても、低確率帯は
+    必要数が数千件と大きいため何ヶ月も無補正のまま放置されてしまう。
+    ここではp値が十分小さい(証拠が強い)場合、weightを底上げする。
+    あくまで「本当に確からしい」場合のみ早めに効かせる設計であり、
+    サンプルが少なすぎる(ノイズの影響が大きい)状態でむやみに補正するわけではない。
     """
     if required_sample_count <= 0:
         return 1.0
     weight = min(1.0, sample_count / required_sample_count)
+
+    if p_value is not None and sample_count >= 50:
+        # p値が非常に小さい(統計的に確からしい)ほど、weightの下限を引き上げる。
+        # p値0.1%未満なら最低70%、1%未満なら最低50%、5%未満なら最低30%は信頼する。
+        # (閾値・下限値は保守的に設定。過剰補正を避けるため、証拠が弱い場合は
+        # 通常のサンプル数ベースweightのみを使う)
+        if p_value < 0.001:
+            weight = max(weight, 0.7)
+        elif p_value < 0.01:
+            weight = max(weight, 0.5)
+        elif p_value < 0.05:
+            weight = max(weight, 0.3)
+
     return 1.0 * (1 - weight) + raw_factor * weight
 
 
