@@ -234,8 +234,19 @@ def run_reanalysis_for_race(race_id, bankroll=None, reset=True):
     return result
 
 
+_bankroll_lock = Lock()  # 証拠金を読んで使う一連の処理(投票プラン作成〜投票記録)を直列化する
+
+
 def run_predict_and_confirm(race_id, bankroll, actual_result=None):
-    """2〜5. 予想→投票プラン作成→投票→結果記録(race_json不要版)"""
+    """
+    2〜5. 予想→投票プラン作成→投票→結果記録(race_json不要版)。
+
+    予想(Gemini、時間がかかる部分)は並列実行してよいが、投票プラン作成〜投票記録は
+    証拠金を読んで使う一連の処理のため、複数レースが同時に行うと「まだ誰も
+    引き落としていない同じ証拠金残高」を見て計算してしまい、1レースあたりの
+    上限(証拠金×max_race_pct)を超えて使われてしまう(のんの実機運用で判明した
+    不具合を受けて修正)。ここだけロックで直列化する。
+    """
     log("2. 予想(Gemini 2段階分析)...")
     try:
         est = step2_estimate(race_id)
@@ -244,17 +255,18 @@ def run_predict_and_confirm(race_id, bankroll, actual_result=None):
         log(f"   予想に失敗しました: {e}")
         return {"race_id": race_id, "stage": "estimate_failed", "error": str(e)}
 
-    log("3. 投票プラン作成...")
-    plan = step3_race_plan(race_id, bankroll)
-    if plan.get("skipped_no_odds"):
-        log("   オッズデータが無いためスキップします")
-        return {"race_id": race_id, "stage": "skipped_no_odds"}
-    n_items = len(plan.get("items", []))
-    log(f"   買い示唆 {n_items}件 (総額{plan.get('total_stake', 0)}円)")
+    with _bankroll_lock:
+        log("3. 投票プラン作成...")
+        plan = step3_race_plan(race_id, bankroll)
+        if plan.get("skipped_no_odds"):
+            log("   オッズデータが無いためスキップします")
+            return {"race_id": race_id, "stage": "skipped_no_odds"}
+        n_items = len(plan.get("items", []))
+        log(f"   買い示唆 {n_items}件 (総額{plan.get('total_stake', 0)}円)")
 
-    log("4. 投票(記録)...")
-    rec = step4_record_purchases(race_id, plan)
-    log(f"   記録件数: {rec.get('recorded', n_items)}")
+        log("4. 投票(記録)...")
+        rec = step4_record_purchases(race_id, plan)
+        log(f"   記録件数: {rec.get('recorded', n_items)}")
 
     if not actual_result:
         log("5. 結果記録...スキップ(結果未確定)")
