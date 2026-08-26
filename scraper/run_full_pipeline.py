@@ -193,59 +193,39 @@ def run_one_race(race_json, bankroll, dry_run=False):
     return run_predict_and_confirm(race_id, bankroll)
 
 
-REANALYSIS_FIXED_BANKROLL = 1_000_000  # 再予想を始める前に、証拠金をこの額に一度だけリセットする
-
-
-def reset_bankroll_to_fixed():
-    """
-    再予想バッチの開始前に、証拠金を固定額にリセットする。
-    各レースのrace-planに固定値を都度渡す方式だと、投票プラン計算(仮の額)と
-    実際の購入記録時の残高増減(実際の残高)がズレてしまうため、実際の残高
-    そのものを最初に揃えてから、あとは通常通り自然に増減させる方式にした
-    (のんの要望を受けて修正)。
-    """
-    r = requests.post(f"{API_BASE}/bankroll/set", json={"initial_balance": REANALYSIS_FIXED_BANKROLL}, timeout=90)
-    r.raise_for_status()
-    log(f"証拠金を{REANALYSIS_FIXED_BANKROLL:,}円にリセットしました")
+FIXED_BANKROLL = 1_000_000  # 検証・集計目的の投票プランは常にこの額を使う(実際の証拠金残高とは無関係)
 
 
 def run_reanalysis_for_race(race_id, bankroll=None, reset=True):
     """
     既にDBに登録済みのレース(出走表・オッズ・結果あり)を、スクレイピングし直さずに
     再予想する。予想ロジック(AIプロンプト等)を変更した後の再検証用。
-
-    証拠金は、この関数の呼び出し前に(main側で)固定額にリセットされている前提。
-    ここでのbankroll引数はrace-planに渡さず、サーバー側の実際の残高(=リセット後の
-    値から自然に増減したもの)をそのまま使う。
     """
     label = f"race_id={race_id}"
-    log(f"=== {label}(再予想、証拠金{REANALYSIS_FIXED_BANKROLL:,}円固定) ===")
+    log(f"=== {label}(再予想) ===")
 
     if reset:
         log("0. 予想関連データをリセット(出走表・オッズ・結果は保持)...")
         r = reset_race(race_id)
-        log(f"   購入{r['purchases_deleted']}件・見送り{r['skipped_bets_deleted']}件・EV結果{r['ev_results_deleted']}件を削除、証拠金を{r['bankroll_adjustment']:+.0f}円調整")
+        log(f"   購入{r['purchases_deleted']}件・見送り{r['skipped_bets_deleted']}件・EV結果{r['ev_results_deleted']}件を削除")
 
     race = get_race(race_id)
     if not race.get("actual_result"):
         log("   このレースはまだ結果が確定していません。結果記録(手順5)はスキップします")
 
-    result = run_predict_and_confirm(race_id, None, actual_result=race.get("actual_result"))
+    result = run_predict_and_confirm(race_id, FIXED_BANKROLL, actual_result=race.get("actual_result"))
     return result
-
-
-_bankroll_lock = Lock()  # 証拠金を読んで使う一連の処理(投票プラン作成〜投票記録)を直列化する
 
 
 def run_predict_and_confirm(race_id, bankroll, actual_result=None):
     """
     2〜5. 予想→投票プラン作成→投票→結果記録(race_json不要版)。
 
-    予想(Gemini、時間がかかる部分)は並列実行してよいが、投票プラン作成〜投票記録は
-    証拠金を読んで使う一連の処理のため、複数レースが同時に行うと「まだ誰も
-    引き落としていない同じ証拠金残高」を見て計算してしまい、1レースあたりの
-    上限(証拠金×max_race_pct)を超えて使われてしまう(のんの実機運用で判明した
-    不具合を受けて修正)。ここだけロックで直列化する。
+    証拠金は実際の残高を読み書きせず、呼び出し元が渡した固定額(検証・集計目的なら
+    FIXED_BANKROLL)をそのまま計算に使うだけなので、複数レースを同時実行しても
+    競合しない(以前は実際の残高を読み書きしていたため、複数レース同時実行時に
+    上限を超えて使われる不具合があったが、証拠金を実際に増減させない設計に
+    変更したことで根本的に解消した。のんの要望により修正)。
     """
     log("2. 予想(Gemini 2段階分析)...")
     try:
@@ -255,18 +235,17 @@ def run_predict_and_confirm(race_id, bankroll, actual_result=None):
         log(f"   予想に失敗しました: {e}")
         return {"race_id": race_id, "stage": "estimate_failed", "error": str(e)}
 
-    with _bankroll_lock:
-        log("3. 投票プラン作成...")
-        plan = step3_race_plan(race_id, bankroll)
-        if plan.get("skipped_no_odds"):
-            log("   オッズデータが無いためスキップします")
-            return {"race_id": race_id, "stage": "skipped_no_odds"}
-        n_items = len(plan.get("items", []))
-        log(f"   買い示唆 {n_items}件 (総額{plan.get('total_stake', 0)}円)")
+    log("3. 投票プラン作成...")
+    plan = step3_race_plan(race_id, bankroll)
+    if plan.get("skipped_no_odds"):
+        log("   オッズデータが無いためスキップします")
+        return {"race_id": race_id, "stage": "skipped_no_odds"}
+    n_items = len(plan.get("items", []))
+    log(f"   買い示唆 {n_items}件 (総額{plan.get('total_stake', 0)}円)")
 
-        log("4. 投票(記録)...")
-        rec = step4_record_purchases(race_id, plan)
-        log(f"   記録件数: {rec.get('recorded', n_items)}")
+    log("4. 投票(記録)...")
+    rec = step4_record_purchases(race_id, plan)
+    log(f"   記録件数: {rec.get('recorded', n_items)}")
 
     if not actual_result:
         log("5. 結果記録...スキップ(結果未確定)")
@@ -306,7 +285,7 @@ def main():
     ap.add_argument("--dir", help="複数レース分のJSONファイルが入ったディレクトリ")
     ap.add_argument("--race-ids", help="既存のrace_id(カンマ区切り)を再予想する。スクレイピングは行わない(例: 46,47,48)")
     ap.add_argument("--no-reset", action="store_true", help="--race-ids使用時、リセットせずに(=既存の購入記録に追加する形で)再予想する。通常は指定しない")
-    ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。--dir/--fileの新規取り込みで使用(未指定ならバックエンドの現在値)。--race-ids(再予想)は常に100万円固定で、この指定は無視される")
+    ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。未指定なら固定100万円を使用(検証・集計目的のため)")
     ap.add_argument("--dry-run", action="store_true", help="データ取得(登録)までで止める")
     ap.add_argument("--concurrency", type=int, default=1, help="同時に処理するレース数(既定1=逐次)。Geminiの利用枠に応じて調整してください")
     ap.add_argument("--progress-file", default=PROGRESS_DEFAULT_PATH, help=f"進捗記録ファイル(既定: {PROGRESS_DEFAULT_PATH})。既に成功済みのタスクは自動でスキップし、Gemini利用枠切れで停止した後の再実行では続きから再開する")
@@ -316,7 +295,8 @@ def main():
 
     bankroll = args.bankroll
     if bankroll is None and not args.dry_run:
-        log("証拠金(--dir/--file用)は未指定のため、バックエンド側の現在の証拠金残高を自動使用します")
+        log(f"証拠金(--dir/--file用)は未指定のため、固定{FIXED_BANKROLL:,}円を使用します(検証・集計目的のため実際の残高は使いません)")
+        bankroll = FIXED_BANKROLL
 
     progress = load_progress(args.progress_file)
     summary = []
@@ -356,12 +336,7 @@ def main():
 
     if args.race_ids:
         race_ids = [int(x.strip()) for x in args.race_ids.split(",") if x.strip()]
-        log(f"対象レース数: {len(race_ids)}件(同時実行数: {args.concurrency})")
-        if not progress:
-            log(f"初回実行のため、証拠金を{REANALYSIS_FIXED_BANKROLL:,}円にリセットします")
-            reset_bankroll_to_fixed()
-        else:
-            log(f"進捗ファイルに既存の記録があるため、証拠金はリセットしません(前回の続きから再開)")
+        log(f"対象レース数: {len(race_ids)}件(同時実行数: {args.concurrency}, 証拠金: 固定{FIXED_BANKROLL:,}円)")
         if args.concurrency <= 1:
             for rid in race_ids:
                 if _stop_event.is_set():

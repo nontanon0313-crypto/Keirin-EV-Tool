@@ -17,8 +17,8 @@ def create_purchase(purchase: schemas.PurchaseCreate, db: Session = Depends(get_
     db.add(obj)
     db.commit()
     db.refresh(obj)
-    # 購入した分だけ証拠金残高を減算する
-    bankroll_router.adjust_balance(db, -purchase.stake_amount)
+    # 証拠金残高は購入・結果確定では動かさない(証拠金はユーザー自身の資金管理として
+    # 独立させ、予想・投票プラン・集計・検証には影響させない。のんの要望により変更)
     return obj
 
 
@@ -39,9 +39,7 @@ def create_purchases_bulk(payload: schemas.PurchaseBulkCreate, db: Session = Dep
     for obj in objs:
         db.refresh(obj)
 
-    total_stake = sum(item.stake_amount for item in payload.items)
-    bankroll_router.adjust_balance(db, -total_stake)
-
+    # 証拠金残高は動かさない(上記と同じ理由)
     return {"created_count": len(objs), "purchase_ids": [o.id for o in objs]}
 
 
@@ -56,8 +54,7 @@ def update_purchase_result(purchase_id: int, update: schemas.PurchaseResultUpdat
     obj.payout_amount = update.payout_amount
     obj.final_odds = update.final_odds
     db.commit()
-    # 払戻があれば証拠金残高に加算する(負けの場合はpayout_amount=0なので変化なし)
-    bankroll_router.adjust_balance(db, update.payout_amount)
+    # 証拠金残高は動かさない(証拠金はユーザー自身の資金管理として独立させる方針)
     return obj
 
 
@@ -298,7 +295,7 @@ def investment_readiness(db: Session = Depends(get_db)):
     bankruptcy = None
     if avg_odds and win_rate > 0:
         bankruptcy = calc.monte_carlo_bankruptcy(
-            initial_bankroll=100000, win_prob=win_rate, odds_value=avg_odds,
+            initial_bankroll=calc.FIXED_STAKING_BANKROLL, win_prob=win_rate, odds_value=avg_odds,
             stake_fraction=0.10 / max(1, round(n_bets / max(1, n_races))),
             num_bets_per_trial=n_bets, num_trials=3000, ruin_threshold_pct=0.5,
         )

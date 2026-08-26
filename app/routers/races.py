@@ -12,12 +12,14 @@ router = APIRouter(prefix="/races", tags=["races"])
 def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(get_db)):
     """
     レースの実際の着順を1回入力するだけで、そのレースに紐づく全ての未確定購入を
-    自動で的中/不的中判定し、証拠金にも反映する。
+    自動で的中/不的中判定する。
     actual_result: 例 "2-5-1" (1着2番、2着5番、3着1番)。
     同着がある場合は"="で区切って入力する(例: "7-14=9" → 1着7番、2着は14番と9番の同着)。
+
+    証拠金残高はここでは変動させない。証拠金はユーザー自身の資金管理として独立させ、
+    予想・投票プラン・集計・検証には影響させない方針のため(のんの要望により変更)。
     """
     from .. import ev_calculator as calc
-    from . import bankroll as bankroll_router
 
     race = db.query(models.Race).get(race_id)
     if not race:
@@ -39,11 +41,7 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         .all()
     )
 
-    # 以前はここで購入1件ごとにdb.commit()+adjust_balance(内部でも1回commit)していたため、
-    # 未確定件数が多いレースほど極端に時間がかかっていた。ここでは全件の更新を1回のcommitに
-    # まとめ、証拠金の増減も合計してまとめて1回だけ反映する。
     updated = []
-    total_payout_delta = 0.0
     for p in pending:
         is_win = calc.judge_purchase_result(p.bet_type, p.combination, parsed_result)
         settlement_odds = p.final_odds if p.final_odds is not None else p.odds_at_purchase
@@ -51,7 +49,6 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
 
         p.result = "win" if is_win else "lose"
         p.payout_amount = payout
-        total_payout_delta += payout
 
         updated.append({
             "purchase_id": p.id,
@@ -63,8 +60,6 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         })
 
     db.commit()
-    if total_payout_delta:
-        bankroll_router.adjust_balance(db, total_payout_delta)
 
     # 見送り記録(SkippedBet)にも同じ着順を適用し、「除外して正解だったか」を検証できるようにする
     # (のんの指摘により追加。以前はレース確定してもSkippedBetの結果が一切埋まらなかった)。
@@ -150,27 +145,14 @@ def reset_race_for_reanalysis(race_id: int, db: Session = Depends(get_db)):
     再利用したまま「予想→投票→結果検証→予想精度確認」のループを再実行できるように
     するために追加した(のんの要望により追加)。
 
-    購入記録の削除に伴い、証拠金への影響(購入時に引かれた分・結果確定で戻った分)を
-    正しく巻き戻す。
+    証拠金残高はここでは一切触らない。証拠金はユーザー自身の資金管理として独立させ、
+    購入記録の削除・再作成に連動させない方針のため(のんの要望により変更)。
     """
-    from . import bankroll as bankroll_router
-
     race = db.query(models.Race).filter(models.Race.id == race_id).first()
     if not race:
         raise HTTPException(status_code=404, detail="レースが見つかりません")
 
-    purchases = db.query(models.Purchase).filter(models.Purchase.race_id == race_id).all()
-    bankroll_delta = 0.0
-    for p in purchases:
-        # 購入時に引かれた投票額を戻す
-        bankroll_delta += p.stake_amount
-        # 結果確定済みで払戻が入っていれば、その分を取り消す
-        if p.result != "pending" and p.payout_amount:
-            bankroll_delta -= p.payout_amount
-    if bankroll_delta:
-        bankroll_router.adjust_balance(db, bankroll_delta)
-
-    purchases_deleted = len(purchases)
+    purchases_deleted = db.query(models.Purchase).filter(models.Purchase.race_id == race_id).count()
     skipped_deleted = db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race_id).delete()
     ev_results_deleted = db.query(models.EvResult).filter(models.EvResult.race_id == race_id).delete()
     db.query(models.Purchase).filter(models.Purchase.race_id == race_id).delete()
@@ -188,7 +170,6 @@ def reset_race_for_reanalysis(race_id: int, db: Session = Depends(get_db)):
         "skipped_bets_deleted": skipped_deleted,
         "ev_results_deleted": ev_results_deleted,
         "entries_reset": len(entries),
-        "bankroll_adjustment": bankroll_delta,
         "message": "出走表・オッズ・結果は保持したまま、予想関連データをリセットしました。/analyze/estimateから再実行できます",
     }
 

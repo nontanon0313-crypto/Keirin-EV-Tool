@@ -702,20 +702,11 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
   const btn = document.getElementById("reanalyzeAllBtn");
   const log = (msg) => { box.textContent += msg + "\n"; box.scrollTop = box.scrollHeight; };
 
-  if (!confirm("全レースの予想・購入記録・EV結果をリセットして再実行します。証拠金は100万円にリセットされます。よろしいですか？")) return;
+  if (!confirm("全レースの予想・購入記録・EV結果をリセットして再実行します。投票プランの計算は固定100万円で行われ、実際の証拠金残高は変動しません。よろしいですか？")) return;
 
   btn.disabled = true;
   box.textContent = "";
   try {
-    log("証拠金を100万円にリセット中...");
-    const brRes = await fetch(apiUrl("/bankroll/set"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initial_balance: 1000000 }),
-    });
-    if (!brRes.ok) throw new Error(JSON.stringify(await brRes.json()));
-    log("  完了\n");
-
     log("レース一覧を取得中...");
     const listRes = await fetch(apiUrl("/races/for-reanalysis"));
     const races = await listRes.json();
@@ -741,7 +732,7 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
         const planRes = await fetch(apiUrl(`/ev/race-plan/${race.id}`), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ race_id: race.id }),
+          body: JSON.stringify({ race_id: race.id, bankroll: 1000000 }), // 検証・集計目的のため固定額(実際の証拠金残高は使わない)
         });
         const plan = await planRes.json();
         if (!planRes.ok) throw new Error(JSON.stringify(plan));

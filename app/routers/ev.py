@@ -6,8 +6,8 @@ from typing import List
 from ..database import get_db
 from .. import models, schemas
 from .. import ev_calculator as calc
-from . import bankroll as bankroll_router
 from . import purchases as purchases_router
+from . import bankroll as bankroll_router
 
 router = APIRouter(prefix="/ev", tags=["ev"])
 
