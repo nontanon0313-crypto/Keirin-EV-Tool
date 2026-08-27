@@ -102,20 +102,11 @@ def step2_estimate(race_id, max_retries=5):
     raise RateLimitExhausted(f"race_id={race_id}: 429が{max_retries}回連続しました。利用枠(日次上限等)に達した可能性があります")
 
 
-def step3_race_plan(race_id, bankroll, for_verification=True):
-    """3. 投票プラン作成: EV計算・ステーキング
-
-    for_verification=True(既定):
-      検証・集計用。固定証拠金＋1レース上限なし(max_race_pct=1.0)。
-      上限を掛けない方が、条件を揃えた実績比較ができる。
-    for_verification=False:
-      実投票用。max_race_pctはAPI既定(または呼び出し側で指定)に従う。
-    """
+def step3_race_plan(race_id, bankroll):
+    """3. 投票プラン作成: EV計算・ステーキング(bankroll未指定なら証拠金残高を自動使用)"""
     body = {"race_id": race_id}
     if bankroll is not None:
         body["bankroll"] = bankroll
-    if for_verification:
-        body["max_race_pct"] = 1.0  # 上限なし(検証用)
     r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, timeout=90)
     r.raise_for_status()
     return r.json()
@@ -288,6 +279,42 @@ def save_progress(path, progress):
         json.dump(progress, f, ensure_ascii=False, indent=2)
 
 
+def _lightweight_confirm_sweep(files):
+    """
+    再予想(Gemini呼び出し)は一切行わず、結果確定だけを毎回試みる。
+    進捗ファイルによってスキップされた「以前処理済みだが当時は結果が
+    出ていなかった」レースも、ここで毎回確認することで、次に実行した
+    ときに自動で結果登録されるようにする
+    (のんの指摘「run_day.shを使った時に結果まで登録してあってほしい」により追加)。
+    再登録(scraper-import)・結果確定(confirm-result)はどちらも何度呼んでも
+    安全な作り(冪等)になっているので、既に確定済みのレースに対して呼んでも害はない。
+    """
+    confirmed, still_pending, error = 0, 0, 0
+    for fp in files:
+        try:
+            with open(fp, encoding="utf-8") as f:
+                race_json = json.load(f)
+            actual_result = _extract_actual_result(race_json)
+            if not actual_result:
+                still_pending += 1
+                continue
+            imp = step1_import(race_json)
+            race_id = imp.get("race_id")
+            if not race_id:
+                continue
+            r = requests.post(
+                f"{API_BASE}/races/{race_id}/confirm-result",
+                params={"actual_result": actual_result},
+                timeout=90,
+            )
+            r.raise_for_status()
+            confirmed += 1
+        except Exception as e:
+            log(f"   結果確定スイープでエラー({os.path.basename(fp)}): {e}")
+            error += 1
+    log(f"--- 結果確定スイープ: 確定/確認{confirmed}件・結果まだ無し{still_pending}件・エラー{error}件 ---")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="1レース分のJSONファイル")
@@ -419,6 +446,10 @@ def main():
             for fut in as_completed(futs):
                 fp = futs[fut]
                 run_with_summary(f"file:{fp}", fp, lambda fut=fut: fut.result())
+
+    if not args.dry_run:
+        log("--- 結果確定スイープ(再予想なしで、結果が出ているレースだけ確定) ---")
+        _lightweight_confirm_sweep(files)
 
     log("=== サマリ ===")
     for s in summary:
