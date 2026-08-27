@@ -1319,3 +1319,218 @@ def skipped_stats(db: Session = Depends(get_db)):
         "missed_opportunities_count": len(missed_opportunities),
         "missed_profit_total": missed_profit,
     }
+
+
+@router.get("/profit-concentration")
+def profit_concentration(db: Session = Depends(get_db)):
+    """
+    利益が「少数の高オッズ的中」に集中しているかを確認する。
+    - 的中買い目のオッズ分布
+    - 払戻・利益の上位集中度
+    - 券種×勝率帯ごとの的中寄与
+    """
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    if not purchases:
+        return {"message": "まだ確定した購入履歴がありません"}
+
+    wins = [p for p in purchases if p.result == "win"]
+    losses = [p for p in purchases if p.result == "lose"]
+    total_stake = sum(p.stake_amount for p in purchases)
+    total_payout = sum(p.payout_amount for p in purchases)
+    total_profit = total_payout - total_stake
+
+    if not wins:
+        return {
+            "message": "的中が1件もありません",
+            "総ベット数": len(purchases),
+            "的中件数": 0,
+            "総投資額": round(total_stake, 0),
+            "総払戻": round(total_payout, 0),
+            "総損益": round(total_profit, 0),
+        }
+
+    def odds_of(p):
+        if p.final_odds is not None and p.final_odds > 0:
+            return p.final_odds
+        if p.odds_at_purchase is not None and p.odds_at_purchase > 0:
+            return p.odds_at_purchase
+        if p.stake_amount and p.stake_amount > 0 and p.payout_amount:
+            return p.payout_amount / p.stake_amount
+        return None
+
+    win_rows = []
+    for p in wins:
+        o = odds_of(p)
+        profit = (p.payout_amount or 0) - (p.stake_amount or 0)
+        win_rows.append({
+            "purchase": p,
+            "odds": o,
+            "payout": p.payout_amount or 0,
+            "stake": p.stake_amount or 0,
+            "profit": profit,
+            "win_prob": p.win_prob_at_purchase,
+        })
+
+    # 利益寄与の大きい順
+    by_profit = sorted(win_rows, key=lambda x: -x["profit"])
+    by_payout = sorted(win_rows, key=lambda x: -x["payout"])
+
+    def share(rows, key, n, total):
+        if total <= 0:
+            return None
+        s = sum(r[key] for r in rows[:n])
+        return round(s / total * 100, 1)
+
+    total_win_payout = sum(r["payout"] for r in win_rows)
+    total_win_profit = sum(r["profit"] for r in win_rows)
+
+    odds_list = sorted([r["odds"] for r in win_rows if r["odds"] is not None])
+    def percentile(sorted_vals, pct):
+        if not sorted_vals:
+            return None
+        i = int(round((len(sorted_vals) - 1) * pct / 100))
+        return round(sorted_vals[max(0, min(i, len(sorted_vals) - 1))], 2)
+
+    # オッズ帯別
+    def odds_band(o):
+        if o is None:
+            return "オッズ不明"
+        if o < 10:
+            return "〜10倍"
+        if o < 30:
+            return "10〜30倍"
+        if o < 100:
+            return "30〜100倍"
+        if o < 300:
+            return "100〜300倍"
+        return "300倍以上"
+
+    band_stats = {}
+    for r in win_rows:
+        b = odds_band(r["odds"])
+        st = band_stats.setdefault(b, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
+        st["的中件数"] += 1
+        st["払戻合計"] += r["payout"]
+        st["利益合計"] += r["profit"]
+    for b, st in band_stats.items():
+        st["払戻合計"] = round(st["払戻合計"], 0)
+        st["利益合計"] = round(st["利益合計"], 0)
+        st["払戻が全体払戻に占める割合%"] = (
+            round(st["払戻合計"] / total_win_payout * 100, 1) if total_win_payout else None
+        )
+        st["利益が全体利益に占める割合%"] = (
+            round(st["利益合計"] / total_profit * 100, 1) if total_profit else None
+        )
+    # 帯の表示順
+    band_order = ["〜10倍", "10〜30倍", "30〜100倍", "100〜300倍", "300倍以上", "オッズ不明"]
+    的中オッズ帯別 = {k: band_stats[k] for k in band_order if k in band_stats}
+
+    # 券種別
+    by_bet = {}
+    for r in win_rows:
+        bt = r["purchase"].bet_type or "不明"
+        st = by_bet.setdefault(bt, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
+        st["的中件数"] += 1
+        st["払戻合計"] += r["payout"]
+        st["利益合計"] += r["profit"]
+    for st in by_bet.values():
+        st["払戻合計"] = round(st["払戻合計"], 0)
+        st["利益合計"] = round(st["利益合計"], 0)
+
+    # 勝率帯別(購入時の想定勝率)
+    by_prob = {}
+    for r in win_rows:
+        if r["win_prob"] is None:
+            name = "想定勝率なし"
+        else:
+            name, _ = calc.get_prob_bucket(r["win_prob"])
+        st = by_prob.setdefault(name, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
+        st["的中件数"] += 1
+        st["払戻合計"] += r["payout"]
+        st["利益合計"] += r["profit"]
+    for st in by_prob.values():
+        st["払戻合計"] = round(st["払戻合計"], 0)
+        st["利益合計"] = round(st["利益合計"], 0)
+
+    # レース単位: 各レースの損益
+    race_profit = {}
+    for p in purchases:
+        race_profit[p.race_id] = race_profit.get(p.race_id, 0.0) + (p.payout_amount or 0) - (p.stake_amount or 0)
+    race_profits_sorted = sorted(race_profit.values(), reverse=True)
+    n_races = len(race_profit)
+    n_green = sum(1 for x in race_profits_sorted if x > 0)
+    top_race_profit_share = None
+    if total_profit and total_profit > 0:
+        top_race_profit_share = round(sum(x for x in race_profits_sorted[:5] if x > 0) / total_profit * 100, 1)
+
+    # 判定コメント
+    top10_profit_pct = share(by_profit, "profit", 10, total_profit) if total_profit > 0 else None
+    top10_payout_pct = share(by_payout, "payout", 10, total_win_payout) if total_win_payout > 0 else None
+    high_odds_profit = sum(r["profit"] for r in win_rows if r["odds"] is not None and r["odds"] >= 100)
+    high_odds_share = round(high_odds_profit / total_profit * 100, 1) if total_profit > 0 else None
+
+    judgement = []
+    if top10_profit_pct is not None and top10_profit_pct >= 50:
+        judgement.append("利益の半分以上が的中上位10件に集中しています。高配当の少数的中への依存が強いです。")
+    elif top10_profit_pct is not None and top10_profit_pct >= 30:
+        judgement.append("利益の3割以上が的中上位10件にあります。やや高配当依存の傾向があります。")
+    else:
+        judgement.append("的中上位10件への利益集中は比較的抑えめです。")
+    if high_odds_share is not None and high_odds_share >= 50:
+        judgement.append("100倍以上の的中が全体利益の半分以上を占めています。")
+    if n_races and n_green / n_races < 0.15:
+        judgement.append("黒字レースの割合が低めです。少数レースの好調に支えられている可能性があります。")
+    elif n_races and n_green / n_races >= 0.2:
+        judgement.append("黒字レースがある程度分散しています。")
+
+    # 上位的中一覧(最大15件) — 個人情報は選手名なし、レースIDと券種・買い目・オッズ
+    top_hits = []
+    for r in by_profit[:15]:
+        p = r["purchase"]
+        top_hits.append({
+            "レースID": p.race_id,
+            "券種": p.bet_type,
+            "買い目": p.combination,
+            "オッズ": round(r["odds"], 1) if r["odds"] is not None else None,
+            "投資額": round(r["stake"], 0),
+            "払戻": round(r["payout"], 0),
+            "利益": round(r["profit"], 0),
+            "購入時想定勝率%": round(r["win_prob"] * 100, 2) if r["win_prob"] is not None else None,
+        })
+
+    return {
+        "概要": {
+            "総ベット数": len(purchases),
+            "的中件数": len(wins),
+            "不的中件数": len(losses),
+            "総投資額": round(total_stake, 0),
+            "総払戻": round(total_payout, 0),
+            "総損益": round(total_profit, 0),
+            "的中からの払戻合計": round(total_win_payout, 0),
+        },
+        "的中オッズの分布": {
+            "件数_オッズ判明": len(odds_list),
+            "最小倍": percentile(odds_list, 0),
+            "中央値倍": percentile(odds_list, 50),
+            "平均倍": round(sum(odds_list) / len(odds_list), 2) if odds_list else None,
+            "75%点倍": percentile(odds_list, 75),
+            "90%点倍": percentile(odds_list, 90),
+            "最大倍": percentile(odds_list, 100),
+        },
+        "集中度": {
+            "的中上位5件が全体利益に占める割合%": share(by_profit, "profit", 5, total_profit) if total_profit > 0 else None,
+            "的中上位10件が全体利益に占める割合%": top10_profit_pct,
+            "的中上位10件が的中払戻に占める割合%": top10_payout_pct,
+            "100倍以上の的中が全体利益に占める割合%": high_odds_share,
+            "黒字レース数": n_green,
+            "対象レース数": n_races,
+            "黒字レース割合%": round(n_green / n_races * 100, 1) if n_races else None,
+            "利益上位5レースが全体利益に占める割合%": top_race_profit_share,
+        },
+        "判定": judgement,
+        "的中オッズ帯別": 的中オッズ帯別,
+        "的中の券種別": by_bet,
+        "的中の想定勝率帯別": by_prob,
+        "利益の大きい的中_上位": top_hits,
+    }
+

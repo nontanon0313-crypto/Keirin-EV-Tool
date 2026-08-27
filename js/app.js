@@ -1115,6 +1115,85 @@ function isCalibrationApplyEnabled() {
 
 
 
+
+document.getElementById("loadProfitConcentrationBtn").addEventListener("click", async () => {
+  const box = document.getElementById("statsResult");
+  box.textContent = "利益の集中度を集計中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/profit-concentration"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    if (data.message) {
+      box.textContent = data.message;
+      return;
+    }
+    const g = data["概要"] || {};
+    const d = data["的中オッズの分布"] || {};
+    const c = data["集中度"] || {};
+    let html = "<h3>概要</h3><ul>";
+    html += `<li>総ベット数: ${g["総ベット数"]}（的中 ${g["的中件数"]} / 外れ ${g["不的中件数"]}）</li>`;
+    html += `<li>総投資額: ${g["総投資額"]}円 / 総払戻: ${g["総払戻"]}円 / 総損益: ${g["総損益"]}円</li>`;
+    html += "</ul>";
+
+    html += "<h3>的中した買い目のオッズ分布</h3><ul>";
+    html += `<li>中央値: ${d["中央値倍"] ?? "-"}倍 ／ 平均: ${d["平均倍"] ?? "-"}倍</li>`;
+    html += `<li>75%点: ${d["75%点倍"] ?? "-"}倍 ／ 90%点: ${d["90%点倍"] ?? "-"}倍 ／ 最大: ${d["最大倍"] ?? "-"}倍</li>`;
+    html += `<li>最小: ${d["最小倍"] ?? "-"}倍（オッズ判明 ${d["件数_オッズ判明"] ?? 0}件）</li>`;
+    html += "</ul>";
+
+    html += "<h3>集中度</h3><ul>";
+    html += `<li>的中上位5件 → 全体利益の ${c["的中上位5件が全体利益に占める割合%"] ?? "-"}%</li>`;
+    html += `<li>的中上位10件 → 全体利益の ${c["的中上位10件が全体利益に占める割合%"] ?? "-"}%</li>`;
+    html += `<li>的中上位10件 → 的中払戻の ${c["的中上位10件が的中払戻に占める割合%"] ?? "-"}%</li>`;
+    html += `<li>100倍以上の的中 → 全体利益の ${c["100倍以上の的中が全体利益に占める割合%"] ?? "-"}%</li>`;
+    html += `<li>黒字レース: ${c["黒字レース数"] ?? "-"} / ${c["対象レース数"] ?? "-"}（${c["黒字レース割合%"] ?? "-"}%）</li>`;
+    html += `<li>利益上位5レース → 全体利益の ${c["利益上位5レースが全体利益に占める割合%"] ?? "-"}%</li>`;
+    html += "</ul>";
+
+    html += "<h3>判定</h3><ul>";
+    for (const line of (data["判定"] || [])) {
+      html += `<li>${line}</li>`;
+    }
+    html += "</ul>";
+
+    const band = data["的中オッズ帯別"] || {};
+    html += "<h3>的中オッズ帯別</h3>";
+    html += "<table><tr><th>オッズ帯</th><th>的中件数</th><th>払戻合計</th><th>利益合計</th><th>利益の割合%</th></tr>";
+    for (const [k, v] of Object.entries(band)) {
+      html += `<tr><td>${k}</td><td>${v["的中件数"]}</td><td>${v["払戻合計"]}</td><td>${v["利益合計"]}</td><td>${v["利益が全体利益に占める割合%"] ?? "-"}</td></tr>`;
+    }
+    html += "</table>";
+
+    const bet = data["的中の券種別"] || {};
+    html += "<h3>的中の券種別</h3>";
+    html += "<table><tr><th>券種</th><th>的中件数</th><th>払戻合計</th><th>利益合計</th></tr>";
+    for (const [k, v] of Object.entries(bet)) {
+      html += `<tr><td>${k}</td><td>${v["的中件数"]}</td><td>${v["払戻合計"]}</td><td>${v["利益合計"]}</td></tr>`;
+    }
+    html += "</table>";
+
+    const pb = data["的中の想定勝率帯別"] || {};
+    html += "<h3>的中の想定勝率帯別</h3>";
+    html += "<table><tr><th>勝率帯</th><th>的中件数</th><th>払戻合計</th><th>利益合計</th></tr>";
+    for (const [k, v] of Object.entries(pb)) {
+      html += `<tr><td>${k}</td><td>${v["的中件数"]}</td><td>${v["払戻合計"]}</td><td>${v["利益合計"]}</td></tr>`;
+    }
+    html += "</table>";
+
+    const tops = data["利益の大きい的中_上位"] || [];
+    html += "<h3>利益の大きい的中（上位）</h3>";
+    html += "<table><tr><th>レースID</th><th>券種</th><th>買い目</th><th>オッズ</th><th>投資</th><th>払戻</th><th>利益</th><th>想定勝率%</th></tr>";
+    for (const r of tops) {
+      html += `<tr><td>${r["レースID"]}</td><td>${r["券種"]}</td><td>${r["買い目"]}</td><td>${r["オッズ"] ?? "-"}</td><td>${r["投資額"]}</td><td>${r["払戻"]}</td><td>${r["利益"]}</td><td>${r["購入時想定勝率%"] ?? "-"}</td></tr>`;
+    }
+    html += "</table>";
+    html += `<p class="note">目安: 的中上位10件で利益の50%以上、または100倍以上の的中で利益の50%以上なら「高オッズ依存が強い」と判断しやすいです。</p>`;
+    box.innerHTML = html;
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCarPickBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "読み込み中...";
