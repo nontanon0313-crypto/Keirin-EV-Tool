@@ -11,7 +11,7 @@
 
 import itertools
 import random
-from math import comb
+from math import lgamma, log, exp
 from typing import List, Dict, Tuple
 
 # 投票プラン(賭け金サイジング)・破産確率シミュレーションで使う固定の基準額。
@@ -510,9 +510,18 @@ def binomial_lower_tail_p(actual_wins: int, n: int, predicted_prob: float) -> fl
     値が小さい(目安5%未満)ほど、「単なる偶然のブレ」では説明しにくく、予想確率が
     実態より高すぎる(過大評価している)可能性が高いことを意味する。
     逆に値が大きければ(例えば20%以上)、今のサンプル数ではまだ偶然のブレの範囲内と言える。
+
+    サンプル数nが大きくなると組み合わせ数comb(n, i)が巨大な整数になり、そのまま
+    float計算するとオーバーフローするため、対数を使って計算する
+    (のんの実機運用でエラーが発生したため修正)。
     """
     if n <= 0 or not (0.0 < predicted_prob < 1.0):
         return 1.0
     actual_wins = max(0, min(actual_wins, n))
-    p = predicted_prob
-    return sum(comb(n, i) * (p ** i) * ((1 - p) ** (n - i)) for i in range(0, actual_wins + 1))
+    log_p, log_q = log(predicted_prob), log(1 - predicted_prob)
+    log_terms = [
+        lgamma(n + 1) - lgamma(i + 1) - lgamma(n - i + 1) + i * log_p + (n - i) * log_q
+        for i in range(0, actual_wins + 1)
+    ]
+    max_log = max(log_terms)
+    return exp(max_log) * sum(exp(lt - max_log) for lt in log_terms)
