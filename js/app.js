@@ -920,11 +920,28 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    resultBox.textContent =
-      `破産確率(資金が${data.ruin_threshold_pct * 100}%以下になる確率): ${data.ruin_probability_pct}%\n` +
-      `黒字化率(初期資金より増えて終わった割合): ${data.profit_probability_pct}%\n` +
-      `平均最終資金: ${data.average_final_bankroll}円 / 中央値: ${data.median_final_bankroll}円\n` +
-      `(試行回数: ${data.num_trials}回 × ${numRaces}レース分・1レース${betsPerRace}点・1点あたり賭け比率${(stakeFraction * 100).toFixed(3)}%)`;
+    resultBox.innerHTML =
+      `<p><strong>破産確率</strong>（資金が${data.ruin_threshold_pct * 100}%以下になる確率）: <strong>${data.ruin_probability_pct}%</strong></p>` +
+      `<p>黒字化率（初期資金より増えて終わった割合）: ${data.profit_probability_pct}%</p>` +
+      `<p>平均最終資金: ${data.average_final_bankroll}円 / 中央値: ${data.median_final_bankroll}円</p>` +
+      `<p class="note">試行${data.num_trials}回 × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>` +
+      `<p class="note">この「1レース上限%」を投票プランの上限に使う場合は、下のボタンで詳細設定へ反映し、投票タブの「検証タブの投資上限を使う」をオンにしてください。</p>` +
+      `<button type="button" id="applySimRacePctBtn" style="background:#16a34a;width:auto;padding:8px 14px;">この1レース上限${(racePct * 100).toFixed(0)}%を詳細設定に反映する</button>`;
+    const applyBtn = document.getElementById("applySimRacePctBtn");
+    if (applyBtn) {
+      applyBtn.addEventListener("click", () => {
+        const pct = parseFloat(document.getElementById("simRacePct").value);
+        const maxInput = document.getElementById("maxRacePctInput");
+        if (maxInput && !Number.isNaN(pct)) {
+          maxInput.value = pct;
+          if (typeof saveSettingsToStorage === "function") saveSettingsToStorage();
+        }
+        const useSim = document.getElementById("useSimRaceCapCheckbox");
+        if (useSim) useSim.checked = true;
+        alert(`1レース上限を${pct}%に反映しました。投票プラン作成時にこの上限が使われます。`);
+      });
+    }
+
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }

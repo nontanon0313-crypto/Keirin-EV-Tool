@@ -1483,6 +1483,74 @@ def profit_concentration(db: Session = Depends(get_db)):
     elif n_races and n_green / n_races >= 0.2:
         judgement.append("黒字レースがある程度分散しています。")
 
+    # --- 高オッズの「継続性」 ---
+    # 購入時点オッズで帯分けし、的中率を見る(「たまたま1発」か「帯として当たっているか」)
+    def purchase_odds(p):
+        if p.odds_at_purchase is not None and p.odds_at_purchase > 0:
+            return p.odds_at_purchase
+        if p.final_odds is not None and p.final_odds > 0:
+            return p.final_odds
+        return None
+
+    def continuity_for_threshold(min_odds, label):
+        subset = []
+        for p in purchases:
+            o = purchase_odds(p)
+            if o is not None and o >= min_odds:
+                subset.append(p)
+        if not subset:
+            return {
+                "ラベル": label,
+                "購入件数": 0,
+                "的中件数": 0,
+                "的中率%": None,
+                "的中したレース数": 0,
+                "コメント": f"{label}の購入がまだありません",
+            }
+        hits = [p for p in subset if p.result == "win"]
+        hit_races = {p.race_id for p in hits}
+        all_races = {p.race_id for p in subset}
+        rate = round(len(hits) / len(subset) * 100, 2)
+        # 的中が1レースに集中していないか
+        from collections import Counter
+        race_hit_counts = Counter(p.race_id for p in hits)
+        max_hits_one_race = max(race_hit_counts.values()) if race_hit_counts else 0
+        comment = ""
+        if len(hits) == 0:
+            comment = "的中ゼロ。この帯は現状再現できていません。"
+        elif len(hit_races) == 1 and len(hits) >= 2:
+            comment = "的中が1レースに集中。継続性はまだ弱いです。"
+        elif len(hits) <= 2 and len(subset) >= 20:
+            comment = "的中がごく少数。高配当依存の「たまたま」寄りの可能性。"
+        elif len(hit_races) >= 3:
+            comment = "複数レースで的中あり。帯としての継続性を議論できる段階です。"
+        else:
+            comment = "サンプルを増やして再評価してください。"
+        return {
+            "ラベル": label,
+            "購入件数": len(subset),
+            "的中件数": len(hits),
+            "的中率%": rate,
+            "購入したレース数": len(all_races),
+            "的中したレース数": len(hit_races),
+            "1レースあたり最大的中件数": max_hits_one_race,
+            "コメント": comment,
+        }
+
+    高オッズ継続性 = {
+        "30倍以上": continuity_for_threshold(30, "30倍以上"),
+        "100倍以上": continuity_for_threshold(100, "100倍以上"),
+        "300倍以上": continuity_for_threshold(300, "300倍以上"),
+    }
+    # 継続性に基づく総合コメント
+    c100 = 高オッズ継続性["100倍以上"]
+    if c100["購入件数"] and c100["的中件数"] == 0:
+        judgement.append("100倍以上は購入しているが的中ゼロ。制限を検討する段階です。")
+    elif c100["的中件数"] and c100["的中したレース数"] <= 1:
+        judgement.append("100倍以上の的中がごく限られたレースに偏っています。継続性はまだ確認できません。")
+    elif c100["的中したレース数"] and c100["的中したレース数"] >= 3:
+        judgement.append("100倍以上が複数レースで的中しています。高オッズを残す方針と整合的です。")
+
     # 上位的中一覧(最大15件) — 個人情報は選手名なし、レースIDと券種・買い目・オッズ
     top_hits = []
     for r in by_profit[:15]:
@@ -1532,5 +1600,6 @@ def profit_concentration(db: Session = Depends(get_db)):
         "的中の券種別": by_bet,
         "的中の想定勝率帯別": by_prob,
         "利益の大きい的中_上位": top_hits,
+        "高オッズ継続性": 高オッズ継続性,
     }
 
