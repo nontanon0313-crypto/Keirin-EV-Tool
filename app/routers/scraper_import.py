@@ -31,6 +31,42 @@ router = APIRouter(prefix="/scraper-import", tags=["scraper-import"])
 # oddspark表記→アプリ内表記の脚質マッピング(不明な値はそのまま素通しする)
 LEG_STYLE_MAP = {"逃": "逃げ", "追": "追込", "両": "両方"}
 
+# 過去(修正前)のインポートで文字化けしたまま保存されてしまった脚質データの復旧用。
+# 原因: 本来「逃げ/追込/両方」という文字列がEntryテーブルに保存されるべきところ、
+# 当時のコードの文字コード不整合により、UTF-8のバイト列がCyrillic系の文字コード
+# (cp1251)として誤って解釈された状態で保存されてしまっていた
+# (のんの実機運用で発覚。現在のコードは正常)。
+MOJIBAKE_LEG_STYLE_FIX = {
+    "逃".encode("utf-8").decode("cp1251"): "逃げ",
+    "追".encode("utf-8").decode("cp1251"): "追込",
+    "両".encode("utf-8").decode("cp1251"): "両方",
+    # ドキュメントで確認された、上記とは微妙に異なる化け方のパターンも念のため含める
+    "йҖғ": "逃げ",
+    "иҝҪ": "追込",
+    "дёЎ": "両方",
+}
+
+
+@router.post("/fix-leg-style-mojibake")
+def fix_leg_style_mojibake(db: Session = Depends(get_db)):
+    """
+    過去に文字化けした状態で保存されてしまったEntry.leg_styleを復旧する
+    (のんの指摘により追加。1回実行すれば十分)。
+    """
+    entries = (
+        db.query(models.Entry)
+        .filter(models.Entry.leg_style.in_(list(MOJIBAKE_LEG_STYLE_FIX.keys())))
+        .all()
+    )
+    fixed = 0
+    for e in entries:
+        correct = MOJIBAKE_LEG_STYLE_FIX.get(e.leg_style)
+        if correct:
+            e.leg_style = correct
+            fixed += 1
+    db.commit()
+    return {"fixed_count": fixed}
+
 
 def _to_int(v):
     try:
@@ -99,10 +135,21 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     warnings = []
     venue_info = venue_name_from_jo_code(jo_code)
     if venue_info is None:
-        raise HTTPException(status_code=400, detail=f"未知のjo_code({jo_code})です。app/keirin_data.pyのJO_CODE_TO_VENUEに追加してください")
-    venue_name, verified = venue_info
-    if not verified:
-        warnings.append(f"jo_code={jo_code}({venue_name})は場コード対応が未検証(推定)です。念のため会場名をご確認ください")
+        # 未知のjo_codeでもデータ収集自体は止めない(仮の会場名で登録を続ける)。
+        # 以前はここで即400エラーにしていたため、未知の場コードが1つ混ざる
+        # だけで、その日のバッチ全体(同じ開催の他レースも含む)が失敗していた
+        # (のんの実機運用で判明・修正)。正しい会場名が分かったら
+        # app/keirin_data.pyのJO_CODE_TO_VENUEに追加し、該当レースを
+        # 再予想(reset-for-reanalysis)すれば会場名も直る。
+        venue_name, verified = f"不明会場(場コード{jo_code})", False
+        warnings.append(
+            f"jo_code={jo_code}は未知の場コードのため仮の会場名で登録しました。"
+            "app/keirin_data.pyのJO_CODE_TO_VENUEに正しい会場名を追加してください"
+        )
+    else:
+        venue_name, verified = venue_info
+        if not verified:
+            warnings.append(f"jo_code={jo_code}({venue_name})は場コード対応が未検証(推定)です。念のため会場名をご確認ください")
 
     external_ref = f"oddspark:{jo_code}:{kaisai_bi}:{race_no}"
     race = db.query(models.Race).filter(models.Race.external_ref == external_ref).first()
