@@ -51,6 +51,17 @@ class SimulationRequest(BaseModel):
     ruin_threshold_pct: float = 0.5
 
 
+class RecommendRacePctRequest(BaseModel):
+    initial_bankroll: float
+    win_prob: float
+    odds_value: float
+    bets_per_race: int
+    num_races: int
+    max_ruin_probability_pct: float
+    num_trials: int = 2000
+    ruin_threshold_pct: float = 0.5
+
+
 class EvCalcRequest(BaseModel):
     apply_calibration: bool = True
     race_id: int
