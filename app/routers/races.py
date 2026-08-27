@@ -92,13 +92,16 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
 
 @router.get("/")
 def list_races(db: Session = Depends(get_db)):
-    # 過去のレース(着順確定済み=actual_resultがある)は、もう投票できないため
-    # 選択する必要が無い。一覧からは除外する(のんの要望により変更)。
+    """投票タブ用: 当日(JST)かつ未確定のみ。前日の未確定が残らないようにする。"""
+    now = _jst_now_naive()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
     races = (
         db.query(models.Race)
         .filter(models.Race.actual_result.is_(None))
+        .filter(models.Race.race_date >= today_start, models.Race.race_date < today_end)
         .order_by(models.Race.id.desc())
-        .limit(50)
+        .limit(100)
         .all()
     )
     return [
@@ -113,25 +116,30 @@ def list_races(db: Session = Depends(get_db)):
             "odds_count": len(r.odds_list),
         }
         for r in races
+        if len(r.entries) > 0
     ]
 
 
 
 @router.delete("/")
 def delete_all_races(db: Session = Depends(get_db)):
-    """
-    レース・選手・オッズ・期待値結果・購入履歴・見送り記録を全て削除する(証拠金残高は対象外)。
-    一括DELETE文はSQLAlchemyのcascade設定を経由しないため、外部キーの依存順
-    (Purchase/SkippedBet→EvResult/Odds/Entry→Race)に明示的に削除する。
-    """
-    db.query(models.Purchase).delete()
-    db.query(models.SkippedBet).delete()
-    db.query(models.EvResult).delete()
-    db.query(models.Odds).delete()
-    db.query(models.Entry).delete()
-    db.query(models.Race).delete()
+    """過去分を含む全レース関連データを削除(証拠金は対象外)。"""
+    n_purchases = db.query(models.Purchase).delete()
+    n_skipped = db.query(models.SkippedBet).delete()
+    n_ev = db.query(models.EvResult).delete()
+    n_odds = db.query(models.Odds).delete()
+    n_entries = db.query(models.Entry).delete()
+    n_races = db.query(models.Race).delete()
     db.commit()
-    return {"deleted_all": True}
+    return {
+        "deleted_all": True,
+        "races": n_races,
+        "entries": n_entries,
+        "odds": n_odds,
+        "purchases": n_purchases,
+        "skipped_bets": n_skipped,
+        "ev_results": n_ev,
+    }
 
 
 @router.post("/{race_id}/reset-for-reanalysis")
@@ -244,6 +252,7 @@ def list_races_today(db: Session = Depends(get_db)):
     races = (
         db.query(models.Race)
         .filter(models.Race.race_date >= today_start, models.Race.race_date < today_end)
+        .filter(models.Race.actual_result.is_(None))
         .all()
     )
     result = []
@@ -273,6 +282,7 @@ def list_races_upcoming(within_min: int = 30, db: Session = Depends(get_db)):
         db.query(models.Race)
         .filter(models.Race.post_time.isnot(None))
         .filter(models.Race.post_time >= now, models.Race.post_time <= until)
+        .filter(models.Race.actual_result.is_(None))
         .order_by(models.Race.post_time.asc())
         .all()
     )
@@ -295,11 +305,10 @@ def list_races_upcoming(within_min: int = 30, db: Session = Depends(get_db)):
 
 @router.get("/favorites")
 def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db)):
-    """
-    予想済み(AI勝率算出済み)の全レースを横断し、本命候補(推定勝率が高い選手)を
-    勝率降順で返す。結果確定済みのレースは対象外(もう投票できないため)
-    (のんの要望により追加)。
-    """
+    """本日(JST)かつ未確定の予想済みレースから本命候補を勝率降順で返す。"""
+    now = _jst_now_naive()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
     entries = (
         db.query(models.Entry)
         .filter(models.Entry.blended_win_prob.isnot(None))
@@ -309,7 +318,12 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
     race_ids = {e.race_id for e in entries}
     races_by_id = {
         r.id: r
-        for r in db.query(models.Race).filter(models.Race.id.in_(race_ids), models.Race.actual_result.is_(None)).all()
+        for r in db.query(models.Race).filter(
+            models.Race.id.in_(race_ids),
+            models.Race.actual_result.is_(None),
+            models.Race.race_date >= today_start,
+            models.Race.race_date < today_end,
+        ).all()
     } if race_ids else {}
 
     result = []

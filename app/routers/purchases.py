@@ -626,17 +626,35 @@ def purchase_stats(db: Session = Depends(get_db)):
     勝率帯別・券種別の回収率など、複数の切り口で集計する。
     単一要素だけで結論づけないためのFX版ルールを踏襲。
     """
-    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    purchases_only = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    class _SkippedAsPurchase:
+        __slots__ = (
+            "race_id", "bet_type", "combination", "stake_amount", "payout_amount",
+            "result", "win_prob_at_purchase", "ev_pct_at_purchase", "is_skipped_record",
+        )
+        def __init__(self, s):
+            self.race_id = s.race_id
+            self.bet_type = s.bet_type
+            self.combination = s.combination
+            self.stake_amount = 0.0
+            self.payout_amount = 0.0
+            self.result = s.actual_result
+            self.win_prob_at_purchase = s.win_prob_estimated
+            self.ev_pct_at_purchase = s.ev_pct_estimated
+            self.is_skipped_record = True
+    skipped_eval = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.actual_result.isnot(None))
+        .all()
+    )
+    purchases = list(purchases_only) + [_SkippedAsPurchase(s) for s in skipped_eval]
     if not purchases:
         return {"message": "まだ確定した購入履歴がありません"}
 
-    total_stake = sum(p.stake_amount for p in purchases)
-    total_payout = sum(p.payout_amount for p in purchases)
+    total_stake = sum(p.stake_amount for p in purchases_only)
+    total_payout = sum(p.payout_amount for p in purchases_only)
     overall_expectancy_pct = ((total_payout - total_stake) / total_stake * 100) if total_stake else 0
 
-    # 以前は切り口(バンク別・季節別...)ごとに、購入1件ごとDBへ都度Race/Entryを問い合わせて
-    # いたため、購入件数が増えるほど(切り口数×購入件数のクエリが飛ぶため)極端に遅くなっていた。
-    # ここで対象レースのRace/Entryを1回だけ一括取得してキャッシュし、以降は辞書参照にする。
     race_ids = {p.race_id for p in purchases}
     races_by_id = {
         r.id: r

@@ -10,7 +10,6 @@ from ..database import get_db
 from .. import models
 from ..gemini_parser import parse_screenshot, estimate_ai_win_probabilities, simulate_race_development
 from ..keirin_data import is_local_player, get_current_weather, normalize_venue_name
-from . import purchases as purchases_router
 
 router = APIRouter(prefix="/analyze", tags=["analyze"])
 
@@ -348,6 +347,7 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
             "line_group": e.line_group,
             "is_local": e.is_local,
             "pre_race_comment": e.pre_race_comment,
+            "app_win_rate": e.app_win_rate,
         }
         for e in entries
     ]
@@ -391,26 +391,15 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(502, f"AI勝率推定に失敗しました: {e}")
 
-    # tipstar勝率とAI推定、どちらが実際に精度が高いかを実績から取得(データ不足時は1:1)
-    try:
-        weights = purchases_router.source_weights(db)
-    except Exception:
-        weights = {"app_weight": 0.5, "ai_weight": 0.5}
-
+    # tipstarとの重み付け合成は廃止。最終勝率はAI単独。
     updated_count = 0
     for e in entries:
         ai_p = ai_probs.get(e.car_number)
         if ai_p is not None:
             e.ai_win_prob = ai_p
-        app_p = (e.app_win_rate / 100.0) if e.app_win_rate is not None else None
-        if ai_p is not None and app_p is not None:
-            e.blended_win_prob = ai_p * weights["ai_weight"] + app_p * weights["app_weight"]
-        elif ai_p is not None:
             e.blended_win_prob = ai_p
-        elif app_p is not None:
-            e.blended_win_prob = app_p
-        if e.blended_win_prob is not None:
             updated_count += 1
+
     db.commit()
 
     return {

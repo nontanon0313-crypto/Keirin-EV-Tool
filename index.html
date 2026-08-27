@@ -39,10 +39,10 @@
   <section class="card">
     <h2>② レース選択・期待値計算</h2>
     <div style="display:flex;gap:6px;margin-bottom:8px;">
-      <button id="raceFilterAllBtn" style="width:auto;padding:6px 12px;font-size:13px;">全件</button>
-      <button id="raceFilterTodayBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">本日</button>
       <button id="raceFilterUpcomingBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">直前30分</button>
+      <button id="raceFilterTodayBtn" style="width:auto;padding:6px 12px;font-size:13px;">本日</button>
     </div>
+    <p class="note">当日かつ未確定のレースのみ表示します(前日以前は出ません)。</p>
     <select id="raceSelect"></select>
     <button id="refreshRaceListBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">🔄一覧を更新</button>
     <div id="raceDetailResult" class="result-box"></div>
@@ -66,10 +66,24 @@
       券種をまたいだ「ガミり」(的中しても合計投票額を下回る結果)が起きないように選ぶ(推奨)
     </label>
 
+        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
+      <input type="checkbox" id="useSimRaceCapCheckbox" checked style="width:auto;margin:0;">
+      検証タブの「1レースあたりの投資上限%」を投票プランの合計上限に使う(オフなら詳細設定の上限比率を使用)
+    </label>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <p class="note">AI予想がまだなら自動で実行してからプランを作成します(数十秒かかる場合があります)。</p>
     <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>
     <div id="evResult" class="result-box"></div>
+  </section>
+
+  
+  <section class="card">
+    <h2>🏆 本命一覧(本日・未確定)</h2>
+    <p class="note">本日かつ未確定の予想済みレースから、推定勝率が高い選手を一覧表示します。</p>
+    <label>最低勝率(%)</label>
+    <input type="number" id="favoritesMinProb" value="25" style="width:80px;">
+    <button id="loadFavoritesBtn">本命候補を表示</button>
+    <div id="favoritesResult" class="result-box"></div>
   </section>
 
   <section class="card">
@@ -104,14 +118,7 @@
 
 <div id="tab-verify" class="tab-content">
 
-  <section class="card">
-    <h2>🏆 本命一覧(予想済み・全レース横断)</h2>
-    <p class="note">予想済みで、まだ結果が確定していない全レースを横断し、推定勝率が高い選手を一覧表示します。</p>
-    <label>最低勝率(%)</label>
-    <input type="number" id="favoritesMinProb" value="25" style="width:80px;">
-    <button id="loadFavoritesBtn">本命候補を表示</button>
-    <div id="favoritesResult" class="result-box"></div>
-  </section>
+  
 
   <section class="card">
     <h2>🔁 予想を再実行(スクレイピングし直さない)</h2>
@@ -124,10 +131,7 @@
     <h2>実績検証</h2>
     <button id="loadStatsBtn">集計を表示</button>
     <button id="loadCalibrationBtn" style="background:#06b6d4;">自動補正の状態を確認</button>
-    <button id="loadSourceWeightsBtn" style="background:#8b5cf6;">tipstar/AI予想の重み付けを確認</button>
-    <button id="loadBigExpectedBtn" style="background:#ec4899;">想定利益が大きい買い目を確認</button>
     <button id="loadCarPickBtn" style="background:#0ea5e9;">核となる車番予想の精度を確認</button>
-    <button id="loadSkippedStatsBtn" style="background:#f97316;">見送り検証(機会損失)を確認</button>
     <button id="loadReadinessBtn" style="background:#16a34a;">💰投資判断チェック</button>
     <div id="statsResult" class="result-box"></div>
   </section>

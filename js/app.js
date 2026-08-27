@@ -182,7 +182,7 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
 });
 
 // ---------- ② レース選択・期待値計算 ----------
-let raceListScope = "all"; // "all" | "today" | "upcoming"
+let raceListScope = "today"; // "today" | "upcoming"
 
 async function loadRaces(selectRaceId) {
   const select = document.getElementById("raceSelect");
@@ -228,14 +228,11 @@ async function loadRaces(selectRaceId) {
 }
 
 function setRaceFilterButtons(active) {
-  const map = { all: "raceFilterAllBtn", today: "raceFilterTodayBtn", upcoming: "raceFilterUpcomingBtn" };
+  const map = { today: "raceFilterTodayBtn", upcoming: "raceFilterUpcomingBtn" };
   for (const [key, id] of Object.entries(map)) {
     document.getElementById(id).style.background = key === active ? "" : "#475569";
   }
 }
-document.getElementById("raceFilterAllBtn").addEventListener("click", () => {
-  raceListScope = "all"; setRaceFilterButtons("all"); loadRaces();
-});
 document.getElementById("raceFilterTodayBtn").addEventListener("click", () => {
   raceListScope = "today"; setRaceFilterButtons("today"); loadRaces();
 });
@@ -300,7 +297,14 @@ document.getElementById("deleteAllBtn").addEventListener("click", async () => {
     const res = await fetch(apiUrl("/races/"), { method: "DELETE" });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    alert("全ての記録を削除しました");
+    alert("全ての記録を削除しました(過去レース含む)");
+    document.getElementById("raceSelect").innerHTML = "";
+    const pending = document.getElementById("pendingList");
+    if (pending) pending.textContent = "";
+    const fav = document.getElementById("favoritesResult");
+    if (fav) fav.textContent = "";
+    const detail = document.getElementById("raceDetailResult");
+    if (detail) detail.textContent = "";
     await loadRaces();
   } catch (e) {
     alert("削除エラー: " + e.message);
@@ -429,7 +433,14 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         fractional_coefficient: kellyCoef,
         min_win_prob: minProb,
         min_ev_pct: minEvPct,
-        max_race_pct: parseFloat(document.getElementById("maxRacePctInput").value) / 100,
+        max_race_pct: (function() {
+          const useSim = document.getElementById("useSimRaceCapCheckbox") && document.getElementById("useSimRaceCapCheckbox").checked;
+          if (useSim) {
+            const v = parseFloat(document.getElementById("simRacePct") && document.getElementById("simRacePct").value);
+            if (!Number.isNaN(v) && v > 0) return v / 100;
+          }
+          return parseFloat(document.getElementById("maxRacePctInput").value) / 100;
+        })(),
         rebate_pct: getRebatePct(),
         max_items: parseInt(document.getElementById("maxItemsInput").value) || 20,
         exclude_low_prob_warning: document.getElementById("excludeLowProbCheckbox").checked,
@@ -810,17 +821,6 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
     } catch (e) { log(`自動補正の状態: エラー(${e.message})`); }
 
     try {
-      const sw = await (await fetch(apiUrl("/purchases/source-weights"))).json();
-      log(`tipstar/AI重み付け: AI ${Math.round((sw.ai_weight ?? 0) * 100)}% / tipstar ${Math.round((sw.app_weight ?? 0) * 100)}%`);
-    } catch (e) { log(`tipstar/AI重み付け: エラー(${e.message})`); }
-
-    try {
-      const big = await (await fetch(apiUrl("/purchases/big-expected-bets"))).json();
-      const n = Array.isArray(big) ? big.length : (big.items ? big.items.length : 0);
-      log(`想定利益が大きい買い目: ${n}件`);
-    } catch (e) { log(`想定利益が大きい買い目: エラー(${e.message})`); }
-
-    try {
       const cp = await (await fetch(apiUrl("/purchases/car-pick-accuracy"))).json();
       if (cp.message) {
         log(`核となる車番予想の精度: ${cp.message}`);
@@ -828,11 +828,6 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
         log(`核となる車番予想の精度: n_races=${cp.n_races} 勝率${cp.win_rate_pct}% top3率${cp.top3_rate_pct}% / ${cp.judgement || ""}`);
       }
     } catch (e) { log(`核となる車番予想の精度: エラー(${e.message})`); }
-
-    try {
-      const sk = await (await fetch(apiUrl("/purchases/skipped/stats"))).json();
-      log(`見送り検証: 見送り正解率${sk.correct_skip_pct ?? "-"}%(${sk.total_skipped_evaluated ?? "-"}件中) 機会損失${sk.missed_opportunities_count ?? "-"}件`);
-    } catch (e) { log(`見送り検証: エラー(${e.message})`); }
 
     try {
       const ready = await (await fetch(apiUrl("/purchases/investment-readiness"))).json();
@@ -1055,61 +1050,7 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
   }
 });
 
-document.getElementById("loadSourceWeightsBtn").addEventListener("click", async () => {
-  const resultBox = document.getElementById("statsResult");
-  resultBox.textContent = "読み込み中...";
-  try {
-    const res = await fetch(apiUrl("/purchases/source-weights"));
-    const data = await res.json();
-    let html = `<p>${data.reason}</p>`;
-    html += `<table><tr><th>予想元</th><th>重み</th>${data.based_on_actual_data ? "<th>Brierスコア(低い方が精度高)</th>" : ""}</tr>`;
-    html += `<tr><td>tipstar勝率</td><td>${(data.app_weight * 100).toFixed(1)}%</td>${data.based_on_actual_data ? `<td>${data.app_brier_score}</td>` : ""}</tr>`;
-    html += `<tr><td>AI推定</td><td>${(data.ai_weight * 100).toFixed(1)}%</td>${data.based_on_actual_data ? `<td>${data.ai_brier_score}</td>` : ""}</tr>`;
-    html += "</table>";
-    resultBox.innerHTML = html;
-  } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
-  }
-});
 
-document.getElementById("loadBigExpectedBtn").addEventListener("click", async () => {
-  const resultBox = document.getElementById("statsResult");
-  resultBox.textContent = "読み込み中...";
-  try {
-    const res = await fetch(apiUrl("/purchases/big-expected-bets"));
-    const items = await res.json();
-    if (!items.length) {
-      resultBox.textContent = "対象データがありません(想定期待値が記録された購入がまだありません)。";
-      return;
-    }
-    let html = `<p class="note">想定利益(投資額×想定期待値)が大きい順です。上位の買い目が的中/不的中どちらだったかで、少数の高期待値な買い目が結果全体をどれだけ左右しているかが分かります。誤って重複登録した等の場合は削除できます。</p>`;
-    html += `<table><tr><th>レース</th><th>券種</th><th>買い目</th><th>投票額</th><th>想定勝率</th><th>オッズ</th><th>想定利益</th><th>結果</th><th>実損益</th><th></th></tr>`;
-    for (const it of items) {
-      const resultLabel = it.result === "pending" ? "未確定" : (it.result === "win" ? "🟢的中" : "✗ハズレ");
-      const cls = it.result === "win" ? "ev-positive" : (it.result === "lose" ? "ev-skip" : "");
-      html += `<tr class="${cls}"><td>${it.venue_name}${it.race_number}R</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.stake_amount}円</td><td>${it.win_prob_at_purchase_pct ?? "-"}%</td><td>${it.odds_at_purchase ?? "-"}</td><td>+${it.expected_profit}円</td><td>${resultLabel}</td><td>${it.actual_profit !== null ? it.actual_profit + "円" : "-"}</td><td><button data-purchase-id="${it.purchase_id}" class="deleteBigExpectedBtn" style="width:auto;padding:4px 8px;font-size:12px;background:#7f1d1d;">削除</button></td></tr>`;
-    }
-    html += "</table>";
-    resultBox.innerHTML = html;
-
-    document.querySelectorAll(".deleteBigExpectedBtn").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.dataset.purchaseId;
-        if (!confirm("この購入記録を削除します(確定済みの場合、実績データも書き換わります。証拠金残高は自動調整されません)。よろしいですか？")) return;
-        try {
-          const res = await fetch(apiUrl(`/purchases/${id}`), { method: "DELETE" });
-          const data = await res.json();
-          if (!res.ok) throw new Error(JSON.stringify(data));
-          document.getElementById("loadBigExpectedBtn").click();
-        } catch (e) {
-          alert("削除エラー: " + e.message);
-        }
-      });
-    });
-  } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
-  }
-});
 
 document.getElementById("loadCarPickBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
@@ -1138,24 +1079,6 @@ document.getElementById("loadCarPickBtn").addEventListener("click", async () => 
   }
 });
 
-document.getElementById("loadSkippedStatsBtn").addEventListener("click", async () => {
-  const resultBox = document.getElementById("statsResult");
-  resultBox.textContent = "読み込み中...";
-  try {
-    const res = await fetch(apiUrl("/purchases/skipped/stats"));
-    const data = await res.json();
-    if (data.message) {
-      resultBox.textContent = data.message;
-      return;
-    }
-    let html = `<p class="note">大穴帯除外・予算超過・ガミり回避・最大件数などで自動プランから除外された買い目が、実際どうなっていたかを検証します。除外が正しかった(見送り正解)割合と、逃した利益(機会損失)を確認できます。</p>`;
-    html += `<p><strong>見送り正解率: ${data.correct_skip_pct}%</strong>(${data.total_skipped_evaluated}件中)</p>`;
-    html += `<p>取りこぼした的中: ${data.missed_opportunities_count}件 / 逃した想定払戻合計: ${data.missed_profit_total}円</p>`;
-    resultBox.innerHTML = html;
-  } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
-  }
-});
 
 document.getElementById("loadReadinessBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
@@ -1220,5 +1143,6 @@ SETTINGS_INPUT_IDS.forEach((id) => {
 loadSettingsFromStorage();
 
 // 初回ロード
+setRaceFilterButtons("today");
 loadRaces();
 refreshBankrollDisplay();
