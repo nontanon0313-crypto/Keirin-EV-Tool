@@ -594,7 +594,7 @@ def calibration_compare(db: Session = Depends(get_db)):
     return {
         "n_records": len(recs),
         "n_without_raw": n_without_raw,
-        "note": "beforeはwin_prob_rawがあるレコードのみ。旧データはafterのみ。",
+        "note": "補正前は、補正前確率が保存されているレコードのみ集計。旧データは補正後のみ表示。",
         "axes": result_axes,
     }
 

@@ -1060,22 +1060,24 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
     const enabled = loadCalAxisEnabled();
-    let html = `<p>レコード${data.n_records}件 / raw無し(旧データ)${data.n_without_raw}件<br>${data.note || ""}</p>`;
-    html += `<p class="note">軸のON/OFFは表示フィルタです。勝率帯補正そのもののON/OFFは下の「自動補正をプランに適用」を使います。</p>`;
+    let html = `<p>対象レコード ${data.n_records}件 ／ 補正前確率なし(旧データ) ${data.n_without_raw}件<br>${data.note || ""}</p>`;
+    html += `<p class="note">各軸のチェックは表示のオンオフです。勝率帯の自動補正そのもののオンオフは、下の「自動補正をプランに適用する」を使います。</p>`;
     for (const [axis, rows] of Object.entries(data.axes || {})) {
       const on = enabled[axis] !== false;
-      html += `<h3>${axis} <label style="font-weight:normal;font-size:13px;"><input type="checkbox" class="calAxisToggle" data-axis="${axis}" ${on ? "checked" : ""}> 表示</label></h3>`;
+      html += `<h3>${axis} <label style="font-weight:normal;font-size:13px;"><input type="checkbox" class="calAxisToggle" data-axis="${axis}" ${on ? "checked" : ""}> この軸を表示</label></h3>`;
       if (!on) {
         html += `<p class="note">(非表示)</p>`;
         continue;
       }
-      html += `<table><tr><th>条件</th><th>n</th><th>raw有</th>
-        <th>前・精度%</th><th>前・乖離pt</th><th>前・p値%</th>
-        <th>後・精度%</th><th>後・乖離pt</th><th>後・p値%</th><th>改善</th></tr>`;
+      html += `<table><tr>
+        <th>条件</th><th>件数</th><th>補正前あり</th>
+        <th>補正前・予想精度%</th><th>補正前・乖離(ポイント)</th><th>補正前・p値%</th>
+        <th>補正後・予想精度%</th><th>補正後・乖離(ポイント)</th><th>補正後・p値%</th>
+        <th>補正の効果</th></tr>`;
       for (const row of rows) {
         const b = row.before || {};
         const a = row.after || {};
-        const imp = row.calibration_improved == null ? "-" : (row.calibration_improved ? "改善" : "悪化/同等");
+        const imp = row.calibration_improved == null ? "-" : (row.calibration_improved ? "改善" : "悪化または同等");
         html += `<tr><td>${row.bucket}</td><td>${row.n_total}</td><td>${row.n_with_raw}</td>
           <td>${b.accuracy_pct ?? "-"}</td><td>${b.deviation_pt ?? "-"}</td><td>${b.p_value_pct ?? "-"}</td>
           <td>${a.accuracy_pct ?? "-"}</td><td>${a.deviation_pt ?? "-"}</td><td>${a.p_value_pct ?? "-"}</td>
