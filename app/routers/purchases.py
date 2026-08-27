@@ -67,7 +67,7 @@ def get_calibration_factors(db: Session) -> dict:
     結果確定済みのもの)も合わせて集計する。以前はPurchaseしか見ておらず、
     大穴帯は「投票から除外され続ける限りデータも永遠に貯まらない」状態になっていた。
     見送った買い目も「予想確率 vs 実際の結果」というデータとしては全く同じ形なので、
-    的中検証・自動補正には활用できる(のんの指摘により修正。投票対象からの除外と、
+    的中検証・自動補正には活用できる(のんの指摘により修正。投票対象からの除外と、
     集計・検証対象からの除外は別問題)。
     """
     purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
@@ -594,7 +594,7 @@ def calibration_compare(db: Session = Depends(get_db)):
     return {
         "n_records": len(recs),
         "n_without_raw": n_without_raw,
-        "note": "補正前は、補正前確率が保存されているレコードのみ集計。旧データは補正後のみ表示。",
+        "note": "beforeはwin_prob_rawがあるレコードのみ。旧データはafterのみ。",
         "axes": result_axes,
     }
 
@@ -833,13 +833,9 @@ def purchase_stats(db: Session = Depends(get_db)):
     """
     purchases_only = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
     class _SkippedAsPurchase:
-        """Purchaseと同じ属性集合を持つ見送りの擬似レコード。
-        purchase_stats内で p.odds_at_purchase 等を参照するため、不足属性は None/0 で埋める。
-        """
         __slots__ = (
             "race_id", "bet_type", "combination", "stake_amount", "payout_amount",
-            "result", "win_prob_at_purchase", "win_prob_raw", "ev_pct_at_purchase",
-            "odds_at_purchase", "final_odds", "tags", "is_skipped_record",
+            "result", "win_prob_at_purchase", "ev_pct_at_purchase", "is_skipped_record",
         )
         def __init__(self, s):
             self.race_id = s.race_id
@@ -849,11 +845,7 @@ def purchase_stats(db: Session = Depends(get_db)):
             self.payout_amount = 0.0
             self.result = s.actual_result
             self.win_prob_at_purchase = s.win_prob_estimated
-            self.win_prob_raw = getattr(s, "win_prob_raw", None)
             self.ev_pct_at_purchase = s.ev_pct_estimated
-            self.odds_at_purchase = None
-            self.final_odds = None
-            self.tags = None
             self.is_skipped_record = True
     skipped_eval = (
         db.query(models.SkippedBet)
@@ -916,9 +908,8 @@ def purchase_stats(db: Session = Depends(get_db)):
                 "stake": 0.0, "payout": 0.0, "count": 0, "wins": 0,
                 "win_prob_sum": 0.0, "win_prob_count": 0,
                 "ev_profit_sum": 0.0, "ev_stake_sum": 0.0,
+                "purchased_count": 0,
             })
-            b["stake"] += p.stake_amount
-            b["payout"] += p.payout_amount
             b["count"] += 1
             if p.result == "win":
                 b["wins"] += 1
@@ -927,14 +918,24 @@ def purchase_stats(db: Session = Depends(get_db)):
             if p.win_prob_at_purchase is not None:
                 b["win_prob_sum"] += p.win_prob_at_purchase
                 b["win_prob_count"] += 1
-            # 投資額で加重平均する(証拠金の日々の変動で1点あたりの投資額が違うため、
-            # 単純平均だと少額の買い目と高額の買い目が同じ重みになってしまう)。
-            if p.ev_pct_at_purchase is not None:
-                b["ev_profit_sum"] += p.stake_amount * p.ev_pct_at_purchase / 100
-                b["ev_stake_sum"] += p.stake_amount
+            # 見送り(SkippedBet)は実際にお金を賭けていない(stake=0固定)ため、
+            # 的中率の検証には使うが、収支(実績金額)の集計には混ぜない
+            # (のんの指摘により修正。以前は見送りのstake=0がそのまま平均に混ざり、
+            # 見送りが大半を占める勝率帯[特に大穴]の「実績」が実態と無関係に0%表示に
+            # なっていた)。
+            if p.stake_amount > 0:
+                b["purchased_count"] += 1
+                b["stake"] += p.stake_amount
+                b["payout"] += p.payout_amount
+                # 投資額で加重平均する(証拠金の日々の変動で1点あたりの投資額が違うため、
+                # 単純平均だと少額の買い目と高額の買い目が同じ重みになってしまう)。
+                if p.ev_pct_at_purchase is not None:
+                    b["ev_profit_sum"] += p.stake_amount * p.ev_pct_at_purchase / 100
+                    b["ev_stake_sum"] += p.stake_amount
         out = {}
         for k, v in buckets.items():
-            expectancy = ((v["payout"] - v["stake"]) / v["stake"] * 100) if v["stake"] else 0
+            has_purchase = v["purchased_count"] > 0
+            expectancy = ((v["payout"] - v["stake"]) / v["stake"] * 100) if has_purchase else None
             expected_win_rate_pct = (
                 round(v["win_prob_sum"] / v["win_prob_count"] * 100, 1) if v["win_prob_count"] else None
             )
@@ -947,17 +948,22 @@ def purchase_stats(db: Session = Depends(get_db)):
             expected_profit = round(v["ev_profit_sum"], 0) if v["ev_stake_sum"] else None
             out[k] = {
                 "count": v["count"],
+                "purchased_count": v["purchased_count"],
                 "win_rate_pct": round(v["wins"] / v["count"] * 100, 1),
                 "expected_win_rate_pct": expected_win_rate_pct,
                 # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
-                "roi_pct": round(expectancy + 100, 2),
-                "expectancy_pct": round(expectancy, 2),
-                "profit": round(v["payout"] - v["stake"], 0),
+                # 実際に購入した件数が0件(見送りのみ)の場合はNone(集計不可)にする。
+                "roi_pct": round(expectancy + 100, 2) if expectancy is not None else None,
+                "expectancy_pct": round(expectancy, 2) if expectancy is not None else None,
+                "profit": round(v["payout"] - v["stake"], 0) if has_purchase else None,
                 "expected_roi_pct": expected_roi_pct,
                 "expected_profit": expected_profit,
             }
-        # 実績が高い順に並べ替える
-        return dict(sorted(out.items(), key=lambda item: -item[1]["expectancy_pct"]))
+        # 実績が高い順に並べ替える(見送りのみで実績算出不可のものは末尾に回す)
+        return dict(sorted(
+            out.items(),
+            key=lambda item: (item[1]["expectancy_pct"] is None, -(item[1]["expectancy_pct"] or 0)),
+        ))
 
     def prob_bucket(p):
         prob = p.win_prob_at_purchase or 0
@@ -1101,11 +1107,16 @@ def purchase_stats(db: Session = Depends(get_db)):
                     "category": category,
                     "condition": key,
                     "count": v["count"],
+                    "purchased_count": v["purchased_count"],
                     "win_rate_pct": v["win_rate_pct"],
                     "expected_win_rate_pct": v["expected_win_rate_pct"],
                     "expectancy_pct": v["expectancy_pct"],
                     "expected_roi_pct": v["expected_roi_pct"],
                 })
+    # 見送りのみ(実績算出不可=expectancy_pct が None)の条件はランキングに含めない
+    # (のんの指摘により修正。以前は0%扱いされ、大穴帯の見送りばかりが
+    # 「不調な条件」の上位を占めてしまっていた)。
+    ranking = [r for r in ranking if r["expectancy_pct"] is not None]
     ranking.sort(key=lambda x: -x["expectancy_pct"])
 
     # 全体の想定期待値・想定的中率(購入時点でAIが見積もっていた値の平均)
@@ -1319,287 +1330,3 @@ def skipped_stats(db: Session = Depends(get_db)):
         "missed_opportunities_count": len(missed_opportunities),
         "missed_profit_total": missed_profit,
     }
-
-
-@router.get("/profit-concentration")
-def profit_concentration(db: Session = Depends(get_db)):
-    """
-    利益が「少数の高オッズ的中」に集中しているかを確認する。
-    - 的中買い目のオッズ分布
-    - 払戻・利益の上位集中度
-    - 券種×勝率帯ごとの的中寄与
-    """
-    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
-    if not purchases:
-        return {"message": "まだ確定した購入履歴がありません"}
-
-    wins = [p for p in purchases if p.result == "win"]
-    losses = [p for p in purchases if p.result == "lose"]
-    total_stake = sum(p.stake_amount for p in purchases)
-    total_payout = sum(p.payout_amount for p in purchases)
-    total_profit = total_payout - total_stake
-
-    if not wins:
-        return {
-            "message": "的中が1件もありません",
-            "総ベット数": len(purchases),
-            "的中件数": 0,
-            "総投資額": round(total_stake, 0),
-            "総払戻": round(total_payout, 0),
-            "総損益": round(total_profit, 0),
-        }
-
-    def odds_of(p):
-        if p.final_odds is not None and p.final_odds > 0:
-            return p.final_odds
-        if p.odds_at_purchase is not None and p.odds_at_purchase > 0:
-            return p.odds_at_purchase
-        if p.stake_amount and p.stake_amount > 0 and p.payout_amount:
-            return p.payout_amount / p.stake_amount
-        return None
-
-    win_rows = []
-    for p in wins:
-        o = odds_of(p)
-        profit = (p.payout_amount or 0) - (p.stake_amount or 0)
-        win_rows.append({
-            "purchase": p,
-            "odds": o,
-            "payout": p.payout_amount or 0,
-            "stake": p.stake_amount or 0,
-            "profit": profit,
-            "win_prob": p.win_prob_at_purchase,
-        })
-
-    # 利益寄与の大きい順
-    by_profit = sorted(win_rows, key=lambda x: -x["profit"])
-    by_payout = sorted(win_rows, key=lambda x: -x["payout"])
-
-    def share(rows, key, n, total):
-        if total <= 0:
-            return None
-        s = sum(r[key] for r in rows[:n])
-        return round(s / total * 100, 1)
-
-    total_win_payout = sum(r["payout"] for r in win_rows)
-    total_win_profit = sum(r["profit"] for r in win_rows)
-
-    odds_list = sorted([r["odds"] for r in win_rows if r["odds"] is not None])
-    def percentile(sorted_vals, pct):
-        if not sorted_vals:
-            return None
-        i = int(round((len(sorted_vals) - 1) * pct / 100))
-        return round(sorted_vals[max(0, min(i, len(sorted_vals) - 1))], 2)
-
-    # オッズ帯別
-    def odds_band(o):
-        if o is None:
-            return "オッズ不明"
-        if o < 10:
-            return "〜10倍"
-        if o < 30:
-            return "10〜30倍"
-        if o < 100:
-            return "30〜100倍"
-        if o < 300:
-            return "100〜300倍"
-        return "300倍以上"
-
-    band_stats = {}
-    for r in win_rows:
-        b = odds_band(r["odds"])
-        st = band_stats.setdefault(b, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
-        st["的中件数"] += 1
-        st["払戻合計"] += r["payout"]
-        st["利益合計"] += r["profit"]
-    for b, st in band_stats.items():
-        st["払戻合計"] = round(st["払戻合計"], 0)
-        st["利益合計"] = round(st["利益合計"], 0)
-        st["払戻が全体払戻に占める割合%"] = (
-            round(st["払戻合計"] / total_win_payout * 100, 1) if total_win_payout else None
-        )
-        st["利益が全体利益に占める割合%"] = (
-            round(st["利益合計"] / total_profit * 100, 1) if total_profit else None
-        )
-    # 帯の表示順
-    band_order = ["〜10倍", "10〜30倍", "30〜100倍", "100〜300倍", "300倍以上", "オッズ不明"]
-    的中オッズ帯別 = {k: band_stats[k] for k in band_order if k in band_stats}
-
-    # 券種別
-    by_bet = {}
-    for r in win_rows:
-        bt = r["purchase"].bet_type or "不明"
-        st = by_bet.setdefault(bt, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
-        st["的中件数"] += 1
-        st["払戻合計"] += r["payout"]
-        st["利益合計"] += r["profit"]
-    for st in by_bet.values():
-        st["払戻合計"] = round(st["払戻合計"], 0)
-        st["利益合計"] = round(st["利益合計"], 0)
-
-    # 勝率帯別(購入時の想定勝率)
-    by_prob = {}
-    for r in win_rows:
-        if r["win_prob"] is None:
-            name = "想定勝率なし"
-        else:
-            name, _ = calc.get_prob_bucket(r["win_prob"])
-        st = by_prob.setdefault(name, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
-        st["的中件数"] += 1
-        st["払戻合計"] += r["payout"]
-        st["利益合計"] += r["profit"]
-    for st in by_prob.values():
-        st["払戻合計"] = round(st["払戻合計"], 0)
-        st["利益合計"] = round(st["利益合計"], 0)
-
-    # レース単位: 各レースの損益
-    race_profit = {}
-    for p in purchases:
-        race_profit[p.race_id] = race_profit.get(p.race_id, 0.0) + (p.payout_amount or 0) - (p.stake_amount or 0)
-    race_profits_sorted = sorted(race_profit.values(), reverse=True)
-    n_races = len(race_profit)
-    n_green = sum(1 for x in race_profits_sorted if x > 0)
-    top_race_profit_share = None
-    if total_profit and total_profit > 0:
-        top_race_profit_share = round(sum(x for x in race_profits_sorted[:5] if x > 0) / total_profit * 100, 1)
-
-    # 判定コメント
-    top10_profit_pct = share(by_profit, "profit", 10, total_profit) if total_profit > 0 else None
-    top10_payout_pct = share(by_payout, "payout", 10, total_win_payout) if total_win_payout > 0 else None
-    high_odds_profit = sum(r["profit"] for r in win_rows if r["odds"] is not None and r["odds"] >= 100)
-    high_odds_share = round(high_odds_profit / total_profit * 100, 1) if total_profit > 0 else None
-
-    judgement = []
-    if top10_profit_pct is not None and top10_profit_pct >= 50:
-        judgement.append("利益の半分以上が的中上位10件に集中しています。高配当の少数的中への依存が強いです。")
-    elif top10_profit_pct is not None and top10_profit_pct >= 30:
-        judgement.append("利益の3割以上が的中上位10件にあります。やや高配当依存の傾向があります。")
-    else:
-        judgement.append("的中上位10件への利益集中は比較的抑えめです。")
-    if high_odds_share is not None and high_odds_share >= 50:
-        judgement.append("100倍以上の的中が全体利益の半分以上を占めています。")
-    if n_races and n_green / n_races < 0.15:
-        judgement.append("黒字レースの割合が低めです。少数レースの好調に支えられている可能性があります。")
-    elif n_races and n_green / n_races >= 0.2:
-        judgement.append("黒字レースがある程度分散しています。")
-
-    # --- 高オッズの「継続性」 ---
-    # 購入時点オッズで帯分けし、的中率を見る(「たまたま1発」か「帯として当たっているか」)
-    def purchase_odds(p):
-        if p.odds_at_purchase is not None and p.odds_at_purchase > 0:
-            return p.odds_at_purchase
-        if p.final_odds is not None and p.final_odds > 0:
-            return p.final_odds
-        return None
-
-    def continuity_for_threshold(min_odds, label):
-        subset = []
-        for p in purchases:
-            o = purchase_odds(p)
-            if o is not None and o >= min_odds:
-                subset.append(p)
-        if not subset:
-            return {
-                "ラベル": label,
-                "購入件数": 0,
-                "的中件数": 0,
-                "的中率%": None,
-                "的中したレース数": 0,
-                "コメント": f"{label}の購入がまだありません",
-            }
-        hits = [p for p in subset if p.result == "win"]
-        hit_races = {p.race_id for p in hits}
-        all_races = {p.race_id for p in subset}
-        rate = round(len(hits) / len(subset) * 100, 2)
-        # 的中が1レースに集中していないか
-        from collections import Counter
-        race_hit_counts = Counter(p.race_id for p in hits)
-        max_hits_one_race = max(race_hit_counts.values()) if race_hit_counts else 0
-        comment = ""
-        if len(hits) == 0:
-            comment = "的中ゼロ。この帯は現状再現できていません。"
-        elif len(hit_races) == 1 and len(hits) >= 2:
-            comment = "的中が1レースに集中。継続性はまだ弱いです。"
-        elif len(hits) <= 2 and len(subset) >= 20:
-            comment = "的中がごく少数。高配当依存の「たまたま」寄りの可能性。"
-        elif len(hit_races) >= 3:
-            comment = "複数レースで的中あり。帯としての継続性を議論できる段階です。"
-        else:
-            comment = "サンプルを増やして再評価してください。"
-        return {
-            "ラベル": label,
-            "購入件数": len(subset),
-            "的中件数": len(hits),
-            "的中率%": rate,
-            "購入したレース数": len(all_races),
-            "的中したレース数": len(hit_races),
-            "1レースあたり最大的中件数": max_hits_one_race,
-            "コメント": comment,
-        }
-
-    高オッズ継続性 = {
-        "30倍以上": continuity_for_threshold(30, "30倍以上"),
-        "100倍以上": continuity_for_threshold(100, "100倍以上"),
-        "300倍以上": continuity_for_threshold(300, "300倍以上"),
-    }
-    # 継続性に基づく総合コメント
-    c100 = 高オッズ継続性["100倍以上"]
-    if c100["購入件数"] and c100["的中件数"] == 0:
-        judgement.append("100倍以上は購入しているが的中ゼロ。制限を検討する段階です。")
-    elif c100["的中件数"] and c100["的中したレース数"] <= 1:
-        judgement.append("100倍以上の的中がごく限られたレースに偏っています。継続性はまだ確認できません。")
-    elif c100["的中したレース数"] and c100["的中したレース数"] >= 3:
-        judgement.append("100倍以上が複数レースで的中しています。高オッズを残す方針と整合的です。")
-
-    # 上位的中一覧(最大15件) — 個人情報は選手名なし、レースIDと券種・買い目・オッズ
-    top_hits = []
-    for r in by_profit[:15]:
-        p = r["purchase"]
-        top_hits.append({
-            "レースID": p.race_id,
-            "券種": p.bet_type,
-            "買い目": p.combination,
-            "オッズ": round(r["odds"], 1) if r["odds"] is not None else None,
-            "投資額": round(r["stake"], 0),
-            "払戻": round(r["payout"], 0),
-            "利益": round(r["profit"], 0),
-            "購入時想定勝率%": round(r["win_prob"] * 100, 2) if r["win_prob"] is not None else None,
-        })
-
-    return {
-        "概要": {
-            "総ベット数": len(purchases),
-            "的中件数": len(wins),
-            "不的中件数": len(losses),
-            "総投資額": round(total_stake, 0),
-            "総払戻": round(total_payout, 0),
-            "総損益": round(total_profit, 0),
-            "的中からの払戻合計": round(total_win_payout, 0),
-        },
-        "的中オッズの分布": {
-            "件数_オッズ判明": len(odds_list),
-            "最小倍": percentile(odds_list, 0),
-            "中央値倍": percentile(odds_list, 50),
-            "平均倍": round(sum(odds_list) / len(odds_list), 2) if odds_list else None,
-            "75%点倍": percentile(odds_list, 75),
-            "90%点倍": percentile(odds_list, 90),
-            "最大倍": percentile(odds_list, 100),
-        },
-        "集中度": {
-            "的中上位5件が全体利益に占める割合%": share(by_profit, "profit", 5, total_profit) if total_profit > 0 else None,
-            "的中上位10件が全体利益に占める割合%": top10_profit_pct,
-            "的中上位10件が的中払戻に占める割合%": top10_payout_pct,
-            "100倍以上の的中が全体利益に占める割合%": high_odds_share,
-            "黒字レース数": n_green,
-            "対象レース数": n_races,
-            "黒字レース割合%": round(n_green / n_races * 100, 1) if n_races else None,
-            "利益上位5レースが全体利益に占める割合%": top_race_profit_share,
-        },
-        "判定": judgement,
-        "的中オッズ帯別": 的中オッズ帯別,
-        "的中の券種別": by_bet,
-        "的中の想定勝率帯別": by_prob,
-        "利益の大きい的中_上位": top_hits,
-        "高オッズ継続性": 高オッズ継続性,
-    }
-
