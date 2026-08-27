@@ -836,6 +836,7 @@ def purchase_stats(db: Session = Depends(get_db)):
         __slots__ = (
             "race_id", "bet_type", "combination", "stake_amount", "payout_amount",
             "result", "win_prob_at_purchase", "ev_pct_at_purchase", "is_skipped_record",
+            "odds_at_purchase", "final_odds",
         )
         def __init__(self, s):
             self.race_id = s.race_id
@@ -847,6 +848,11 @@ def purchase_stats(db: Session = Depends(get_db)):
             self.win_prob_at_purchase = s.win_prob_estimated
             self.ev_pct_at_purchase = s.ev_pct_estimated
             self.is_skipped_record = True
+            # 見送りはオッズ変動(投票時→最終)の追跡対象ではないため常にNone
+            # (のんの実機運用で発覚したAttributeErrorを修正。以前はこの属性自体が
+            # 無く、見送りを含む集計処理が軒並み500エラーになっていた)。
+            self.odds_at_purchase = None
+            self.final_odds = None
     skipped_eval = (
         db.query(models.SkippedBet)
         .filter(models.SkippedBet.actual_result.isnot(None))
