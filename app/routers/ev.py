@@ -57,6 +57,7 @@ def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list
             bet_type=c["bet_type"],
             combination=c["combination"],
             win_prob_estimated=c["win_prob"],
+            win_prob_raw=c.get("win_prob_raw"),
             ev_pct_estimated=c["ev_pct"],
             reason=reason,
         ))
@@ -345,10 +346,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         }
 
     candidates = []
-    # 買い示唆が1件も無かった場合でも、評価は全て済んでいるこの組み合わせ群を
-    # SkippedBetとして記録できるよう保持しておく(のんの指摘によるバグ修正)。
-    # 以前はcandidates(=is_recommendedを通ったものだけ)が空だと即returnし、
-    # そのレースの評価結果が一切記録・検証対象にならなかった。
+    # 買い示唆に至ったかどうかに関わらず、評価した組み合わせを全て保持しておく
+    # (下で見送り記録に使うため)。
     all_evaluated = []
     calibration_factors = purchases_router.get_calibration_factors(db)
     for o in odds_rows:
@@ -393,8 +392,22 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "prediction_accuracy_pct": accuracy_pct,
         })
 
-    excluded_low_prob_count = 0
+    # 買い示唆にすら至らなかった組み合わせ(最低勝率フィルターや期待値の閾値で
+    # 弾かれたもの)も、大穴帯を中心に大量データを集めて検証したいため、全て見送り
+    # 記録の対象にする(のんの要望により追加)。
+    # 以前は「そのレースで買い示唆が1件も無かった場合」にしか記録されておらず、
+    # 他に買い示唆があるレースでは、そもそも候補に入らなかった大穴帯等の組み合わせが
+    # 記録から漏れていた。投票プラン自体の絞り込み(表示・購入対象)は変更せず、
+    # 検証用データの収集だけを目的とした追加。
+    recommended_keys = {(c["bet_type"], c["combination"]) for c in candidates}
     skipped_for_verification = []  # (candidate, reason) 後でSkippedBetとして記録する
+    for e in all_evaluated:
+        if e["ev_pct"] <= 0:
+            continue  # 期待値マイナスは見送って当然のため検証対象にしない
+        if (e["bet_type"], e["combination"]) not in recommended_keys:
+            skipped_for_verification.append((e, "買い示唆なし(EV/確率が閾値未満)"))
+
+    excluded_low_prob_count = 0
     if req.exclude_low_prob_warning:
         before_count = len(candidates)
         kept = []
@@ -407,14 +420,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         excluded_low_prob_count = before_count - len(candidates)
 
     if not candidates:
-        # バグ修正: 以前はここで即returnしていたため、買い示唆が0件のレースは
-        # 結果確定してもSkippedBetが1件も作られず、確率帯ごとのキャリブレーション・
-        # 見送り検証データに一切反映されなかった(のんの指摘により修正)。
-        # 評価済みの全組み合わせ(all_evaluated)を「買い示唆なし」として見送り記録する。
-        _save_skipped_bets(
-            db, race_id,
-            [(c, "買い示唆なし(EV/確率が閾値未満)") for c in all_evaluated],
-        )
+        _save_skipped_bets(db, race_id, skipped_for_verification)
         return {
             "race_id": race_id,
             "message": "安全マージンを満たす買い示唆がありませんでした(見送り推奨)",
