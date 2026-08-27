@@ -51,6 +51,14 @@ def warmup_backend():
 def step1_import(payload):
     """1. データ取得(登録): スクレイパーJSONをバックエンドに取り込む"""
     r = requests.post(f"{API_BASE}/scraper-import/race", json=payload, timeout=90)
+    if r.status_code >= 400:
+        # 以前はエラーの中身(なぜダメだったか)が見えず原因調査に手間取っていたため、
+        # サーバーから返ってきた理由をログに出すようにした(のんの実機運用で判明・修正)。
+        try:
+            detail = r.json().get("detail", r.text)
+        except Exception:
+            detail = r.text
+        log(f"   → サーバーからの理由: {detail}")
     r.raise_for_status()
     return r.json()
 
