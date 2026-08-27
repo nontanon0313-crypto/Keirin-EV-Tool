@@ -951,6 +951,78 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
   }
 });
 
+
+document.getElementById("recommendRacePctBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("simResult");
+  let bankroll;
+  try {
+    const bankrollRes = await fetch(apiUrl("/bankroll/"));
+    const bankrollData = await bankrollRes.json();
+    bankroll = bankrollData.current_balance;
+  } catch (e) {
+    resultBox.textContent = "証拠金の取得に失敗: " + e.message;
+    return;
+  }
+  if (!bankroll) {
+    resultBox.textContent = "証拠金残高がありません。証拠金タブで設定してください。";
+    return;
+  }
+  const winProb = parseFloat(document.getElementById("simWinProb").value) / 100;
+  const odds = parseFloat(document.getElementById("simOdds").value);
+  const betsPerRace = parseInt(document.getElementById("simBetsPerRace").value) || 8;
+  const numRaces = parseInt(document.getElementById("simNumRaces").value) || 20;
+  const maxRuin = parseFloat(document.getElementById("simMaxRuinPct").value);
+  if (Number.isNaN(maxRuin) || maxRuin < 0) {
+    resultBox.textContent = "許容する破産確率(%)を正しく入力してください。";
+    return;
+  }
+  resultBox.textContent = "許容破産確率から1レース上限%を探索中...(数十秒かかることがあります)";
+  try {
+    const res = await fetch(apiUrl("/simulation/recommend-race-pct"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initial_bankroll: bankroll,
+        win_prob: winProb,
+        odds_value: odds,
+        bets_per_race: betsPerRace,
+        num_races: numRaces,
+        max_ruin_probability_pct: maxRuin,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    if (!data["見つかった"]) {
+      resultBox.innerHTML = `<p>${data["メッセージ"] || "条件を満たす上限が見つかりませんでした。"}</p>`;
+      return;
+    }
+    const pct = data["推奨_1レース上限%"];
+    document.getElementById("simRacePct").value = pct;
+    resultBox.innerHTML =
+      `<p><strong>${data["メッセージ"]}</strong></p>` +
+      `<p>その上限での破産確率: ${data["その上限での破産確率%"]}% ／ 黒字化率: ${data["黒字化率%"]}%</p>` +
+      `<p>平均最終資金: ${data["平均最終資金"]}円</p>` +
+      `<p class="note">下のボタンで詳細設定へ反映し、実投票のプラン作成時のみ使います。</p>` +
+      `<button type="button" id="applySimRacePctBtn" style="background:#16a34a;width:auto;padding:8px 14px;">この1レース上限${pct}%を詳細設定に反映する</button>`;
+    const applyBtn = document.getElementById("applySimRacePctBtn");
+    if (applyBtn) {
+      applyBtn.addEventListener("click", () => {
+        const maxInput = document.getElementById("maxRacePctInput");
+        if (maxInput) {
+          maxInput.value = pct;
+          if (typeof saveSettingsToStorage === "function") saveSettingsToStorage();
+        }
+        const useSim = document.getElementById("useSimRaceCapCheckbox");
+        if (useSim) useSim.checked = true;
+        alert(`1レース上限を${pct}%に反映しました。実投票のプラン作成時のみ使われます。`);
+      });
+    }
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
+
 // ---------- ⑤ 実績検証 ----------
 function renderBucketTable(title, bucketObj) {
   if (!bucketObj || Object.keys(bucketObj).length === 0) return "";
