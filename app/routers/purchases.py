@@ -74,14 +74,17 @@ def get_calibration_factors(db: Session) -> dict:
     skipped = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None)).all()
 
     # Purchase/SkippedBetを「予想確率・的中したか・情報源」という共通の形に正規化して結合する
-    records = [
-        (p.win_prob_at_purchase, p.result == "win", "purchase")
-        for p in purchases if p.win_prob_at_purchase is not None
-    ]
-    records += [
-        (s.win_prob_estimated, s.actual_result == "win", "skipped")
-        for s in skipped if s.win_prob_estimated is not None
-    ]
+    # 補正係数は「補正前の予想 vs 実績」から学ぶ。rawが無い旧データは
+    # win_prob_at_purchase(当時の判断値)にフォールバックする。
+    records = []
+    for p in purchases:
+        prob = p.win_prob_raw if getattr(p, "win_prob_raw", None) is not None else p.win_prob_at_purchase
+        if prob is not None:
+            records.append((prob, p.result == "win", "purchase"))
+    for s in skipped:
+        prob = s.win_prob_raw if getattr(s, "win_prob_raw", None) is not None else s.win_prob_estimated
+        if prob is not None:
+            records.append((prob, s.actual_result == "win", "skipped"))
 
     result = {}
     for lo, hi, name, mid in calc.PROB_BUCKETS:
@@ -393,6 +396,208 @@ def calibration_status(db: Session = Depends(get_db)):
         }
 
     return {"overall": overall, "buckets": buckets}
+
+
+@router.get("/calibration-compare")
+def calibration_compare(db: Session = Depends(get_db)):
+    """
+    条件別に「補正前(raw)」と「補正後(calibrated)」の予想精度・乖離・p値を並べる。
+    rawが無い旧レコードは before 側から除外し、件数を note で明示する。
+    """
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    skipped = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None)).all()
+
+    race_ids = {p.race_id for p in purchases} | {s.race_id for s in skipped}
+    races_by_id = {
+        r.id: r
+        for r in db.query(models.Race).options(joinedload(models.Race.bank)).filter(models.Race.id.in_(race_ids)).all()
+    } if race_ids else {}
+    entries_by_race = {}
+    if race_ids:
+        for e in db.query(models.Entry).filter(models.Entry.race_id.in_(race_ids)).all():
+            entries_by_race.setdefault(e.race_id, []).append(e)
+
+    class Rec:
+        __slots__ = ("race_id", "bet_type", "combination", "won", "prob_raw", "prob_cal", "source")
+        def __init__(self, race_id, bet_type, combination, won, prob_raw, prob_cal, source):
+            self.race_id = race_id
+            self.bet_type = bet_type
+            self.combination = combination
+            self.won = won
+            self.prob_raw = prob_raw
+            self.prob_cal = prob_cal
+            self.source = source
+
+    recs = []
+    n_without_raw = 0
+    for p in purchases:
+        raw = getattr(p, "win_prob_raw", None)
+        cal = p.win_prob_at_purchase
+        if cal is None and raw is None:
+            continue
+        if raw is None:
+            n_without_raw += 1
+        recs.append(Rec(p.race_id, p.bet_type, p.combination, p.result == "win", raw, cal, "purchase"))
+    for s in skipped:
+        raw = getattr(s, "win_prob_raw", None)
+        cal = s.win_prob_estimated
+        if cal is None and raw is None:
+            continue
+        if raw is None:
+            n_without_raw += 1
+        recs.append(Rec(s.race_id, s.bet_type, s.combination, s.actual_result == "win", raw, cal, "skipped"))
+
+    def metrics(prob_attr_recs):
+        """list of (prob, won)"""
+        if not prob_attr_recs:
+            return None
+        n = len(prob_attr_recs)
+        wins = sum(1 for _, w in prob_attr_recs if w)
+        actual = wins / n
+        predicted = sum(p for p, _ in prob_attr_recs) / n
+        accuracy = calc.prediction_accuracy_pct(actual, predicted)
+        deviation_pt = round((actual - predicted) * 100, 2)
+        p_value_pct = round(calc.binomial_lower_tail_p(wins, n, predicted) * 100, 2)
+        return {
+            "n": n,
+            "wins": wins,
+            "actual_win_rate_pct": round(actual * 100, 2),
+            "predicted_avg_pct": round(predicted * 100, 2),
+            "accuracy_pct": accuracy,
+            "deviation_pt": deviation_pt,
+            "p_value_pct": p_value_pct,
+        }
+
+    def line_bucket(r):
+        race = races_by_id.get(r.race_id)
+        if not race or not race.lines_data:
+            return "ライン情報なし"
+        line_map = {}
+        for idx, line in enumerate(race.lines_data):
+            for car in line:
+                try:
+                    line_map[int(car)] = idx
+                except (TypeError, ValueError):
+                    pass
+        try:
+            cars = [int(x) for x in r.combination.split("-")]
+        except ValueError:
+            return "ライン情報なし"
+        line_ids = [line_map.get(c) for c in cars]
+        if any(lid is None for lid in line_ids):
+            return "ライン情報なし"
+        return "同ライン絡み" if len(set(line_ids)) == 1 else "異なるライン混在"
+
+    def lines_presence(r):
+        race = races_by_id.get(r.race_id)
+        if race and race.lines_data:
+            return "並びあり"
+        return "並びなし"
+
+    def line_position(r):
+        race = races_by_id.get(r.race_id)
+        if not race or not race.lines_data:
+            return "位置不明"
+        pos_map = {}
+        for line in race.lines_data:
+            for i, car in enumerate(line):
+                try:
+                    pos_map[int(car)] = i  # 0=先頭
+                except (TypeError, ValueError):
+                    pass
+        try:
+            cars = [int(x) for x in r.combination.split("-")]
+        except ValueError:
+            return "位置不明"
+        positions = [pos_map.get(c) for c in cars]
+        if any(p is None for p in positions):
+            return "位置不明"
+        if all(p == 0 for p in positions):
+            return "先頭のみ"
+        if all(p is not None and p > 0 for p in positions):
+            return "番手以降のみ"
+        return "先頭と番手混在"
+
+    def kimarite_bucket(r):
+        entries = entries_by_race.get(r.race_id) or []
+        by_car = {e.car_number: e for e in entries}
+        try:
+            cars = [int(x) for x in r.combination.split("-")]
+        except ValueError:
+            return "決まり手不明"
+        labels = []
+        for c in cars:
+            e = by_car.get(c)
+            if not e:
+                labels.append("?")
+                continue
+            scores = {
+                "逃": e.kimarite_nige or 0,
+                "捲": e.kimarite_makuri or 0,
+                "差": e.kimarite_sashi or 0,
+                "マ": e.kimarite_mark or 0,
+            }
+            top = max(scores, key=scores.get)
+            if scores[top] <= 0:
+                labels.append("不明")
+            else:
+                labels.append(top)
+        return "決まり手:" + "-".join(labels)
+
+    def bank_bucket(r):
+        race = races_by_id.get(r.race_id)
+        return race.venue_name if race else "会場不明"
+
+    def bet_type_bucket(r):
+        return r.bet_type
+
+    def prob_bucket_cal(r):
+        prob = r.prob_cal if r.prob_cal is not None else r.prob_raw or 0
+        name, _ = calc.get_prob_bucket(prob)
+        return name
+
+    axes = {
+        "券種別": bet_type_bucket,
+        "勝率帯別": prob_bucket_cal,
+        "バンク別": bank_bucket,
+        "ライン絡み別": line_bucket,
+        "並び有無": lines_presence,
+        "ライン内位置": line_position,
+        "決まり手構成": kimarite_bucket,
+    }
+
+    result_axes = {}
+    for axis_name, key_fn in axes.items():
+        buckets = {}
+        for r in recs:
+            key = key_fn(r)
+            buckets.setdefault(key, []).append(r)
+        rows = []
+        for key, group in sorted(buckets.items(), key=lambda x: -len(x[1])):
+            before_pairs = [(r.prob_raw, r.won) for r in group if r.prob_raw is not None]
+            after_pairs = [(r.prob_cal, r.won) for r in group if r.prob_cal is not None]
+            before = metrics(before_pairs)
+            after = metrics(after_pairs)
+            improved = None
+            if before and after and before.get("accuracy_pct") is not None and after.get("accuracy_pct") is not None:
+                improved = after["accuracy_pct"] >= before["accuracy_pct"]
+            rows.append({
+                "bucket": key,
+                "n_total": len(group),
+                "n_with_raw": len(before_pairs),
+                "before": before,
+                "after": after,
+                "calibration_improved": improved,
+            })
+        result_axes[axis_name] = rows
+
+    return {
+        "n_records": len(recs),
+        "n_without_raw": n_without_raw,
+        "note": "beforeはwin_prob_rawがあるレコードのみ。旧データはafterのみ。",
+        "axes": result_axes,
+    }
+
 
 
 @router.delete("/{purchase_id}")

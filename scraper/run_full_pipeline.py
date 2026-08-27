@@ -126,6 +126,7 @@ def step4_record_purchases(race_id, plan):
                 "stake_amount": it["stake"],
                 "odds_at_purchase": it.get("odds_value"),
                 "win_prob_at_purchase": it["win_prob"] if "win_prob" in it else it.get("estimated_win_prob_pct", 0) / 100,
+                "win_prob_raw": it.get("win_prob_raw"),
                 "ev_pct_at_purchase": it.get("ev_pct"),
             }
             for it in items

@@ -145,8 +145,11 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     low_prob_warnings = {}
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
-        est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob, calibration_factors)
+        est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars)
+        if getattr(req, "apply_calibration", True):
+            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob_raw, calibration_factors)
+        else:
+            est_prob, low_prob_warning = est_prob_raw, False
         low_prob_warnings[(o.bet_type, o.combination)] = low_prob_warning
 
         market_prob = normalized_market.get(o.bet_type, {}).get(
@@ -172,6 +175,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             bet_type=o.bet_type,
             combination=o.combination,
             estimated_win_prob=est_prob,
+            estimated_win_prob_raw=est_prob_raw,
             market_prob=market_prob,
             odds_value=o.odds_value,
             ev_pct=ev_pct,
@@ -349,8 +353,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     calibration_factors = purchases_router.get_calibration_factors(db)
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
-        est_prob = _estimate_prob(win_probs, o.bet_type, cars)
-        est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(est_prob, calibration_factors)
+        est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars)
+        if getattr(req, "apply_calibration", True):
+            est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(est_prob_raw, calibration_factors)
+        else:
+            est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
@@ -358,6 +365,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "bet_type": o.bet_type,
             "combination": o.combination,
             "win_prob": est_prob,
+            "win_prob_raw": est_prob_raw,
             "ev_pct": round(ev_pct, 2),
         })
         if not is_recommended:
@@ -374,6 +382,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "ev_pct": round(ev_pct, 2),
             "raw_stake": raw_stake,
             "win_prob": est_prob,
+            "win_prob_raw": est_prob_raw,
             "total_vote_amount": o.total_vote_amount,
             "low_prob_warning": low_prob_warning,
             # データ充足度%(=その勝率帯の補正がどれだけ実績データに裏付けられているか)と、
@@ -510,6 +519,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "bet_type": c["bet_type"],
             "combination": c["combination"],
             "estimated_win_prob_pct": c["estimated_win_prob_pct"],
+            "win_prob": c["win_prob"],
+            "win_prob_raw": c.get("win_prob_raw"),
             "odds_value": c["odds_value"],
             "ev_pct": c["ev_pct"],
             "roi_pct": round(c["ev_pct"] + 100, 2),

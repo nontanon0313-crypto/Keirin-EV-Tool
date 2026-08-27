@@ -127,7 +127,8 @@ class EvResult(Base):
     is_box = Column(Boolean, default=False)
     is_multi_ura = Column(Boolean, default=False)
 
-    estimated_win_prob = Column(Float, nullable=False)  # 合成推定確率(Harville式等で算出)
+    estimated_win_prob = Column(Float, nullable=False)  # 補正後の推定確率
+    estimated_win_prob_raw = Column(Float, nullable=True)  # キャリブレーション前(Harville等の直後)
     market_prob = Column(Float, nullable=False)  # オッズから逆算した市場確率
     odds_value = Column(Float, nullable=False)
     ev_pct = Column(Float, nullable=False)  # 期待値% = (推定確率×オッズ - 1) × 100
@@ -154,7 +155,8 @@ class Purchase(Base):
     combination = Column(String(50), nullable=False)
     stake_amount = Column(Float, nullable=False)
     odds_at_purchase = Column(Float, nullable=True)
-    win_prob_at_purchase = Column(Float, nullable=True)
+    win_prob_at_purchase = Column(Float, nullable=True)  # 補正後(投票判断に使った値)
+    win_prob_raw = Column(Float, nullable=True)  # 補正前
     ev_pct_at_purchase = Column(Float, nullable=True)
 
     result = Column(String(20), default="pending")  # pending/win/lose
@@ -188,7 +190,8 @@ class SkippedBet(Base):
     race_id = Column(Integer, ForeignKey("races.id"), nullable=False)
     bet_type = Column(String(20), nullable=False)
     combination = Column(String(50), nullable=False)
-    win_prob_estimated = Column(Float, nullable=True)
+    win_prob_estimated = Column(Float, nullable=True)  # 補正後
+    win_prob_raw = Column(Float, nullable=True)  # 補正前
     ev_pct_estimated = Column(Float, nullable=True)
     reason = Column(String(200), nullable=True)  # 例: "期待値マイナス" "最低勝率フィルター抵触"
 

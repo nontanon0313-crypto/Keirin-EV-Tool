@@ -443,6 +443,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         })(),
         rebate_pct: getRebatePct(),
         max_items: parseInt(document.getElementById("maxItemsInput").value) || 20,
+        apply_calibration: isCalibrationApplyEnabled(),
         exclude_low_prob_warning: document.getElementById("excludeLowProbCheckbox").checked,
         avoid_garami: document.getElementById("avoidGaramiCheckbox").checked,
       }),
@@ -549,7 +550,8 @@ async function recordRacePlanAsPurchases() {
       // 以前はここが漏れており、購入履歴のwin_prob_at_purchaseが常に空になっていた。
       // このせいで「想定的中率」が算出できず、勝率帯別の自動補正・実績検証も
       // 正しく機能していなかった(のんの報告により発覚)。
-      win_prob_at_purchase: it.estimated_win_prob_pct / 100,
+      win_prob_at_purchase: it.win_prob != null ? it.win_prob : it.estimated_win_prob_pct / 100,
+      win_prob_raw: it.win_prob_raw != null ? it.win_prob_raw : null,
       ev_pct_at_purchase: it.ev_pct,
     }));
 
@@ -1049,6 +1051,65 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
     resultBox.textContent = "エラー: " + e.message;
   }
 });
+
+document.getElementById("loadCalibrationCompareBtn").addEventListener("click", async () => {
+  const box = document.getElementById("statsResult");
+  box.textContent = "キャリブレーション比較を読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/calibration-compare"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    const enabled = loadCalAxisEnabled();
+    let html = `<p>レコード${data.n_records}件 / raw無し(旧データ)${data.n_without_raw}件<br>${data.note || ""}</p>`;
+    html += `<p class="note">軸のON/OFFは表示フィルタです。勝率帯補正そのもののON/OFFは下の「自動補正をプランに適用」を使います。</p>`;
+    for (const [axis, rows] of Object.entries(data.axes || {})) {
+      const on = enabled[axis] !== false;
+      html += `<h3>${axis} <label style="font-weight:normal;font-size:13px;"><input type="checkbox" class="calAxisToggle" data-axis="${axis}" ${on ? "checked" : ""}> 表示</label></h3>`;
+      if (!on) {
+        html += `<p class="note">(非表示)</p>`;
+        continue;
+      }
+      html += `<table><tr><th>条件</th><th>n</th><th>raw有</th>
+        <th>前・精度%</th><th>前・乖離pt</th><th>前・p値%</th>
+        <th>後・精度%</th><th>後・乖離pt</th><th>後・p値%</th><th>改善</th></tr>`;
+      for (const row of rows) {
+        const b = row.before || {};
+        const a = row.after || {};
+        const imp = row.calibration_improved == null ? "-" : (row.calibration_improved ? "改善" : "悪化/同等");
+        html += `<tr><td>${row.bucket}</td><td>${row.n_total}</td><td>${row.n_with_raw}</td>
+          <td>${b.accuracy_pct ?? "-"}</td><td>${b.deviation_pt ?? "-"}</td><td>${b.p_value_pct ?? "-"}</td>
+          <td>${a.accuracy_pct ?? "-"}</td><td>${a.deviation_pt ?? "-"}</td><td>${a.p_value_pct ?? "-"}</td>
+          <td>${imp}</td></tr>`;
+      }
+      html += `</table>`;
+    }
+    box.innerHTML = html;
+    box.querySelectorAll(".calAxisToggle").forEach((el) => {
+      el.addEventListener("change", () => {
+        const map = loadCalAxisEnabled();
+        map[el.dataset.axis] = el.checked;
+        localStorage.setItem("keirin_cal_axis_enabled", JSON.stringify(map));
+      });
+    });
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+});
+
+function loadCalAxisEnabled() {
+  try {
+    return JSON.parse(localStorage.getItem("keirin_cal_axis_enabled") || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+
+function isCalibrationApplyEnabled() {
+  const el = document.getElementById("applyCalibrationCheckbox");
+  return !el || el.checked;
+}
+
+
 
 
 

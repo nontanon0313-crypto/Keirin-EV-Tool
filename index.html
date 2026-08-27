@@ -131,6 +131,11 @@
     <h2>実績検証</h2>
     <button id="loadStatsBtn">集計を表示</button>
     <button id="loadCalibrationBtn" style="background:#06b6d4;">自動補正の状態を確認</button>
+    <button id="loadCalibrationCompareBtn" style="background:#8b5cf6;">補正前/後の比較(条件別)</button>
+    <label style="display:flex;align-items:center;gap:8px;margin:8px 0;">
+      <input type="checkbox" id="applyCalibrationCheckbox" checked style="width:auto;margin:0;">
+      自動補正(勝率帯キャリブレーション)を投票プランに適用する
+    </label>
     <button id="loadCarPickBtn" style="background:#0ea5e9;">核となる車番予想の精度を確認</button>
     <button id="loadReadinessBtn" style="background:#16a34a;">💰投資判断チェック</button>
     <div id="statsResult" class="result-box"></div>

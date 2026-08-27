@@ -26,6 +26,7 @@ class PurchaseCreate(BaseModel):
     stake_amount: float
     odds_at_purchase: Optional[float] = None
     win_prob_at_purchase: Optional[float] = None
+    win_prob_raw: Optional[float] = None
     ev_pct_at_purchase: Optional[float] = None
     tags: Optional[dict] = None
 
@@ -51,6 +52,7 @@ class SimulationRequest(BaseModel):
 
 
 class EvCalcRequest(BaseModel):
+    apply_calibration: bool = True
     race_id: int
     bankroll: Optional[float] = None  # 未指定なら証拠金残高を自動使用
     fractional_coefficient: float = 0.25  # 固定値として運用(通常は変更不要)
@@ -71,6 +73,7 @@ class RacePlanRequest(BaseModel):
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
     max_items: int = 20  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
     exclude_low_prob_warning: bool = True  # 大穴帯(0-5%・実績未検証)の買い目を自動プランから除外するか
+    apply_calibration: bool = True  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
 
 

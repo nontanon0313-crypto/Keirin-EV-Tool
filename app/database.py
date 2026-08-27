@@ -49,6 +49,10 @@ def init_db():
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS external_ref VARCHAR(100)",
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS post_time TIMESTAMP",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_races_external_ref_unique ON races (external_ref) WHERE external_ref IS NOT NULL",
+        "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS win_prob_raw FLOAT",
+        "ALTER TABLE skipped_bets ADD COLUMN IF NOT EXISTS win_prob_raw FLOAT",
+        "ALTER TABLE ev_results ADD COLUMN IF NOT EXISTS estimated_win_prob_raw FLOAT",
+
     ]
     from sqlalchemy import text
     with engine.connect() as conn:
