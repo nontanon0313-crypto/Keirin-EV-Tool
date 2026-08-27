@@ -745,7 +745,11 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
         const planRes = await fetch(apiUrl(`/ev/race-plan/${race.id}`), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ race_id: race.id, bankroll: 1000000 }), // 検証・集計目的のため固定額(実際の証拠金残高は使わない)
+          body: JSON.stringify({
+            race_id: race.id,
+            bankroll: 1000000, // 検証・集計目的の固定額
+            max_race_pct: 1.0, // 1レース上限なし(検証用。実投票プランのみ上限を掛ける)
+          }),
         });
         const plan = await planRes.json();
         if (!planRes.ok) throw new Error(JSON.stringify(plan));
@@ -938,7 +942,7 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
         }
         const useSim = document.getElementById("useSimRaceCapCheckbox");
         if (useSim) useSim.checked = true;
-        alert(`1レース上限を${pct}%に反映しました。投票プラン作成時にこの上限が使われます。`);
+        alert(`1レース上限を${pct}%に反映しました。実投票のプラン作成時のみ使われます(検証集計には影響しません)。`);
       });
     }
 

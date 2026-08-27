@@ -75,7 +75,7 @@
 
         <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="useSimRaceCapCheckbox" checked style="width:auto;margin:0;">
-      検証タブの「1レースあたりの投資上限%」を投票プランの合計上限に使う(オフなら詳細設定の上限比率を使用)
+      検証タブの「1レースあたりの投資上限%」を<strong>実投票のプラン作成時のみ</strong>合計上限に使う(オフなら詳細設定の上限)。検証・再集計には使いません
     </label>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <p class="note">AI予想がまだなら自動で実行してからプランを作成します(数十秒かかる場合があります)。</p>
@@ -108,7 +108,7 @@
 <div id="tab-bankroll" class="tab-content">
   <section class="card">
     <h2>💰 証拠金管理</h2>
-    <p class="note">購入記録・結果確定のたびに自動で増減します。1レースへの投票額は、この残高に対する上限比率で自動的に制限されます。</p>
+    <p class="note">購入記録・結果確定のたびに自動で増減します。実投票のプラン作成時のみ、残高に対する1レース上限比率で制限されます。検証集計には影響しません。</p>
     <div id="bankrollDisplay" class="result-box">未設定です。下から初期額を設定してください。</div>
     <label>初期設定 / 入金・出金後のリセット(円)</label>
     <input type="number" id="bankrollSetInput" placeholder="例: 10000">
@@ -158,7 +158,7 @@
     <label>何レース分をシミュレートするか</label>
     <input type="number" id="simNumRaces" value="20" step="1">
     <button id="runSimBtn">シミュレーション実行</button>
-    <p class="note">破産確率が許容範囲になるまで「1レースあたりの投資上限%」を調整し、結果を詳細設定へ反映してから投票してください。</p>
+    <p class="note">破産確率が許容範囲になるまで「1レースあたりの投資上限%」を調整し、結果を詳細設定へ反映してから<strong>実投票</strong>してください。検証用の集計・再予想は上限なし・固定証拠金で行います。</p>
     <div id="simResult" class="result-box"></div>
   </section>
 

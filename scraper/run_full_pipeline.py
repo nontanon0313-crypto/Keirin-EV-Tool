@@ -102,11 +102,20 @@ def step2_estimate(race_id, max_retries=5):
     raise RateLimitExhausted(f"race_id={race_id}: 429が{max_retries}回連続しました。利用枠(日次上限等)に達した可能性があります")
 
 
-def step3_race_plan(race_id, bankroll):
-    """3. 投票プラン作成: EV計算・ステーキング(bankroll未指定なら証拠金残高を自動使用)"""
+def step3_race_plan(race_id, bankroll, for_verification=True):
+    """3. 投票プラン作成: EV計算・ステーキング
+
+    for_verification=True(既定):
+      検証・集計用。固定証拠金＋1レース上限なし(max_race_pct=1.0)。
+      上限を掛けない方が、条件を揃えた実績比較ができる。
+    for_verification=False:
+      実投票用。max_race_pctはAPI既定(または呼び出し側で指定)に従う。
+    """
     body = {"race_id": race_id}
     if bankroll is not None:
         body["bankroll"] = bankroll
+    if for_verification:
+        body["max_race_pct"] = 1.0  # 上限なし(検証用)
     r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, timeout=90)
     r.raise_for_status()
     return r.json()
