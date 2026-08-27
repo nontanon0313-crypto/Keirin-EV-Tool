@@ -137,22 +137,17 @@ def step4_record_purchases(race_id, plan):
     return {"recorded": len(items), "response": r.json()}
 
 
-def step5_confirm_result(race_id, race_json):
-    """5. 結果記録: スクレイパーが取得済みの着順を使って自動確定する"""
+def _extract_actual_result(race_json):
+    """
+    スクレイパーが取得したJSONから、確定済みの1-2-3着(車番)を取り出す。
+    まだレースが行われていない・着順が取得できていない場合はNoneを返す。
+    """
     results = race_json.get("result", {}).get("results", [])
     by_place = {r["着順"]: r["車番"] for r in results}
     parts = [by_place[str(p)] for p in (1, 2, 3) if str(p) in by_place]
     if len(parts) != 3:
-        log(f"  結果データが不完全なため結果記録をスキップします: {by_place}")
         return None
-    actual_result = "-".join(parts)
-    r = requests.post(
-        f"{API_BASE}/races/{race_id}/confirm-result",
-        params={"actual_result": actual_result},
-        timeout=90,
-    )
-    r.raise_for_status()
-    return r.json()
+    return "-".join(parts)
 
 
 def get_current_bankroll():
@@ -191,7 +186,11 @@ def run_one_race(race_json, bankroll, dry_run=False):
         return {"race_id": race_id, "stage": "no_entries"}
 
     log("   (--dry-run無し: このまま予想〜結果確定まで実行します)")
-    return run_predict_and_confirm(race_id, bankroll)
+    # バグ修正: 以前はここでスクレイパーJSON内の着順を一切見ておらず、
+    # 新規データの通常経路(--dir/--file)では結果が取れていても常に
+    # 「未確定」のままになっていた(のんの指摘により修正)。
+    actual_result = _extract_actual_result(race_json)
+    return run_predict_and_confirm(race_id, bankroll, actual_result=actual_result)
 
 
 FIXED_BANKROLL = 1_000_000  # 検証・集計目的の投票プランは常にこの額を使う(実際の証拠金残高とは無関係)
