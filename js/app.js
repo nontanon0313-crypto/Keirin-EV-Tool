@@ -1029,7 +1029,7 @@ function renderBucketTable(title, bucketObj) {
   let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>的中率</th><th>想定的中率</th><th>実績</th><th>想定回収率</th></tr>`;
   for (const [key, v] of Object.entries(bucketObj)) {
     const cls = v.expectancy_pct > 0 ? "ev-positive" : "";
-    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.win_rate_pct}%</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct}%</td><td>${v.expected_roi_pct ?? "-"}${v.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
+    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.win_rate_pct}%</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct ?? "-"}${v.expectancy_pct !== null ? "%" : ""}</td><td>${v.expected_roi_pct ?? "-"}${v.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
   }
   html += "</table>";
   return html;
