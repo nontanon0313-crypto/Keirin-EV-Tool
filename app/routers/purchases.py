@@ -833,9 +833,13 @@ def purchase_stats(db: Session = Depends(get_db)):
     """
     purchases_only = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
     class _SkippedAsPurchase:
+        """Purchaseと同じ属性集合を持つ見送りの擬似レコード。
+        purchase_stats内で p.odds_at_purchase 等を参照するため、不足属性は None/0 で埋める。
+        """
         __slots__ = (
             "race_id", "bet_type", "combination", "stake_amount", "payout_amount",
-            "result", "win_prob_at_purchase", "ev_pct_at_purchase", "is_skipped_record",
+            "result", "win_prob_at_purchase", "win_prob_raw", "ev_pct_at_purchase",
+            "odds_at_purchase", "final_odds", "tags", "is_skipped_record",
         )
         def __init__(self, s):
             self.race_id = s.race_id
@@ -845,7 +849,11 @@ def purchase_stats(db: Session = Depends(get_db)):
             self.payout_amount = 0.0
             self.result = s.actual_result
             self.win_prob_at_purchase = s.win_prob_estimated
+            self.win_prob_raw = getattr(s, "win_prob_raw", None)
             self.ev_pct_at_purchase = s.ev_pct_estimated
+            self.odds_at_purchase = None
+            self.final_odds = None
+            self.tags = None
             self.is_skipped_record = True
     skipped_eval = (
         db.query(models.SkippedBet)
