@@ -677,6 +677,94 @@ def big_expected_bets(db: Session = Depends(get_db), limit: int = 20):
     return items[:limit]
 
 
+@router.get("/order-accuracy")
+def order_accuracy(stages: str = "S級特秀,S級選抜,S級準決勝,S級決勝", db: Session = Depends(get_db)):
+    """
+    「1着の予想」だけでなく「2着・3着の予想」がどれくらい当たっているかを、
+    S級上位ステージとそれ以外に分けて比較する診断用エンドポイント
+    (のんの要望により追加)。
+    car-pick-accuracyで判明した「AIは1着予想は得意(むしろ弱気)」という結果を受けて、
+    「車券が外れ続けているのは2着・3着(着順)の読みに原因があるのでは」という
+    仮説を検証する。AIの予想確率が高い順に3台選び、実際の1〜3着と順位ごとに突き合わせる。
+    """
+    target_stages = {s.strip() for s in stages.split(",") if s.strip()}
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    def analyze_group(races_group):
+        n = len(races_group)
+        if n == 0:
+            return None
+        pos1_ok = pos2_ok = pos3_ok = 0
+        top3_set_ok = 0
+        exact_order_ok = 0
+        pos2_given_pos1_ok_n = pos2_given_pos1_ok = 0
+        pos3_given_pos12_ok_n = pos3_given_pos12_ok = 0
+        for race, ranked, actual_groups, actual_top3 in races_group:
+            predicted = [e.car_number for e in ranked[:3]]
+            actual_pos = [g[0] if len(g) == 1 else None for g in actual_groups[:3]]  # 同着はNone(位置判定不可)扱い
+            p1_ok = len(predicted) > 0 and actual_pos[0] is not None and predicted[0] == actual_pos[0]
+            p2_ok = len(predicted) > 1 and len(actual_pos) > 1 and actual_pos[1] is not None and predicted[1] == actual_pos[1]
+            p3_ok = len(predicted) > 2 and len(actual_pos) > 2 and actual_pos[2] is not None and predicted[2] == actual_pos[2]
+            pos1_ok += p1_ok
+            pos2_ok += p2_ok
+            pos3_ok += p3_ok
+            if set(predicted) == actual_top3:
+                top3_set_ok += 1
+            if predicted == actual_pos and None not in actual_pos:
+                exact_order_ok += 1
+            if p1_ok:
+                pos2_given_pos1_ok_n += 1
+                pos2_given_pos1_ok += p2_ok
+            if p1_ok and p2_ok:
+                pos3_given_pos12_ok_n += 1
+                pos3_given_pos12_ok += p3_ok
+        return {
+            "n_races": n,
+            "pos1_accuracy_pct": round(pos1_ok / n * 100, 1),
+            "pos2_accuracy_pct": round(pos2_ok / n * 100, 1),
+            "pos3_accuracy_pct": round(pos3_ok / n * 100, 1),
+            "top3_set_accuracy_pct": round(top3_set_ok / n * 100, 1),
+            "exact_order_accuracy_pct": round(exact_order_ok / n * 100, 1),
+            "pos2_accuracy_given_pos1_correct_pct": (
+                round(pos2_given_pos1_ok / pos2_given_pos1_ok_n * 100, 1) if pos2_given_pos1_ok_n else None
+            ),
+            "pos3_accuracy_given_pos12_correct_pct": (
+                round(pos3_given_pos12_ok / pos3_given_pos12_ok_n * 100, 1) if pos3_given_pos12_ok_n else None
+            ),
+        }
+
+    stage_group, other_group = [], []
+    for race in races:
+        ranked = sorted(
+            (e for e in race.entries if e.blended_win_prob is not None),
+            key=lambda e: -e.blended_win_prob,
+        )
+        if len(ranked) < 3:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except (ValueError, IndexError):
+            continue
+        if len(parsed["groups"]) < 3:
+            continue
+        item = (race, ranked, parsed["groups"], parsed["top3_set"])
+        if race.race_stage in target_stages:
+            stage_group.append(item)
+        else:
+            other_group.append(item)
+
+    return {
+        "target_stages": sorted(target_stages),
+        "S級上位": analyze_group(stage_group),
+        "それ以外": analyze_group(other_group),
+    }
+
+
 @router.get("/stage-diagnostic")
 def stage_diagnostic(stages: str = "S級特秀,S級選抜,S級準決勝,S級決勝", db: Session = Depends(get_db)):
     """
