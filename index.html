@@ -135,6 +135,10 @@
     <button id="loadProfitConcentrationBtn" style="background:#db2777;">利益の集中度を確認</button>
     <button id="loadCarPickBtn" style="background:#0ea5e9;">核となる車番予想の精度を確認</button>
     <button id="loadReadinessBtn" style="background:#16a34a;">💰投資判断チェック</button>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button type="button" id="copyStatsBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">📋 コピー</button>
+      <button type="button" id="downloadStatsBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">💾 テキスト保存</button>
+    </div>
     <div id="statsResult" class="result-box"></div>
   </section>
 
@@ -158,6 +162,10 @@
     <button id="runSimBtn">指定した上限%でシミュレーション実行</button>
     <button id="recommendRacePctBtn" style="background:#16a34a;">許容破産確率から1レース上限%を自動計算</button>
     <p class="note">手で上限%を合わせる必要はありませ ん。「自動計算」を押すと、許容破産確率以下になる最大の1レース上限%を探します。結果を詳細設定へ反映してから<strong>実投票</strong>してください。検証集計には使いま せん。</p>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button type="button" id="copySimBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">📋 コピー</button>
+      <button type="button" id="downloadSimBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">💾 テキスト保存</button>
+    </div>
     <div id="simResult" class="result-box"></div>
   </section>
 

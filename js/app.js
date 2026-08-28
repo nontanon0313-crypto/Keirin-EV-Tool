@@ -857,6 +857,46 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
   }
 });
 
+// ---------- コピー・ダウンロード共通機能 ----------
+// 集計結果をチャット等にすぐ貼れるように(のんの要望により追加)
+function setupCopyDownload(resultBoxId, copyBtnId, downloadBtnId, filenamePrefix) {
+  const box = document.getElementById(resultBoxId);
+  const copyBtn = document.getElementById(copyBtnId);
+  const downloadBtn = document.getElementById(downloadBtnId);
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      const text = (box && (box.innerText || box.textContent)) || "";
+      if (!text.trim()) { alert("コピーする内容がまだありません。先に結果を表示してください。"); return; }
+      try {
+        await navigator.clipboard.writeText(text);
+        const orig = copyBtn.textContent;
+        copyBtn.textContent = "✅ コピーしました";
+        setTimeout(() => { copyBtn.textContent = orig; }, 1500);
+      } catch (e) {
+        alert("コピーに失敗しました: " + e.message);
+      }
+    });
+  }
+  if (downloadBtn) {
+    downloadBtn.addEventListener("click", () => {
+      const text = (box && (box.innerText || box.textContent)) || "";
+      if (!text.trim()) { alert("保存する内容がまだありません。先に結果を表示してください。"); return; }
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${filenamePrefix}_${ts}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    });
+  }
+}
+setupCopyDownload("statsResult", "copyStatsBtn", "downloadStatsBtn", "keirin_stats");
+setupCopyDownload("simResult", "copySimBtn", "downloadSimBtn", "keirin_sim");
+
 // ---------- ④ 資金管理シミュレーション ----------
 
 // シミュレーション欄の入力値は、開き直しても消えないようlocalStorageに保存する
