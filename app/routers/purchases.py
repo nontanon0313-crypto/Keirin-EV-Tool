@@ -551,8 +551,8 @@ def calibration_compare(db: Session = Depends(get_db)):
             entries_by_race.setdefault(e.race_id, []).append(e)
 
     class Rec:
-        __slots__ = ("race_id", "bet_type", "combination", "won", "prob_raw", "prob_cal", "source")
-        def __init__(self, race_id, bet_type, combination, won, prob_raw, prob_cal, source):
+        __slots__ = ("race_id", "bet_type", "combination", "won", "prob_raw", "prob_cal", "source", "stake_amount", "payout_amount")
+        def __init__(self, race_id, bet_type, combination, won, prob_raw, prob_cal, source, stake_amount=0.0, payout_amount=0.0):
             self.race_id = race_id
             self.bet_type = bet_type
             self.combination = combination
@@ -560,6 +560,8 @@ def calibration_compare(db: Session = Depends(get_db)):
             self.prob_raw = prob_raw
             self.prob_cal = prob_cal
             self.source = source
+            self.stake_amount = stake_amount
+            self.payout_amount = payout_amount
 
     recs = []
     n_without_raw = 0
@@ -570,7 +572,7 @@ def calibration_compare(db: Session = Depends(get_db)):
             continue
         if raw is None:
             n_without_raw += 1
-        recs.append(Rec(p.race_id, p.bet_type, p.combination, p.result == "win", raw, cal, "purchase"))
+        recs.append(Rec(p.race_id, p.bet_type, p.combination, p.result == "win", raw, cal, "purchase", p.stake_amount, p.payout_amount))
     for s in skipped:
         raw = getattr(s, "win_prob_raw", None)
         cal = s.win_prob_estimated
@@ -699,6 +701,21 @@ def calibration_compare(db: Session = Depends(get_db)):
         "決まり手構成": kimarite_bucket,
     }
 
+    def actual_roi(group):
+        """
+        実際に購入した分(見送りは除く)だけを使った実績収支率(100%が損益分岐点)。
+        乖離(pt)とあわせて判断材料にする値(のんの要望により追加)。
+        p値はサンプル数が多いほど、ごく小さなズレでも「有意」と出やすくなる性質があり、
+        件数が万単位になった今はほぼ常に0%近辺に張り付いてしまうため、判断の主役には
+        向かない。乖離(pt)と実績収支率の方が実態を素直に表す。
+        """
+        purchased = [r for r in group if r.stake_amount > 0]
+        stake = sum(r.stake_amount for r in purchased)
+        if stake <= 0:
+            return None, 0
+        payout = sum(r.payout_amount for r in purchased)
+        return round((payout - stake) / stake * 100, 2), len(purchased)
+
     result_axes = {}
     for axis_name, key_fn in axes.items():
         buckets = {}
@@ -714,6 +731,7 @@ def calibration_compare(db: Session = Depends(get_db)):
             improved = None
             if before and after and before.get("accuracy_pct") is not None and after.get("accuracy_pct") is not None:
                 improved = after["accuracy_pct"] >= before["accuracy_pct"]
+            roi_pct, n_purchased = actual_roi(group)
             rows.append({
                 "bucket": key,
                 "n_total": len(group),
@@ -721,6 +739,8 @@ def calibration_compare(db: Session = Depends(get_db)):
                 "before": before,
                 "after": after,
                 "calibration_improved": improved,
+                "actual_roi_pct": roi_pct,
+                "n_purchased": n_purchased,
             })
         result_axes[axis_name] = rows
 

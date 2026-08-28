@@ -1165,6 +1165,7 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
     const enabled = loadCalAxisEnabled();
     let html = `<p>対象レコード ${data.n_records}件 ／ 補正前確率なし(旧データ) ${data.n_without_raw}件<br>${data.note || ""}</p>`;
     html += `<p class="note">各軸のチェックは表示のオンオフです。勝率帯の自動補正そのもののオンオフは、下の「自動補正をプランに適用する」を使います。</p>`;
+    html += `<p class="note">📌 判断は主に「乖離(ポイント)」と「実績収支率」(実際に購入した分のみ)で見てください。p値は件数が多いほど、ごくわずかなズレでも「有意」と出やすくなるため、件数が多い条件では0%に近くなりがちです(判断の補助情報として参考程度に)。</p>`;
     for (const [axis, rows] of Object.entries(data.axes || {})) {
       const on = enabled[axis] !== false;
       html += `<h3>${axis} <label style="font-weight:normal;font-size:13px;"><input type="checkbox" class="calAxisToggle" data-axis="${axis}" ${on ? "checked" : ""}> この軸を表示</label></h3>`;
@@ -1174,16 +1175,23 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
       }
       html += `<table><tr>
         <th>条件</th><th>件数</th><th>補正前あり</th>
-        <th>補正前・予想精度%</th><th>補正前・乖離(ポイント)</th><th>補正前・p値%</th>
-        <th>補正後・予想精度%</th><th>補正後・乖離(ポイント)</th><th>補正後・p値%</th>
+        <th style="background:#1e3a5f;">実績収支率%<br><span style="font-weight:normal;font-size:11px;">(実際に購入した分)</span></th>
+        <th style="background:#1e3a5f;">補正後・乖離(pt)</th>
+        <th>補正前・予想精度%</th><th>補正前・乖離(pt)</th><th style="color:#888;">補正前・p値%</th>
+        <th>補正後・予想精度%</th><th style="color:#888;">補正後・p値%</th>
         <th>補正の効果</th></tr>`;
       for (const row of rows) {
         const b = row.before || {};
         const a = row.after || {};
         const imp = row.calibration_improved == null ? "-" : (row.calibration_improved ? "改善" : "悪化または同等");
+        const devAbs = a.deviation_pt == null ? null : Math.abs(a.deviation_pt);
+        const devCls = devAbs == null ? "" : (devAbs <= 1 ? ' style="color:#4ade80;font-weight:bold;"' : (devAbs <= 3 ? ' style="color:#f59e0b;font-weight:bold;"' : ' style="color:#ef4444;font-weight:bold;"'));
+        const roiCls = row.actual_roi_pct == null ? "" : (row.actual_roi_pct >= 100 ? ' style="color:#4ade80;font-weight:bold;"' : ' style="color:#ef4444;font-weight:bold;"');
         html += `<tr><td>${row.bucket}</td><td>${row.n_total}</td><td>${row.n_with_raw}</td>
-          <td>${b.accuracy_pct ?? "-"}</td><td>${b.deviation_pt ?? "-"}</td><td>${b.p_value_pct ?? "-"}</td>
-          <td>${a.accuracy_pct ?? "-"}</td><td>${a.deviation_pt ?? "-"}</td><td>${a.p_value_pct ?? "-"}</td>
+          <td${roiCls}>${row.actual_roi_pct ?? "-"}${row.actual_roi_pct != null ? "%" : ""}<br><span style="font-weight:normal;font-size:11px;">(${row.n_purchased}件)</span></td>
+          <td${devCls}>${a.deviation_pt ?? "-"}</td>
+          <td>${b.accuracy_pct ?? "-"}</td><td>${b.deviation_pt ?? "-"}</td><td style="color:#888;">${b.p_value_pct ?? "-"}</td>
+          <td>${a.accuracy_pct ?? "-"}</td><td style="color:#888;">${a.p_value_pct ?? "-"}</td>
           <td>${imp}</td></tr>`;
       }
       html += `</table>`;
