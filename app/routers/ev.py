@@ -350,6 +350,29 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # (下で見送り記録に使うため)。
     all_evaluated = []
     calibration_factors = purchases_router.get_calibration_factors(db)
+
+    # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
+    # (3連複・2車複・ワイド)より難しく、レースのステージ(S級決勝等)によっては
+    # 着順の読みが極端に外れやすいことが確認されている(のんの実機運用での検証結果)。
+    # そのステージでの結果確定済みレース数がまだ少ないうちは、着順指定の券種だけ
+    # 見送り、顔ぶれ判定の券種は通常通り投票対象にする。件数が閾値を超えたら
+    # 自動的に通常運用へ戻る(のんの要望により追加)。
+    ORDER_SENSITIVE_BET_TYPES = {"3連単", "2車単"}
+    MIN_STAGE_SAMPLE_FOR_ORDER_BETS = 30
+    stage_sample_n = None
+    if race.race_stage:
+        stage_sample_n = (
+            db.query(models.Race)
+            .filter(models.Race.race_stage == race.race_stage)
+            .filter(models.Race.actual_result.isnot(None))
+            .count()
+        )
+    stage_sample_insufficient = (
+        race.race_stage is not None and stage_sample_n is not None
+        and stage_sample_n < MIN_STAGE_SAMPLE_FOR_ORDER_BETS
+    )
+
+    stage_gated_keys = set()
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars)
@@ -360,6 +383,10 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
         is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
+        stage_order_gate = stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
+        if stage_order_gate:
+            is_recommended = False
+            stage_gated_keys.add((o.bet_type, o.combination))
         all_evaluated.append({
             "bet_type": o.bet_type,
             "combination": o.combination,
@@ -405,7 +432,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         if e["ev_pct"] <= 0:
             continue  # 期待値マイナスは見送って当然のため検証対象にしない
         if (e["bet_type"], e["combination"]) not in recommended_keys:
-            skipped_for_verification.append((e, "買い示唆なし(EV/確率が閾値未満)"))
+            if (e["bet_type"], e["combination"]) in stage_gated_keys:
+                skipped_for_verification.append((
+                    e,
+                    f"このステージの検証データ不足({stage_sample_n}/{MIN_STAGE_SAMPLE_FOR_ORDER_BETS}件)のため着順指定の券種を見送り",
+                ))
+            else:
+                skipped_for_verification.append((e, "買い示唆なし(EV/確率が閾値未満)"))
 
     excluded_low_prob_count = 0
     if req.exclude_low_prob_warning:
