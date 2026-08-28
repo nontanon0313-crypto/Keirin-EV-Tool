@@ -85,28 +85,47 @@ def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list
 
 def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str = None) -> tuple:
     """
-    購入実績に基づく自動補正係数を適用する(確率そのものを実績に寄せる。足切りではない)。
-    - 勝率帯の係数(calibration_factors の帯キー)
-    - 券種の係数(calibration_factors.get("by_bet_type", {})[bet_type])
-    の両方を掛け合わせる。券種差別の除外ではなく、過大評価を確率値で修正する。
+    予想確率を実績的中率に寄せる補正(足切りではない)。
+
+    優先順:
+    1. 勝率帯の係数が十分なサンプルならそれを使う
+    2. なければ全体係数(overall)を使う
+    3. 券種係数がある場合は、全体に対する残差を弱く掛けて微調整
+
+    これにより「想定的中率 >> 実績的中率」の系統ズレを確率値で修正する。
     """
     bucket_name, _ = calc.get_prob_bucket(est_prob)
     info = calibration_factors.get(bucket_name)
-    is_reliable = bool(info and info["is_reliable"])
+    overall = calibration_factors.get("overall")
+    is_reliable = bool(info and info.get("is_reliable"))
     low_prob_warning = (bucket_name == "0-5%(大穴)") and not is_reliable
     data_sufficiency_pct = 0.0
-    if info and info["required_sample_count"] > 0:
-        data_sufficiency_pct = round(min(1.0, info["sample_count"] / info["required_sample_count"]) * 100, 1)
-    accuracy_pct = info["prediction_accuracy_pct"] if info else None
+    if info and info.get("required_sample_count", 0) > 0:
+        data_sufficiency_pct = round(
+            min(1.0, info["sample_count"] / info["required_sample_count"]) * 100, 1
+        )
+    accuracy_pct = info.get("prediction_accuracy_pct") if info else None
+    if accuracy_pct is None and overall:
+        accuracy_pct = overall.get("prediction_accuracy_pct")
 
     factor = 1.0
-    if info:
-        factor *= info["calibration_factor"]
-    by_bt = calibration_factors.get("by_bet_type") or {}
-    if bet_type and bet_type in by_bt:
-        factor *= by_bt[bet_type]["calibration_factor"]
+    if info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
+        factor = info["calibration_factor"]
+    elif overall and overall.get("calibration_factor") is not None:
+        factor = overall["calibration_factor"]
 
-    if factor == 1.0 and not info:
+    by_bt = calibration_factors.get("by_bet_type") or {}
+    if bet_type and bet_type in by_bt and overall and overall.get("calibration_factor"):
+        bt_f = by_bt[bet_type]["calibration_factor"]
+        ov_f = overall["calibration_factor"]
+        if ov_f > 1e-9:
+            residual = bt_f / ov_f
+            # 残差は半分だけ反映(二重補正を避ける)
+            residual = 1.0 + 0.5 * (residual - 1.0)
+            factor *= residual
+
+    factor = max(0.25, min(2.0, factor))
+    if abs(factor - 1.0) < 1e-9:
         return est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct
     calibrated = est_prob * factor
     return max(0.0, min(1.0, calibrated)), low_prob_warning, data_sufficiency_pct, accuracy_pct

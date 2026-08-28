@@ -87,7 +87,37 @@ def get_calibration_factors(db: Session) -> dict:
         if prob is not None:
             records.append((prob, s.actual_result == "win", "skipped", s.bet_type))
 
+    # --- 全体補正係数(想定的中率を実績的中率に寄せる本体) ---
+    overall_info = None
+    if records:
+        n_all = len(records)
+        wins_all = sum(1 for _, won, _, _ in records if won)
+        actual_all = wins_all / n_all
+        predicted_all = sum(prob for prob, _, _, _ in records) / n_all
+        if predicted_all > 0:
+            raw_overall = calc.compute_calibration_factor(actual_all, predicted_all)
+            p_overall = calc.binomial_lower_tail_p(wins_all, n_all, predicted_all)
+            # 全体はサンプルが多いので、必要数を控えめにし係数をしっかり効かせる
+            required_overall = 200
+            overall_factor = calc.shrunk_calibration_factor(
+                raw_overall, n_all, required_overall, p_value=p_overall
+            )
+            overall_info = {
+                "sample_count": n_all,
+                "required_sample_count": required_overall,
+                "is_reliable": n_all >= required_overall,
+                "actual_win_rate_pct": round(actual_all * 100, 4),
+                "predicted_avg_prob_pct": round(predicted_all * 100, 4),
+                "deviation_pct": round((actual_all - predicted_all) * 100, 4),
+                "significance_p_value_pct": round(p_overall * 100, 4),
+                "calibration_factor": round(overall_factor, 4),
+                "prediction_accuracy_pct": calc.prediction_accuracy_pct(actual_all, predicted_all),
+            }
+
     result = {}
+    if overall_info is not None:
+        result["overall"] = overall_info
+
     for lo, hi, name, mid in calc.PROB_BUCKETS:
         bucket_records = [(prob, won, src) for prob, won, src, _bt in records if lo <= prob < hi]
         count = len(bucket_records)
@@ -482,11 +512,23 @@ def calibration_status(db: Session = Depends(get_db)):
         }
 
     by_bt = None
+    factor_overall = None
     bucket_only = buckets
-    if isinstance(buckets, dict) and "by_bet_type" in buckets:
-        bucket_only = {k: v for k, v in buckets.items() if k != "by_bet_type"}
+    if isinstance(buckets, dict):
+        factor_overall = buckets.get("overall")
         by_bt = buckets.get("by_bet_type")
-    return {"overall": overall, "buckets": bucket_only, "by_bet_type": by_bt}
+        bucket_only = {k: v for k, v in buckets.items() if k not in ("by_bet_type", "overall")}
+    # overall: 画面用の簡易集計と、実際に確率へ掛ける係数の両方を返す
+    return {
+        "overall": overall,
+        "factor_overall": factor_overall,
+        "buckets": bucket_only,
+        "by_bet_type": by_bt,
+        "message": (
+            "新しい予想・投票プランでは factor_overall / 勝率帯の calibration_factor を"
+            "確率に掛けて想定を実績に寄せます(足切りではありません)。"
+        ),
+    }
 
 
 @router.get("/calibration-compare")

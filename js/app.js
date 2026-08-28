@@ -1117,13 +1117,20 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
     if (data.overall) {
       const o = data.overall;
       const sign = o.deviation_pct > 0 ? "+" : "";
-      html += `<p><strong>全体のズレ: ${sign}${o.deviation_pct}pt</strong>(実績的中率${o.actual_win_rate_pct}% - 予想平均${o.predicted_avg_prob_pct}%、${o.sample_count}件)<br>プラスなら予想が控えめ(実際はもっと当たっている)、マイナスなら予想が強気すぎ(実際はもっと外れている)ことを意味します。</p>`;
+      html += `<p><strong>全体のズレ: ${sign}${o.deviation_pct}pt</strong>(実績的中率${o.actual_win_rate_pct}% - 予想平均${o.predicted_avg_prob_pct}%、${o.sample_count}件)<br>プラスなら予想が控えめ、マイナスなら予想が強気すぎです。</p>`;
       const cls = o.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (o.significance_p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
-      html += `<p${cls}>📊 このズレが偶然起きる確率: ${o.significance_p_value_pct}%(5%未満=偶然では説明しにくい、20%以上=まだ偶然の範囲内)</p>`;
+      html += `<p${cls}>📊 このズレが偶然起きる確率: ${o.significance_p_value_pct}%</p>`;
     } else {
       html += "<p>まだ確定した購入履歴がありません。</p>";
     }
-    html += "<p>以下は勝率帯ごとの内訳です。試行数が必要数に達すると、以降の期待値計算に自動で反映されます。</p>";
+    if (data.factor_overall) {
+      const f = data.factor_overall;
+      html += `<p><strong>実際に確率へ掛ける全体補正係数: ${f.calibration_factor}倍</strong>` +
+        `(実績${f.actual_win_rate_pct}% / 想定${f.predicted_avg_prob_pct}%、${f.sample_count}件)<br>` +
+        `<span class="note">新しい予想・プランでは、この係数で勝率を実績に寄せます。買い目を捨てる処理ではありません。</span></p>`;
+    }
+    if (data.message) html += `<p class="note">${data.message}</p>`;
+    html += "<p>以下は勝率帯ごとの内訳です。帯の係数が十分なとき、その帯では帯の係数を優先します。</p>";
     html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
     for (const [bucket, info] of Object.entries(data.buckets || {})) {
       const status = info.is_reliable ? '<span class="ev-positive">適用中</span>' : "未達(補正なし)";
