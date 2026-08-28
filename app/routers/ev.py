@@ -402,6 +402,20 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     STAGE_EXPECTANCY_CUTOFF = -50.0
     # 券種実績がこの値未満なら、その券種は実投票から除外(3連単は対象外)
     BET_TYPE_EXPECTANCY_CUTOFF = -40.0
+    # マルチ(3連単以外): 想定的中が実績の約2倍 → 確率を実績比で縮小し的中率を改善
+    MULTI_PROB_SCALE = {
+        "3連複": 0.50,
+        "ワイド": 0.50,
+        "2車複": 0.55,
+        "2車単": 0.45,
+    }
+    MULTI_MIN_WIN_PROB = {
+        "3連複": 0.08,
+        "ワイド": 0.12,
+        "2車複": 0.08,
+        "2車単": 0.06,
+    }
+    BET_TYPE_HARD_EXCLUDE = {"2車単", "2車複"}
 
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
@@ -410,8 +424,18 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(est_prob_raw, calibration_factors)
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
+
+        multi_scale = 1.0
+        if apply_gates and o.bet_type in MULTI_PROB_SCALE:
+            multi_scale = MULTI_PROB_SCALE[o.bet_type]
+            est_prob = max(0.0, min(1.0, est_prob * multi_scale))
+
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
-        is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
+
+        effective_min_prob = req.min_win_prob
+        if apply_gates and o.bet_type in MULTI_MIN_WIN_PROB:
+            effective_min_prob = max(effective_min_prob, MULTI_MIN_WIN_PROB[o.bet_type])
+        is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, effective_min_prob)
 
         effective_min_ev = req.min_ev_pct
         gate_reason = None
@@ -419,7 +443,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             effective_min_ev += BET_TYPE_EV_BONUS.get(o.bet_type, 5.0)
             if est_prob >= 0.30:
                 effective_min_ev += FAVORITE_BAND_EV_BONUS
-            # 不調ステージ全体を除外
             if race.race_stage and race.race_stage in stage_exp_map:
                 st = stage_exp_map[race.race_stage]
                 if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
@@ -427,14 +450,23 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                         f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
                         f"{st['n']}件)"
                     )
-            # 不調券種を除外(3連単以外で実績が大きくマイナス)
-            if gate_reason is None and o.bet_type != "3連単" and o.bet_type in bet_exp_map:
+            if gate_reason is None and o.bet_type in BET_TYPE_HARD_EXCLUDE:
+                gate_reason = f"不調券種除外({o.bet_type}:実投票では見送り)"
+            elif gate_reason is None and o.bet_type != "3連単" and o.bet_type in bet_exp_map:
                 bt = bet_exp_map[o.bet_type]
-                if bt["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF:
+                if (
+                    bt["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF
+                    and o.bet_type not in MULTI_PROB_SCALE
+                ):
                     gate_reason = (
                         f"不調券種除外({o.bet_type}:実績{bt['expectancy_pct']}%/"
                         f"{bt['n']}件)"
                     )
+            if gate_reason is None and is_skip and o.bet_type in MULTI_MIN_WIN_PROB:
+                gate_reason = (
+                    f"マルチ最低勝率未達({o.bet_type}:必要{effective_min_prob*100:.0f}%/"
+                    f"補正後{est_prob*100:.1f}%)"
+                )
 
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
         stage_order_gate = stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
