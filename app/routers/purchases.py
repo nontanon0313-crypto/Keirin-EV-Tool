@@ -76,19 +76,20 @@ def get_calibration_factors(db: Session) -> dict:
     # Purchase/SkippedBetを「予想確率・的中したか・情報源」という共通の形に正規化して結合する
     # 補正係数は「補正前の予想 vs 実績」から学ぶ。rawが無い旧データは
     # win_prob_at_purchase(当時の判断値)にフォールバックする。
+    # (prob, won, src, bet_type)
     records = []
     for p in purchases:
         prob = p.win_prob_raw if getattr(p, "win_prob_raw", None) is not None else p.win_prob_at_purchase
         if prob is not None:
-            records.append((prob, p.result == "win", "purchase"))
+            records.append((prob, p.result == "win", "purchase", p.bet_type))
     for s in skipped:
         prob = s.win_prob_raw if getattr(s, "win_prob_raw", None) is not None else s.win_prob_estimated
         if prob is not None:
-            records.append((prob, s.actual_result == "win", "skipped"))
+            records.append((prob, s.actual_result == "win", "skipped", s.bet_type))
 
     result = {}
     for lo, hi, name, mid in calc.PROB_BUCKETS:
-        bucket_records = [(prob, won, src) for prob, won, src in records if lo <= prob < hi]
+        bucket_records = [(prob, won, src) for prob, won, src, _bt in records if lo <= prob < hi]
         count = len(bucket_records)
         purchase_count = sum(1 for _, _, src in bucket_records if src == "purchase")
         skipped_count = count - purchase_count
@@ -144,6 +145,31 @@ def get_calibration_factors(db: Session) -> dict:
             "calibration_factor": round(factor, 3),
             "prediction_accuracy_pct": accuracy_pct,
         }
+
+    # 券種ごとの補正係数(足切りではなく確率に掛ける用)。全券種共通の学習。
+    by_bet_type = {}
+    for bt in sorted({r[3] for r in records if r[3]}):
+        bt_recs = [(prob, won) for prob, won, _src, b in records if b == bt]
+        n = len(bt_recs)
+        if n < 30:
+            continue
+        wins = sum(1 for _, w in bt_recs if w)
+        actual = wins / n
+        predicted = sum(pr for pr, _ in bt_recs) / n
+        if predicted <= 0:
+            continue
+        raw_factor = calc.compute_calibration_factor(actual, predicted)
+        required = max(50, int(200 / max(predicted, 0.01)))
+        p_val = calc.binomial_lower_tail_p(wins, n, predicted)
+        factor = calc.shrunk_calibration_factor(raw_factor, n, required, p_value=p_val)
+        by_bet_type[bt] = {
+            "sample_count": n,
+            "actual_win_rate_pct": round(actual * 100, 2),
+            "predicted_avg_prob_pct": round(predicted * 100, 2),
+            "calibration_factor": round(factor, 3),
+        }
+    result["by_bet_type"] = by_bet_type
+
     return result
 
 
@@ -455,7 +481,12 @@ def calibration_status(db: Session = Depends(get_db)):
             "significance_p_value_pct": round(p_value * 100, 4),
         }
 
-    return {"overall": overall, "buckets": buckets}
+    by_bt = None
+    bucket_only = buckets
+    if isinstance(buckets, dict) and "by_bet_type" in buckets:
+        bucket_only = {k: v for k, v in buckets.items() if k != "by_bet_type"}
+        by_bt = buckets.get("by_bet_type")
+    return {"overall": overall, "buckets": bucket_only, "by_bet_type": by_bt}
 
 
 @router.get("/calibration-compare")

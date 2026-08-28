@@ -24,6 +24,23 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
     return probs
 
 
+
+def _line_map_from_race(race) -> tuple:
+    """race.lines_data から line_map と line_boost を返す。"""
+    line_map = None
+    line_boost = 1.2
+    if race and race.lines_data:
+        line_map = {}
+        for idx, line in enumerate(race.lines_data):
+            for car in line:
+                try:
+                    line_map[int(car)] = idx
+                except (TypeError, ValueError):
+                    pass
+        if not line_map:
+            line_map = None
+    return line_map, line_boost
+
 def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict = None, line_boost: float = 1.0) -> float:
     """券種ごとに正しい的中確率の計算方法を呼び分ける。"""
     if bet_type == "ワイド":
@@ -66,36 +83,32 @@ def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list
         db.commit()
 
 
-def _apply_calibration(est_prob: float, calibration_factors: dict) -> tuple:
+def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str = None) -> tuple:
     """
-    購入実績に基づく自動補正係数を適用する。
-    以前は「試行数が十分(200÷帯の代表確率)になるまで補正なし」だったが、
-    大穴帯(必要数8000件等)は事実上ずっと補正されないままになるため、
-    サンプル数に応じて段階的に補正を効かせる方式に変更した(のんの要望により修正)。
-    calibration_factorsの各帯には、この段階的補正が既に反映されている。
-    戻り値: (補正後確率, その勝率帯の低確率帯かつ実績未成熟=推定誤差に注意すべきか,
-             データ充足度%, 予想精度%)
-    データ充足度% = その勝率帯の試行数 ÷ 必要試行数(100%上限)。「どれだけ実績データに
-    裏付けられた補正か」を示す指標。
-    予想精度% = 予想確率と実績的中率の一致度。「予想がどれだけ当たっているか」を示す指標。
-    以前はこの2つを混同して「予想精度%」という1つの名前でデータ充足度の方を表示していた
-    (のんの指摘により分離)。どちらも表示専用で、確率計算・フィルタリング・投票内容には
-    一切使わない(のんの要望により追加)。
+    購入実績に基づく自動補正係数を適用する(確率そのものを実績に寄せる。足切りではない)。
+    - 勝率帯の係数(calibration_factors の帯キー)
+    - 券種の係数(calibration_factors.get("by_bet_type", {})[bet_type])
+    の両方を掛け合わせる。券種差別の除外ではなく、過大評価を確率値で修正する。
     """
     bucket_name, _ = calc.get_prob_bucket(est_prob)
     info = calibration_factors.get(bucket_name)
     is_reliable = bool(info and info["is_reliable"])
-    # オッズが跳ねる低確率帯(0-5%=大穴)は、確率推定のわずかな誤差がEVの計算上
-    # 大きく増幅されるため、実績が十分溜まって確信が持てるまでは特に注意が必要
-    # (この警告フラグ自体は段階的補正とは別に、閾値到達までは出し続ける)。
     low_prob_warning = (bucket_name == "0-5%(大穴)") and not is_reliable
     data_sufficiency_pct = 0.0
     if info and info["required_sample_count"] > 0:
         data_sufficiency_pct = round(min(1.0, info["sample_count"] / info["required_sample_count"]) * 100, 1)
     accuracy_pct = info["prediction_accuracy_pct"] if info else None
-    if not info:
+
+    factor = 1.0
+    if info:
+        factor *= info["calibration_factor"]
+    by_bt = calibration_factors.get("by_bet_type") or {}
+    if bet_type and bet_type in by_bt:
+        factor *= by_bt[bet_type]["calibration_factor"]
+
+    if factor == 1.0 and not info:
         return est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct
-    calibrated = est_prob * info["calibration_factor"]
+    calibrated = est_prob * factor
     return max(0.0, min(1.0, calibrated)), low_prob_warning, data_sufficiency_pct, accuracy_pct
 
 
@@ -146,9 +159,9 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     low_prob_warnings = {}
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
-        est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars)
+        est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
         if getattr(req, "apply_calibration", True):
-            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob_raw, calibration_factors)
+            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob_raw, calibration_factors, bet_type=o.bet_type)
         else:
             est_prob, low_prob_warning = est_prob_raw, False
         low_prob_warnings[(o.bet_type, o.combination)] = low_prob_warning
@@ -329,6 +342,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     if not win_probs:
         raise HTTPException(400, "選手の勝率データが揃っていません")
 
+    line_map, line_boost = _line_map_from_race(race)
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
@@ -387,62 +401,29 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             stage_exp_map = {}
             bet_exp_map = {}
 
-    # 券種ごとの追加EV閾値(実績で不調な券種はより高いEVを要求)
-    # 3連単は利益の柱のため追加なし。他は想定が楽観的なため底上げする。
-    BET_TYPE_EV_BONUS = {
-        "3連単": 0.0,
-        "3連複": 10.0,
-        "ワイド": 15.0,
-        "2車複": 15.0,
-        "2車単": 20.0,
-    }
-    # 本命帯(30%以上)は的中率が想定の約半分のため追加閾値
-    FAVORITE_BAND_EV_BONUS = 10.0
-    # ステージ実績がこの値未満なら、そのステージの買い目を実投票から除外
+    # 実績ゲートは「確率を捨てる」のではなく、不調ステージのみ見送り(券種差別なし)。
+    # マルチ専用の確率縮小・最低勝率・券種除外は行わない。
     STAGE_EXPECTANCY_CUTOFF = -50.0
-    # 券種実績がこの値未満なら、その券種は実投票から除外(3連単は対象外)
-    BET_TYPE_EXPECTANCY_CUTOFF = -40.0
-    # マルチ(3連単以外): 想定的中が実績の約2倍 → 確率を実績比で縮小し的中率を改善
-    MULTI_PROB_SCALE = {
-        "3連複": 0.50,
-        "ワイド": 0.50,
-        "2車複": 0.55,
-        "2車単": 0.45,
-    }
-    MULTI_MIN_WIN_PROB = {
-        "3連複": 0.08,
-        "ワイド": 0.12,
-        "2車複": 0.08,
-        "2車単": 0.06,
-    }
-    BET_TYPE_HARD_EXCLUDE = {"2車単", "2車複"}
+
+    # ライン構成を買い目確率に反映
+    line_map, line_boost = _line_map_from_race(race)
 
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
-        est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars)
+        est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
         if getattr(req, "apply_calibration", True):
-            est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(est_prob_raw, calibration_factors)
+            est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(
+                est_prob_raw, calibration_factors, bet_type=o.bet_type
+            )
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
-
-        multi_scale = 1.0
-        if apply_gates and o.bet_type in MULTI_PROB_SCALE:
-            multi_scale = MULTI_PROB_SCALE[o.bet_type]
-            est_prob = max(0.0, min(1.0, est_prob * multi_scale))
-
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
-
-        effective_min_prob = req.min_win_prob
-        if apply_gates and o.bet_type in MULTI_MIN_WIN_PROB:
-            effective_min_prob = max(effective_min_prob, MULTI_MIN_WIN_PROB[o.bet_type])
-        is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, effective_min_prob)
+        is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
         effective_min_ev = req.min_ev_pct
         gate_reason = None
         if apply_gates:
-            effective_min_ev += BET_TYPE_EV_BONUS.get(o.bet_type, 5.0)
-            if est_prob >= 0.30:
-                effective_min_ev += FAVORITE_BAND_EV_BONUS
+            # 不調ステージのみ除外(券種は問わない)
             if race.race_stage and race.race_stage in stage_exp_map:
                 st = stage_exp_map[race.race_stage]
                 if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
@@ -450,23 +431,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                         f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
                         f"{st['n']}件)"
                     )
-            if gate_reason is None and o.bet_type in BET_TYPE_HARD_EXCLUDE:
-                gate_reason = f"不調券種除外({o.bet_type}:実投票では見送り)"
-            elif gate_reason is None and o.bet_type != "3連単" and o.bet_type in bet_exp_map:
-                bt = bet_exp_map[o.bet_type]
-                if (
-                    bt["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF
-                    and o.bet_type not in MULTI_PROB_SCALE
-                ):
-                    gate_reason = (
-                        f"不調券種除外({o.bet_type}:実績{bt['expectancy_pct']}%/"
-                        f"{bt['n']}件)"
-                    )
-            if gate_reason is None and is_skip and o.bet_type in MULTI_MIN_WIN_PROB:
-                gate_reason = (
-                    f"マルチ最低勝率未達({o.bet_type}:必要{effective_min_prob*100:.0f}%/"
-                    f"補正後{est_prob*100:.1f}%)"
-                )
 
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
         stage_order_gate = stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
@@ -491,11 +455,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
         f = calc.kelly_fraction(est_prob, o.odds_value, req.fractional_coefficient, req.rebate_pct)
         f_capped = min(f, req.max_bet_pct_per_bet)
-        # 不調寄り券種は賭け金も抑制(3連単以外)
-        stake_mult = 1.0
-        if apply_gates and o.bet_type != "3連単":
-            stake_mult = 0.5
-        raw_stake = bankroll * f_capped * stake_mult
+        raw_stake = bankroll * f_capped
         candidates.append({
             "bet_type": o.bet_type,
             "combination": o.combination,
@@ -513,7 +473,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             # (のんの要望により追加、のんの指摘により2指標に分離)。
             "data_sufficiency_pct": data_sufficiency_pct,
             "prediction_accuracy_pct": accuracy_pct,
-            "stake_mult": stake_mult,
             "effective_min_ev": effective_min_ev,
         })
 
@@ -578,7 +537,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     car_numbers = sorted({e.car_number for e in entries})
     outcomes = list(itertools.permutations(car_numbers, 3)) if len(car_numbers) >= 3 else []
     # 各結果(起こりうる着順)の確率。3連単の的中確率と全く同じ計算(Harville式)。
-    outcome_probs = {o: _estimate_prob(win_probs, "3連単", o) for o in outcomes} if outcomes else {}
+    outcome_probs = {o: _estimate_prob(win_probs, "3連単", o, line_map=line_map, line_boost=line_boost) for o in outcomes} if outcomes else {}
 
     # 投票時オッズは締切までにズレる(券種によってズレ幅が大きく異なり、実測でワイドは
     # 3連単の4倍近くズレることが分かっている)。ガミり判定はこのズレを見込んで、

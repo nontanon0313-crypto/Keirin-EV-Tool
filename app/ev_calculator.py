@@ -351,16 +351,13 @@ def shrunk_calibration_factor(raw_factor: float, sample_count: int, required_sam
     weight = min(1.0, sample_count / required_sample_count)
 
     if p_value is not None and sample_count >= 50:
-        # p値が非常に小さい(統計的に確からしい)ほど、weightの下限を引き上げる。
-        # p値0.1%未満なら最低70%、1%未満なら最低50%、5%未満なら最低30%は信頼する。
-        # (閾値・下限値は保守的に設定。過剰補正を避けるため、証拠が弱い場合は
-        # 通常のサンプル数ベースweightのみを使う)
+        # p値が非常に小さいほど weight の下限を引き上げる(証拠が強いほど実績係数を早く効かせる)
         if p_value < 0.001:
-            weight = max(weight, 0.7)
+            weight = max(weight, 0.85)
         elif p_value < 0.01:
-            weight = max(weight, 0.5)
+            weight = max(weight, 0.65)
         elif p_value < 0.05:
-            weight = max(weight, 0.3)
+            weight = max(weight, 0.4)
 
     return 1.0 * (1 - weight) + raw_factor * weight
 
