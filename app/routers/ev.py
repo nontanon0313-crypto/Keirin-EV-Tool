@@ -361,7 +361,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     if not win_probs:
         raise HTTPException(400, "選手の勝率データが揃っていません")
 
-    line_map, line_boost = _line_map_from_race(race)
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
@@ -409,16 +408,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     performance_gated_keys = set()  # (bet_type, combination) -> reason
     apply_gates = getattr(req, "apply_performance_gates", True)
 
-    # 実績に基づく券種・ステージのゲート用データ(検証経路では使わない)
+    # 実績に基づくステージのゲート用データ(検証経路では使わない)
     stage_exp_map = {}
-    bet_exp_map = {}
     if apply_gates:
         try:
             stage_exp_map = purchases_router.get_stage_expectancy_map(db, min_samples=50)
-            bet_exp_map = purchases_router.get_bet_type_expectancy_map(db, min_samples=50)
         except Exception:
             stage_exp_map = {}
-            bet_exp_map = {}
 
     # 実績ゲートは「確率を捨てる」のではなく、不調ステージのみ見送り(券種差別なし)。
     # マルチ専用の確率縮小・最低勝率・券種除外は行わない。
