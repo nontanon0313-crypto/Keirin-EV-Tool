@@ -1232,7 +1232,7 @@ def purchase_stats(db: Session = Depends(get_db)):
             b = buckets.setdefault(key, {
                 "stake": 0.0, "payout": 0.0, "count": 0, "wins": 0,
                 "win_prob_sum": 0.0, "win_prob_count": 0,
-                "ev_profit_sum": 0.0, "ev_stake_sum": 0.0,
+                "ev_pct_sum": 0.0, "ev_pct_count": 0,
                 "purchased_count": 0,
             })
             b["count"] += 1
@@ -1252,11 +1252,13 @@ def purchase_stats(db: Session = Depends(get_db)):
                 b["purchased_count"] += 1
                 b["stake"] += p.stake_amount
                 b["payout"] += p.payout_amount
-                # 投資額で加重平均する(証拠金の日々の変動で1点あたりの投資額が違うため、
-                # 単純平均だと少額の買い目と高額の買い目が同じ重みになってしまう)。
-                if p.ev_pct_at_purchase is not None:
-                    b["ev_profit_sum"] += p.stake_amount * p.ev_pct_at_purchase / 100
-                    b["ev_stake_sum"] += p.stake_amount
+            # 「想定回収率」はAIが見積もった理論値であり、実際に賭けたかどうかに
+            # 関係なく計算できる(のんの指摘により修正。以前は購入分の投資額で
+            # 加重していたため、見送りしかない条件では計算不能=空欄になっていた)。
+            # 予想精度の比較には使わない値なので、購入分とは違い単純平均でよい。
+            if p.ev_pct_at_purchase is not None:
+                b["ev_pct_sum"] += p.ev_pct_at_purchase
+                b["ev_pct_count"] += 1
         out = {}
         for k, v in buckets.items():
             has_purchase = v["purchased_count"] > 0
@@ -1265,12 +1267,12 @@ def purchase_stats(db: Session = Depends(get_db)):
                 round(v["win_prob_sum"] / v["win_prob_count"] * 100, 1) if v["win_prob_count"] else None
             )
             # ev_pct_at_purchaseは「0%が損益分岐点」表現のため、+100して実績(roi_pct)と
-            # 同じ「100%が損益分岐点」表現に揃える。さらに投資額で加重する
-            # (外部監査・のんの指摘により修正)。
+            # 同じ「100%が損益分岐点」表現に揃える。実際に賭けたか否かに関係なく
+            # 全件の単純平均を使う(のんの指摘により修正。予想精度の比較には使わない)。
             expected_roi_pct = (
-                round((v["ev_profit_sum"] / v["ev_stake_sum"] + 1) * 100, 2) if v["ev_stake_sum"] else None
+                round(v["ev_pct_sum"] / v["ev_pct_count"] + 100, 2) if v["ev_pct_count"] else None
             )
-            expected_profit = round(v["ev_profit_sum"], 0) if v["ev_stake_sum"] else None
+            expected_profit = None
             out[k] = {
                 "count": v["count"],
                 "purchased_count": v["purchased_count"],
