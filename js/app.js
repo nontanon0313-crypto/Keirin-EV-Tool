@@ -1164,6 +1164,16 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
     if (!res.ok) throw new Error(JSON.stringify(data));
     const enabled = loadCalAxisEnabled();
     let html = `<p>対象レコード ${data.n_records}件 ／ 補正前確率なし(旧データ) ${data.n_without_raw}件<br>${data.note || ""}</p>`;
+    if (data.overall) {
+      const ob = data.overall.before || {};
+      const oa = data.overall.after || {};
+      html += `<div style="background:#1e3a5f;padding:10px;border-radius:8px;margin:8px 0;">
+        <strong>📈 総括(全条件合計)</strong><br>
+        補正前の乖離: ${ob.deviation_pt ?? "-"}pt(予想精度${ob.accuracy_pct ?? "-"}%)<br>
+        補正後の乖離: <strong>${oa.deviation_pt ?? "-"}pt</strong>(予想精度${oa.accuracy_pct ?? "-"}%)<br>
+        実績収支率(実際に購入した分): ${data.overall.actual_roi_pct ?? "-"}${data.overall.actual_roi_pct != null ? "%" : ""}(${data.overall.n_purchased}件)
+      </div>`;
+    }
     html += `<p class="note">各軸のチェックは表示のオンオフです。勝率帯の自動補正そのもののオンオフは、下の「自動補正をプランに適用する」を使います。</p>`;
     html += `<p class="note">📌 判断は主に「乖離(ポイント)」と「実績収支率」(実際に購入した分のみ)で見てください。p値は件数が多いほど、ごくわずかなズレでも「有意」と出やすくなるため、件数が多い条件では0%に近くなりがちです(判断の補助情報として参考程度に)。</p>`;
     for (const [axis, rows] of Object.entries(data.axes || {})) {

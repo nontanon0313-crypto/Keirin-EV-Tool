@@ -744,10 +744,20 @@ def calibration_compare(db: Session = Depends(get_db)):
             })
         result_axes[axis_name] = rows
 
+    overall_before = metrics([(r.prob_raw, r.won) for r in recs if r.prob_raw is not None])
+    overall_after = metrics([(r.prob_cal, r.won) for r in recs if r.prob_cal is not None])
+    overall_roi_pct, overall_n_purchased = actual_roi(recs)
+
     return {
         "n_records": len(recs),
         "n_without_raw": n_without_raw,
-        "note": "beforeはwin_prob_rawがあるレコードのみ。旧データはafterのみ。",
+        "note": "補正前の数値は、補正前確率(win_prob_raw)が記録されているデータのみで計算しています。それが無い過去データは補正後の数値のみ計算しています。",
+        "overall": {
+            "before": overall_before,
+            "after": overall_after,
+            "actual_roi_pct": overall_roi_pct,
+            "n_purchased": overall_n_purchased,
+        },
         "axes": result_axes,
     }
 
