@@ -14,7 +14,7 @@
 </header>
 
 <nav class="tabbar">
-  <button class="tab-btn active" data-tab="tab-vote">投票</button>
+  <button class="tab-btn active" data-tab="tab-vote"> 投票</button>
   <button class="tab-btn" data-tab="tab-bankroll">証拠金</button>
   <button class="tab-btn" data-tab="tab-verify">検証</button>
   <button class="tab-btn" data-tab="tab-settings">詳細設定</button>
@@ -26,11 +26,11 @@
 
   <section class="card">
     <h2>① スクショ解析</h2>
-    <p class="note">出走表・直近成績・勝率・オッズ(全券種)のスクショをまとめて選択してください。複数レース分をまとめてもOKです。アップロードが完了すると、対象レースが自動で選択され②の詳細も自動表示されます(AI予想は自動実行されないので、下の「AI予想を実行」ボタンを押してください)。</p>
+    <p class="note">出走表・直近成績・勝率・オッズ(全 券種)のスクショをまとめて選択してください。複数レース 分をまとめてもOKです。アップロードが完了すると、対象レースが自動で選択され②の詳細も自動表示されます(AI予想は自動実行されないので、下の「AI予想を実行」ボタンを押してください)。</p>
     <input type="file" id="screenshotInput" multiple accept="image/*">
     <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
       <input type="checkbox" id="isFinalOddsCheckbox" style="width:auto;margin:0;">
-      これは投票締切後の最終オッズのスクショです(該当レースの購入履歴にfinal_oddsを自動反映)
+      これは投票締切後の最終オッズのスクショです(該当 レースの購入履歴にfinal_oddsを自動反映)
     </label>
     <button id="uploadBtn">解析してDBに反映</button>
     <div id="uploadResult" class="result-box"></div>
@@ -41,7 +41,7 @@
     <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;align-items:center;">
       <button id="raceFilterUpcomingBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">直前30分</button>
       <button id="raceFilterTodayBtn" style="width:auto;padding:6px 12px;font-size:13px;">本日</button>
-      <button id="loadFavoritesBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#0ea5e9;">本命一覧</button>
+      <button id="loadFavoritesBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#0ea5e9;"> 本命一覧</button>
       <label style="margin:0;display:flex;align-items:center;gap:4px;font-size:13px;">最低勝率(%)
         <input type="number" id="favoritesMinProb" value="25" style="width:64px;margin:0;">
       </label>
@@ -51,12 +51,12 @@
 
 
     <select id="raceSelect"></select>
-    <button id="refreshRaceListBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;">🔄一覧を更新</button>
+    <button id="refreshRaceListBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;"> 🔄一覧を更新</button>
     <div id="raceDetailResult" class="result-box"></div>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="rebateCheckbox" style="width:auto;margin:0;">
-      このレースは還元レース(勝敗に関わらずポイント還元)
+      このレースは還元レース(勝敗に関わらずポイント還 元)
     </label>
     <div id="rebatePctWrapper" style="display:none;">
       <label>還元率(%)</label>
@@ -65,17 +65,17 @@
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="excludeLowProbCheckbox" checked style="width:auto;margin:0;">
-      自動投票プランから大穴帯(推定勝率0-5%・実績未検証)を除外する(推奨)
+      自動投票プランから大穴帯(推定勝率0-5%・実績未検 証)を除外する(推奨)
     </label>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
       <input type="checkbox" id="avoidGaramiCheckbox" checked style="width:auto;margin:0;">
-      券種をまたいだ「ガミり」(的中しても合計投票額を下回る結果)が起きないように選ぶ(推奨)
+      券種をまたいだ「ガミり」(的中しても合計投票額を 下回る結果)が起きないように選ぶ(推奨)
     </label>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
       <input type="checkbox" id="applyPerformanceGatesCheckbox" checked style="width:auto;margin:0;">
-      実績ゲートを使う(不調ステージの見送りのみ。券種の除外やマルチ制限はしません)。検証集計には影響しません
+      実績ゲートを使う(不調ステージの見送りのみ。券種 の除外やマルチ制限はしません)。検証集計には影響しませ ん
     </label>
 
         <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
@@ -88,8 +88,8 @@
     <div id="evResult" class="result-box"></div>
   </section>
 
-  
-  
+
+
 
   <section class="card">
     <h2>③ 購入記録</h2>
@@ -103,7 +103,7 @@
 
   <section class="card">
     <h2>③-2 結果確定(未確定の購入)</h2>
-    <p class="note">レース確定後、着順を入力して結果を確定してください。最終オッズは、投票締切後にオッズ画面をもう一度スクショして「①スクショ解析」から(「最終オッズです」にチェックを入れて)アップロードすると自動反映されます(任意ですが、入力するとオッズ変動の検証ができます)。</p>
+    <p class="note">レース確定後、着順を入力して結果を確定してください。最終オッズは、投票締切後にオッズ画面をもう一度スクショして「①スクショ解析」から(「最終オッズです」にチェックを入れて)アップロードすると自動反映 されます(任意ですが、入力するとオッズ変動の検証ができ ます)。</p>
     <button id="loadPendingBtn">未確定の購入を読み込む</button>
     <div id="pendingList" class="result-box"></div>
   </section>
@@ -113,8 +113,8 @@
 <div id="tab-bankroll" class="tab-content">
   <section class="card">
     <h2>💰 証拠金管理</h2>
-    <p class="note">購入記録・結果確定のたびに自動で増減します。実投票のプラン作成時のみ、残高に対する1レース上限比率で制限されます。検証集計には影響しません。</p>
-    <div id="bankrollDisplay" class="result-box">未設定です。下から初期額を設定してください。</div>
+    <p class="note">購入記録・結果確定のたびに自動で増減します。実投票のプラン作成時のみ、残高に対する1レー ス上限比率で制限されます。検証集計には影響しません。</p>
+    <div id="bankrollDisplay" class="result-box">未設 定です。下から初期額を設定してください。</div>
     <label>初期設定 / 入金・出金後のリセット(円)</label>
     <input type="number" id="bankrollSetInput" placeholder="例: 10000">
     <button id="bankrollSetBtn">証拠金を設定する</button>
@@ -122,15 +122,6 @@
 </div>
 
 <div id="tab-verify" class="tab-content">
-
-  
-
-  <section class="card">
-    <h2>🔁 予想を再実行(スクレイピングし直さない)</h2>
-    <p class="note">出走表・オッズ・結果はそのまま使い、AIの予想ロジックを変更した後に「予想→投票→結果確定」だけをやり直します。既存の購入記録・EV結果は自動でリセットされます。完了後、下の「実績検証」の各ボタンで更新後の集計を確認してください。レース数が多いと時間がかかるので、実行中はこの画面を閉じないでください。</p>
-    <button id="reanalyzeAllBtn">全レースを再予想する</button>
-    <div id="reanalyzeProgress" class="result-box"></div>
-  </section>
 
   <section class="card">
     <h2>実績検証</h2>
@@ -166,8 +157,15 @@
     <input type="number" id="simMaxRuinPct" value="5" step="0.5" min="0" max="100">
     <button id="runSimBtn">指定した上限%でシミュレーション実行</button>
     <button id="recommendRacePctBtn" style="background:#16a34a;">許容破産確率から1レース上限%を自動計算</button>
-    <p class="note">手で上限%を合わせる必要はありません。「自動計算」を押すと、許容破産確率以下になる最大の1レース上限%を探します。結果を詳細設定へ反映してから<strong>実投票</strong>してください。検証集計には使いません。</p>
+    <p class="note">手で上限%を合わせる必要はありませ ん。「自動計算」を押すと、許容破産確率以下になる最大の1レース上限%を探します。結果を詳細設定へ反映してから<strong>実投票</strong>してください。検証集計には使いま せん。</p>
     <div id="simResult" class="result-box"></div>
+  </section>
+
+  <section class="card">
+    <h2>🔁 予想を再実行(スクレイピングし直さない)</h2>
+    <p class="note">出走表・オッズ・結果はそのまま使い、AIの予想ロジックを変更した後に「予想→投票→結果確定」だけをやり直します。既存の購入記録・EV結果は自動でリセットされます。完了後、上の「実績検証」の各ボタンで更新後の集計を確認してください。レース数が多いと時間がかかるので、実行中はこの画面を閉じないでください。</p>
+    <button id="reanalyzeAllBtn">全レースを再予想する</button>
+    <div id="reanalyzeProgress" class="result-box"></div>
   </section>
 
   <section class="card">
@@ -184,7 +182,7 @@
     <h2>詳細設定(通常は変更不要)</h2>
     <p class="note">ここは滅多に変更しない項目です。変更するとレース選択タブでの計算・自動プラン作成に反映されます。値はこの端末のブラウザに自動保存され、次回起動時も維持されます。</p>
 
-    <label>最低勝率フィルター(%、これを下回る大穴頼みの買い目は見送り)</label>
+    <label>最低勝率フィルター(%、これを下回る大穴頼み の買い目は見送り)</label>
     <input type="number" id="minProbInput" value="0" step="1">
 
     <label>安全マージン(最低期待値%、オッズ変動対策)</label>

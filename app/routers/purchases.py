@@ -1026,6 +1026,161 @@ def stage_diagnostic(stages: str = "S級特秀,S級選抜,S級準決勝,S級決�
     }
 
 
+@router.get("/profit-concentration")
+def profit_concentration(db: Session = Depends(get_db)):
+    """
+    利益がごく一部の大穴的中に偏っていないかを確認する
+    (欠落していたエンドポイントをのんの指摘により復旧・再実装)。
+    """
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    if not purchases:
+        return {"message": "まだ確定した購入履歴がありません"}
+
+    hits = [p for p in purchases if p.result == "win"]
+    misses = [p for p in purchases if p.result != "win"]
+    total_stake = sum(p.stake_amount for p in purchases)
+    total_payout = sum(p.payout_amount for p in purchases)
+
+    gaiyou = {
+        "総ベット数": len(purchases),
+        "的中件数": len(hits),
+        "不的中件数": len(misses),
+        "総投資額": round(total_stake, 0),
+        "総払戻": round(total_payout, 0),
+        "総損益": round(total_payout - total_stake, 0),
+    }
+
+    hit_odds = [p.payout_amount / p.stake_amount for p in hits if p.stake_amount > 0]
+    bunpu = {}
+    if hit_odds:
+        s = sorted(hit_odds)
+        def pct(q):
+            idx = min(len(s) - 1, int(len(s) * q))
+            return round(s[idx], 2)
+        bunpu = {
+            "件数_オッズ判明": len(s),
+            "中央値倍": pct(0.5),
+            "平均倍": round(sum(s) / len(s), 2),
+            "75%点倍": pct(0.75),
+            "90%点倍": pct(0.9),
+            "最大倍": round(s[-1], 2),
+            "最小倍": round(s[0], 2),
+        }
+
+    def profit(p):
+        return p.payout_amount - p.stake_amount
+
+    hits_by_profit = sorted(hits, key=lambda p: -profit(p))
+    total_profit = sum(profit(p) for p in purchases)
+    total_hit_payout = sum(p.payout_amount for p in hits)
+
+    def top_n_profit_share(n):
+        if total_profit == 0:
+            return None
+        return round(sum(profit(p) for p in hits_by_profit[:n]) / total_profit * 100, 1)
+
+    def top_n_payout_share(n):
+        if total_hit_payout == 0:
+            return None
+        return round(sum(p.payout_amount for p in hits_by_profit[:n]) / total_hit_payout * 100, 1)
+
+    big_hits = [p for p in hits if p.stake_amount > 0 and p.payout_amount / p.stake_amount >= 100]
+    big_hits_profit_share = (
+        round(sum(profit(p) for p in big_hits) / total_profit * 100, 1) if total_profit else None
+    )
+
+    # レース単位の黒字割合(のんの実機運用に合わせ、購入があったレースのみ対象)
+    by_race = {}
+    for p in purchases:
+        by_race.setdefault(p.race_id, []).append(p)
+    race_profits = {rid: sum(profit(p) for p in ps) for rid, ps in by_race.items()}
+    profitable_races = [rid for rid, pf in race_profits.items() if pf > 0]
+    races_sorted = sorted(race_profits.items(), key=lambda x: -x[1])
+    top5_race_share = (
+        round(sum(pf for _, pf in races_sorted[:5]) / total_profit * 100, 1) if total_profit else None
+    )
+
+    shuchuudo = {
+        "的中上位5件が全体利益に占める割合%": top_n_profit_share(5),
+        "的中上位10件が全体利益に占める割合%": top_n_profit_share(10),
+        "的中上位10件が的中払戻に占める割合%": top_n_payout_share(10),
+        "100倍以上の的中が全体利益に占める割合%": big_hits_profit_share,
+        "黒字レース数": len(profitable_races),
+        "対象レース数": len(race_profits),
+        "黒字レース割合%": round(len(profitable_races) / len(race_profits) * 100, 1) if race_profits else None,
+        "利益上位5レースが全体利益に占める割合%": top5_race_share,
+    }
+
+    hanteil = []
+    if shuchuudo["的中上位10件が全体利益に占める割合%"] is not None:
+        if shuchuudo["的中上位10件が全体利益に占める割合%"] >= 50:
+            hanteil.append("的中上位10件だけで全体利益の半分以上を占めています。ごく一部の大穴的中に依存した収支である可能性が高いです。")
+        else:
+            hanteil.append("利益は特定の的中に極端には依存していません。")
+    if shuchuudo["黒字レース割合%"] is not None and shuchuudo["黒字レース割合%"] < 30:
+        hanteil.append("黒字レースの割合が3割未満です。多くのレースで負けながら、一部の大きな的中でカバーしている収支構造です。")
+
+    # オッズ帯別
+    band_defs = [("〜10倍", 0, 10), ("10〜30倍", 10, 30), ("30〜100倍", 30, 100), ("100倍以上", 100, float("inf"))]
+    band_result = {}
+    for label, lo, hi in band_defs:
+        group = [p for p in hits if p.stake_amount > 0 and lo <= p.payout_amount / p.stake_amount < hi]
+        pf = sum(profit(p) for p in group)
+        band_result[label] = {
+            "的中件数": len(group),
+            "払戻合計": round(sum(p.payout_amount for p in group), 0),
+            "利益合計": round(pf, 0),
+            "利益が全体利益に占める割合%": round(pf / total_profit * 100, 1) if total_profit else None,
+        }
+
+    # 券種別(的中のみ)
+    bet_result = {}
+    for p in hits:
+        b = bet_result.setdefault(p.bet_type, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
+        b["的中件数"] += 1
+        b["払戻合計"] += p.payout_amount
+        b["利益合計"] += profit(p)
+    for v in bet_result.values():
+        v["払戻合計"] = round(v["払戻合計"], 0)
+        v["利益合計"] = round(v["利益合計"], 0)
+
+    # 想定勝率帯別(的中のみ)
+    prob_result = {}
+    for p in hits:
+        name, _ = calc.get_prob_bucket(p.win_prob_at_purchase or 0)
+        b = prob_result.setdefault(name, {"的中件数": 0, "払戻合計": 0.0, "利益合計": 0.0})
+        b["的中件数"] += 1
+        b["払戻合計"] += p.payout_amount
+        b["利益合計"] += profit(p)
+    for v in prob_result.values():
+        v["払戻合計"] = round(v["払戻合計"], 0)
+        v["利益合計"] = round(v["利益合計"], 0)
+
+    tops = []
+    for p in hits_by_profit[:20]:
+        tops.append({
+            "レースID": p.race_id,
+            "券種": p.bet_type,
+            "買い目": p.combination,
+            "オッズ": round(p.payout_amount / p.stake_amount, 2) if p.stake_amount else None,
+            "投資額": round(p.stake_amount, 0),
+            "払戻": round(p.payout_amount, 0),
+            "利益": round(profit(p), 0),
+            "購入時想定勝率%": round(p.win_prob_at_purchase * 100, 2) if p.win_prob_at_purchase is not None else None,
+        })
+
+    return {
+        "概要": gaiyou,
+        "的中オッズの分布": bunpu,
+        "集中度": shuchuudo,
+        "判定": hanteil,
+        "的中オッズ帯別": band_result,
+        "的中の券種別": bet_result,
+        "的中の想定勝率帯別": prob_result,
+        "利益の大きい的中_上位": tops,
+    }
+
+
 @router.get("/car-pick-accuracy")
 def car_pick_accuracy(db: Session = Depends(get_db)):
     """

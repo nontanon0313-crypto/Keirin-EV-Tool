@@ -859,9 +859,35 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
 
 // ---------- ④ 資金管理シミュレーション ----------
 
+// シミュレーション欄の入力値は、開き直しても消えないようlocalStorageに保存する
+// (のんの要望により追加。前回入力した値をそのまま復元する)。
+const SIM_INPUT_IDS = ["simWinProb", "simOdds", "simRacePct", "simBetsPerRace", "simNumRaces", "simMaxRuinPct"];
+function saveSimInputs() {
+  const values = {};
+  for (const id of SIM_INPUT_IDS) {
+    const el = document.getElementById(id);
+    if (el) values[id] = el.value;
+  }
+  try { localStorage.setItem("keirin_sim_inputs", JSON.stringify(values)); } catch (_) {}
+}
+function restoreSimInputs() {
+  let values = {};
+  try { values = JSON.parse(localStorage.getItem("keirin_sim_inputs") || "{}"); } catch (_) {}
+  for (const id of SIM_INPUT_IDS) {
+    const el = document.getElementById(id);
+    if (el && values[id] !== undefined && values[id] !== "") el.value = values[id];
+  }
+  return Object.keys(values).length > 0;
+}
+for (const id of SIM_INPUT_IDS) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", saveSimInputs);
+}
+const simRestored = restoreSimInputs();
+
 // 検証タブを開いた時、実績の的中率・投資額加重平均オッズを自動入力する
 // (架空の数字ではなく、のん自身の実際の投票実績を土台にシミュレートするため)
-let simDefaultsFilled = false;
+let simDefaultsFilled = simRestored; // 前回値を復元できた場合は、初回の自動上書きをしない
 async function fillSimDefaultsFromActuals() {
   if (simDefaultsFilled) return; // 一度埋めたら、以降はユーザーの手入力を尊重して上書きしない
   try {
@@ -888,6 +914,7 @@ document.getElementById("reloadSimDefaultsBtn").addEventListener("click", () => 
 });
 
 document.getElementById("runSimBtn").addEventListener("click", async () => {
+  saveSimInputs();
   const resultBox = document.getElementById("simResult");
   let bankroll;
   try {
@@ -955,7 +982,7 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
 });
 
 
-document.getElementById("recommendRacePctBtn").addEventListener("click", async () => {
+async function runRecommendRacePct(silent) {
   const resultBox = document.getElementById("simResult");
   let bankroll;
   try {
@@ -963,11 +990,11 @@ document.getElementById("recommendRacePctBtn").addEventListener("click", async (
     const bankrollData = await bankrollRes.json();
     bankroll = bankrollData.current_balance;
   } catch (e) {
-    resultBox.textContent = "証拠金の取得に失敗: " + e.message;
+    if (!silent) resultBox.textContent = "証拠金の取得に失敗: " + e.message;
     return;
   }
   if (!bankroll) {
-    resultBox.textContent = "証拠金残高がありません。証拠金タブで設定してください。";
+    if (!silent) resultBox.textContent = "証拠金残高がありません。証拠金タブで設定してください。";
     return;
   }
   const winProb = parseFloat(document.getElementById("simWinProb").value) / 100;
@@ -976,10 +1003,10 @@ document.getElementById("recommendRacePctBtn").addEventListener("click", async (
   const numRaces = parseInt(document.getElementById("simNumRaces").value) || 20;
   const maxRuin = parseFloat(document.getElementById("simMaxRuinPct").value);
   if (Number.isNaN(maxRuin) || maxRuin < 0) {
-    resultBox.textContent = "許容する破産確率(%)を正しく入力してください。";
+    if (!silent) resultBox.textContent = "許容する破産確率(%)を正しく入力してください。";
     return;
   }
-  resultBox.textContent = "許容破産確率から1レース上限%を探索中...(数十秒かかることがあります)";
+  if (!silent) resultBox.textContent = "許容破産確率から1レース上限%を探索中...(数十秒かかることがあります)";
   try {
     const res = await fetch(apiUrl("/simulation/recommend-race-pct"), {
       method: "POST",
@@ -1001,7 +1028,9 @@ document.getElementById("recommendRacePctBtn").addEventListener("click", async (
     }
     const pct = data["推奨_1レース上限%"];
     document.getElementById("simRacePct").value = pct;
+    saveSimInputs();
     resultBox.innerHTML =
+      (silent ? `<p class="note">📊 集計結果をもとに1レース上限%を自動計算しました。</p>` : "") +
       `<p><strong>${data["メッセージ"]}</strong></p>` +
       `<p>その上限での破産確率: ${data["その上限での破産確率%"]}% ／ 黒字化率: ${data["黒字化率%"]}%</p>` +
       `<p>平均最終資金: ${data["平均最終資金"]}円</p>` +
@@ -1021,9 +1050,11 @@ document.getElementById("recommendRacePctBtn").addEventListener("click", async (
       });
     }
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    if (!silent) resultBox.textContent = "エラー: " + e.message;
   }
-});
+}
+
+document.getElementById("recommendRacePctBtn").addEventListener("click", () => { saveSimInputs(); runRecommendRacePct(false); });
 
 
 // ---------- ⑤ 実績検証 ----------
@@ -1102,6 +1133,17 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       html += `<p>サンプル数: ${data.odds_drift.sample_count}件 / 平均乖離: ${data.odds_drift.avg_odds_drift_pct}% / 不利方向の割合: ${data.odds_drift.worsened_ratio_pct}%</p>`;
     }
     resultBox.innerHTML = html;
+
+    // 集計結果をもとに、シミュレーションの勝率・オッズを最新値に更新し、
+    // 1レースあたりの投資上限も自動計算しておく(のんの要望により追加)。
+    if (data.overall_win_rate_pct !== undefined && data.overall_win_rate_pct !== null) {
+      document.getElementById("simWinProb").value = data.overall_win_rate_pct;
+    }
+    if (data.avg_odds_weighted !== null && data.avg_odds_weighted !== undefined) {
+      document.getElementById("simOdds").value = data.avg_odds_weighted;
+    }
+    saveSimInputs();
+    runRecommendRacePct(true);
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
