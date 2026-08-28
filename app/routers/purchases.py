@@ -677,6 +677,104 @@ def big_expected_bets(db: Session = Depends(get_db), limit: int = 20):
     return items[:limit]
 
 
+@router.get("/stage-diagnostic")
+def stage_diagnostic(stages: str = "S級特秀,S級選抜,S級準決勝,S級決勝", db: Session = Depends(get_db)):
+    """
+    指定したレースステージ(既定はS級上位4ステージ)に絞って、レース単位で
+    「AIの本命」と「tipstar勝率の本命」がそれぞれ勝ったか・一致していたかを
+    比較する診断用エンドポイント(のんの要望により追加)。
+    tipstarはAIとは独立に集計されたアプリ側の勝率で、市場のオッズそのものでは
+    ないが「大衆の見立て」に近い参考値として使う(市場確率をAIの予想ロジックに
+    混ぜるのとは別の話で、ここでは検証・原因分析にのみ使う)。
+    目的: 「S級上位はAI固有の弱点なのか、それともこのクラス自体が元々荒れやすく
+    tipstarの本命も同じように飛んでいるだけなのか」を切り分けるための材料集め。
+    """
+    target_stages = {s.strip() for s in stages.split(",") if s.strip()}
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .filter(models.Race.race_stage.in_(target_stages))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    items = []
+    for race in races:
+        entries = race.entries
+        ai_candidates = [e for e in entries if e.blended_win_prob is not None]
+        tipstar_candidates = [e for e in entries if e.app_win_rate is not None]
+        if not ai_candidates:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except (ValueError, IndexError):
+            continue
+        if not parsed["groups"]:
+            continue
+        first_group = parsed["groups"][0]
+
+        ai_pick = max(ai_candidates, key=lambda e: e.blended_win_prob)
+        tipstar_pick = max(tipstar_candidates, key=lambda e: e.app_win_rate) if tipstar_candidates else None
+
+        line_sizes = sorted((len(g) for g in (race.lines_data or [])), reverse=True)
+
+        items.append({
+            "race_id": race.id,
+            "venue_name": race.venue_name,
+            "race_number": race.race_number,
+            "race_stage": race.race_stage,
+            "actual_result": race.actual_result,
+            "line_sizes": line_sizes,  # 例: [3,2,1,1] = 3車ラインが最大
+            "ai_pick_car_number": ai_pick.car_number,
+            "ai_pick_predicted_win_prob_pct": round(ai_pick.blended_win_prob * 100, 2),
+            "ai_pick_won": ai_pick.car_number in first_group,
+            "ai_pick_in_top3": ai_pick.car_number in parsed["top3_set"],
+            "tipstar_pick_car_number": tipstar_pick.car_number if tipstar_pick else None,
+            "tipstar_pick_win_rate_pct": tipstar_pick.app_win_rate if tipstar_pick else None,
+            "tipstar_pick_won": (tipstar_pick.car_number in first_group) if tipstar_pick else None,
+            "ai_agrees_with_tipstar": (
+                ai_pick.car_number == tipstar_pick.car_number if tipstar_pick else None
+            ),
+        })
+
+    if not items:
+        return {"message": "対象ステージで着順確定済み・AI推定済みのレースがまだありません", "target_stages": sorted(target_stages)}
+
+    n = len(items)
+    ai_win = sum(1 for it in items if it["ai_pick_won"])
+    ai_top3 = sum(1 for it in items if it["ai_pick_in_top3"])
+    with_tipstar = [it for it in items if it["tipstar_pick_car_number"] is not None]
+    n_tipstar = len(with_tipstar)
+    tipstar_win = sum(1 for it in with_tipstar if it["tipstar_pick_won"])
+    agree_items = [it for it in with_tipstar if it["ai_agrees_with_tipstar"]]
+    disagree_items = [it for it in with_tipstar if it["ai_agrees_with_tipstar"] is False]
+
+    def _summ(group):
+        if not group:
+            return None
+        gn = len(group)
+        return {
+            "n": gn,
+            "ai_win_rate_pct": round(sum(1 for it in group if it["ai_pick_won"]) / gn * 100, 1),
+        }
+
+    return {
+        "target_stages": sorted(target_stages),
+        "n_races": n,
+        "ai_pick_win_rate_pct": round(ai_win / n * 100, 1),
+        "ai_pick_top3_rate_pct": round(ai_top3 / n * 100, 1),
+        "avg_ai_predicted_win_prob_pct": round(sum(it["ai_pick_predicted_win_prob_pct"] for it in items) / n, 2),
+        "tipstar_comparison": {
+            "n_with_tipstar_data": n_tipstar,
+            "tipstar_pick_win_rate_pct": round(tipstar_win / n_tipstar * 100, 1) if n_tipstar else None,
+            "ai_agrees_with_tipstar_rate_pct": round(len(agree_items) / n_tipstar * 100, 1) if n_tipstar else None,
+            "when_agree": _summ(agree_items),
+            "when_disagree": _summ(disagree_items),
+        },
+        "items": sorted(items, key=lambda x: -x["race_id"]),
+    }
+
+
 @router.get("/car-pick-accuracy")
 def car_pick_accuracy(db: Session = Depends(get_db)):
     """
