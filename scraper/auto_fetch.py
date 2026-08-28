@@ -116,12 +116,15 @@ def main() -> int:
             wlog("ALL JOBS DONE")
             flog("BATCH_DONE")
             return 0
-        for day, jo, rn in jobs:
+        for i, (day, jo, rn) in enumerate(jobs, 1):
             if is_done(day, jo, rn):
                 continue
-            run_one(day, jo, rn)
+            code = run_one(day, jo, rn)
+            # 以前はこの1件ごとの進捗が画面に出ず、数時間かかる取得の間ずっと
+            # 「本当に動いているのか」が分からなかった(のんの実機運用で判明・修正)。
+            info = progress(jobs)
+            wlog(f"取得 {day} jo={jo} R{rn} (code={code}) → 進捗 {info['done']}/{info['total']}件完了")
             time.sleep(SLEEP_BETWEEN)
-            progress(jobs)
         info = progress(jobs)
         if info["pending"] == 0:
             wlog("ALL JOBS DONE")
