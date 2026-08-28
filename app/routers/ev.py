@@ -373,6 +373,36 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     )
 
     stage_gated_keys = set()
+    performance_gated_keys = set()  # (bet_type, combination) -> reason
+    apply_gates = getattr(req, "apply_performance_gates", True)
+
+    # 実績に基づく券種・ステージのゲート用データ(検証経路では使わない)
+    stage_exp_map = {}
+    bet_exp_map = {}
+    if apply_gates:
+        try:
+            stage_exp_map = purchases_router.get_stage_expectancy_map(db, min_samples=50)
+            bet_exp_map = purchases_router.get_bet_type_expectancy_map(db, min_samples=50)
+        except Exception:
+            stage_exp_map = {}
+            bet_exp_map = {}
+
+    # 券種ごとの追加EV閾値(実績で不調な券種はより高いEVを要求)
+    # 3連単は利益の柱のため追加なし。他は想定が楽観的なため底上げする。
+    BET_TYPE_EV_BONUS = {
+        "3連単": 0.0,
+        "3連複": 10.0,
+        "ワイド": 15.0,
+        "2車複": 15.0,
+        "2車単": 20.0,
+    }
+    # 本命帯(30%以上)は的中率が想定の約半分のため追加閾値
+    FAVORITE_BAND_EV_BONUS = 10.0
+    # ステージ実績がこの値未満なら、そのステージの買い目を実投票から除外
+    STAGE_EXPECTANCY_CUTOFF = -50.0
+    # 券種実績がこの値未満なら、その券種は実投票から除外(3連単は対象外)
+    BET_TYPE_EXPECTANCY_CUTOFF = -40.0
+
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars)
@@ -382,24 +412,58 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
-        is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
+
+        effective_min_ev = req.min_ev_pct
+        gate_reason = None
+        if apply_gates:
+            effective_min_ev += BET_TYPE_EV_BONUS.get(o.bet_type, 5.0)
+            if est_prob >= 0.30:
+                effective_min_ev += FAVORITE_BAND_EV_BONUS
+            # 不調ステージ全体を除外
+            if race.race_stage and race.race_stage in stage_exp_map:
+                st = stage_exp_map[race.race_stage]
+                if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
+                    gate_reason = (
+                        f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
+                        f"{st['n']}件)"
+                    )
+            # 不調券種を除外(3連単以外で実績が大きくマイナス)
+            if gate_reason is None and o.bet_type != "3連単" and o.bet_type in bet_exp_map:
+                bt = bet_exp_map[o.bet_type]
+                if bt["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF:
+                    gate_reason = (
+                        f"不調券種除外({o.bet_type}:実績{bt['expectancy_pct']}%/"
+                        f"{bt['n']}件)"
+                    )
+
+        is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
         stage_order_gate = stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
         if stage_order_gate:
             is_recommended = False
             stage_gated_keys.add((o.bet_type, o.combination))
+        if gate_reason and (not is_skip) and (ev_pct >= req.min_ev_pct):
+            # EV閾値は超えていたが実績ゲートで落ちたものだけ記録
+            performance_gated_keys.add((o.bet_type, o.combination, gate_reason))
+
         all_evaluated.append({
             "bet_type": o.bet_type,
             "combination": o.combination,
             "win_prob": est_prob,
             "win_prob_raw": est_prob_raw,
             "ev_pct": round(ev_pct, 2),
+            "gate_reason": gate_reason,
+            "effective_min_ev": effective_min_ev,
         })
         if not is_recommended:
             continue
 
         f = calc.kelly_fraction(est_prob, o.odds_value, req.fractional_coefficient, req.rebate_pct)
         f_capped = min(f, req.max_bet_pct_per_bet)
-        raw_stake = bankroll * f_capped
+        # 不調寄り券種は賭け金も抑制(3連単以外)
+        stake_mult = 1.0
+        if apply_gates and o.bet_type != "3連単":
+            stake_mult = 0.5
+        raw_stake = bankroll * f_capped * stake_mult
         candidates.append({
             "bet_type": o.bet_type,
             "combination": o.combination,
@@ -417,6 +481,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             # (のんの要望により追加、のんの指摘により2指標に分離)。
             "data_sufficiency_pct": data_sufficiency_pct,
             "prediction_accuracy_pct": accuracy_pct,
+            "stake_mult": stake_mult,
+            "effective_min_ev": effective_min_ev,
         })
 
     # 買い示唆にすら至らなかった組み合わせ(最低勝率フィルターや期待値の閾値で
@@ -437,8 +503,18 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                     e,
                     f"このステージの検証データ不足({stage_sample_n}/{MIN_STAGE_SAMPLE_FOR_ORDER_BETS}件)のため着順指定の券種を見送り",
                 ))
+            elif e.get("gate_reason"):
+                skipped_for_verification.append((e, e["gate_reason"]))
             else:
-                skipped_for_verification.append((e, "買い示唆なし(EV/確率が閾値未満)"))
+                # 実績ゲートでEV底上げされた場合
+                eff = e.get("effective_min_ev")
+                if eff is not None and e.get("ev_pct", 0) >= req.min_ev_pct and e.get("ev_pct", 0) < eff:
+                    skipped_for_verification.append((
+                        e,
+                        f"実績に基づくEV閾値未達(必要{eff}%/実際{e.get('ev_pct')}%)",
+                    ))
+                else:
+                    skipped_for_verification.append((e, "買い示唆なし(EV/確率が閾値未満)"))
 
     excluded_low_prob_count = 0
     if req.exclude_low_prob_warning:
@@ -598,6 +674,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         # 実際にどの設定でこのプランが作られたかを明示する(除外されたはずの大穴帯が
         # 混ざっていた場合など、原因切り分けをしやすくするため。のんの報告により追加)。
         "exclude_low_prob_warning_requested": req.exclude_low_prob_warning,
+        "performance_gates_applied": apply_gates,
+        "performance_gated_count": len(performance_gated_keys),
+        "stage_expectancy_used": stage_exp_map.get(race.race_stage) if race.race_stage else None,
         "garami_free": req.avoid_garami,
         "odds_safety_margins_used_pct": odds_safety_margins if req.avoid_garami else {},
         "total_expected_profit": round(total_expected_profit, 0),

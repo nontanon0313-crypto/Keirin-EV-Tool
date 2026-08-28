@@ -444,6 +444,8 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         rebate_pct: getRebatePct(),
         max_items: parseInt(document.getElementById("maxItemsInput").value) || 20,
         apply_calibration: isCalibrationApplyEnabled(),
+        apply_performance_gates: document.getElementById("applyPerformanceGatesCheckbox")
+          ? document.getElementById("applyPerformanceGatesCheckbox").checked : true,
         exclude_low_prob_warning: document.getElementById("excludeLowProbCheckbox").checked,
         avoid_garami: document.getElementById("avoidGaramiCheckbox").checked,
       }),
@@ -748,7 +750,8 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
           body: JSON.stringify({
             race_id: race.id,
             bankroll: 1000000, // 検証・集計目的の固定額
-            max_race_pct: 1.0, // 1レース上限なし(検証用。実投票プランのみ上限を掛ける)
+            max_race_pct: 1.0, // 1レース上限なし(検証用)
+            apply_performance_gates: false, // 検証集計はゲートなし
           }),
         });
         const plan = await planRes.json();

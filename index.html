@@ -73,6 +73,11 @@
       券種をまたいだ「ガミり」(的中しても合計投票額を下回る結果)が起きないように選ぶ(推奨)
     </label>
 
+    <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+      <input type="checkbox" id="applyPerformanceGatesCheckbox" checked style="width:auto;margin:0;">
+      実績ゲートを使う(不調ステージ・不調券種の除外、本命帯・他券種のEV閾値引き上げ)。検証集計には影響しません
+    </label>
+
         <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="useSimRaceCapCheckbox" checked style="width:auto;margin:0;">
       検証タブの「1レースあたりの投資上限%」を<strong>実投票のプラン作成時のみ</strong>合計上限に使う(オフなら詳細設定の上限)。検証・再集計には使いません

@@ -149,6 +149,66 @@ def get_calibration_factors(db: Session) -> dict:
 
 DEFAULT_ODDS_SAFETY_MARGIN_PCT = 20.0
 
+def get_stage_expectancy_map(db: Session, min_samples: int = 50) -> dict:
+    """
+    レースステージごとの実績収支率(回収率-100)を返す。
+    サンプルが min_samples 未満のステージは含めない。
+    戻り値: {stage_name: {"n": int, "expectancy_pct": float, "win_rate_pct": float}}
+    """
+    rows = (
+        db.query(models.Purchase, models.Race.race_stage)
+        .join(models.Race, models.Race.id == models.Purchase.race_id)
+        .filter(models.Purchase.result != "pending")
+        .filter(models.Race.race_stage.isnot(None))
+        .all()
+    )
+    buckets = {}
+    for p, stage in rows:
+        if not stage:
+            continue
+        b = buckets.setdefault(stage, {"stake": 0.0, "payout": 0.0, "n": 0, "wins": 0})
+        b["stake"] += p.stake_amount or 0
+        b["payout"] += p.payout_amount or 0
+        b["n"] += 1
+        if p.result == "win":
+            b["wins"] += 1
+    out = {}
+    for stage, b in buckets.items():
+        if b["n"] < min_samples or b["stake"] <= 0:
+            continue
+        exp = (b["payout"] - b["stake"]) / b["stake"] * 100
+        out[stage] = {
+            "n": b["n"],
+            "expectancy_pct": round(exp, 2),
+            "win_rate_pct": round(b["wins"] / b["n"] * 100, 2),
+        }
+    return out
+
+
+def get_bet_type_expectancy_map(db: Session, min_samples: int = 50) -> dict:
+    """券種ごとの実績収支率。"""
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    buckets = {}
+    for p in purchases:
+        b = buckets.setdefault(p.bet_type, {"stake": 0.0, "payout": 0.0, "n": 0, "wins": 0})
+        b["stake"] += p.stake_amount or 0
+        b["payout"] += p.payout_amount or 0
+        b["n"] += 1
+        if p.result == "win":
+            b["wins"] += 1
+    out = {}
+    for bt, b in buckets.items():
+        if b["n"] < min_samples or b["stake"] <= 0:
+            continue
+        exp = (b["payout"] - b["stake"]) / b["stake"] * 100
+        out[bt] = {
+            "n": b["n"],
+            "expectancy_pct": round(exp, 2),
+            "win_rate_pct": round(b["wins"] / b["n"] * 100, 2),
+        }
+    return out
+
+
 
 def get_odds_safety_margins(db: Session) -> dict:
     """

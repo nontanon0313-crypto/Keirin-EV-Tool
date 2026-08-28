@@ -112,9 +112,10 @@ def step2_estimate(race_id, max_retries=5):
 
 def step3_race_plan(race_id, bankroll):
     """3. 投票プラン作成: EV計算・ステーキング(bankroll未指定なら証拠金残高を自動使用)"""
-    body = {"race_id": race_id}
+    body = {"race_id": race_id, "apply_performance_gates": False}
     if bankroll is not None:
         body["bankroll"] = bankroll
+    body["max_race_pct"] = 1.0
     r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, timeout=90)
     r.raise_for_status()
     return r.json()

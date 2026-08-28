@@ -86,6 +86,7 @@ class RacePlanRequest(BaseModel):
     exclude_low_prob_warning: bool = True  # 大穴帯(0-5%・実績未検証)の買い目を自動プランから除外するか
     apply_calibration: bool = True  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
+    apply_performance_gates: bool = True  # 実績に基づく券種・ステージ・本命帯のゲート(検証集計ではOFF)
 
 
 class BankrollSet(BaseModel):
