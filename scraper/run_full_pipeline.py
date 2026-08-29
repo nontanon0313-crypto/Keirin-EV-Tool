@@ -48,9 +48,43 @@ def warmup_backend():
         log(f"  ウォームアップ失敗(続行します): {e}")
 
 
+def _is_transient_network_error(e):
+    """
+    DNS引けない・接続が途中で切れた等、時間を置けば直る可能性が高いエラーかを判定する
+    (のんの実機運用で、Termuxがバックグラウンドに回った際にネットが一時的に
+    切れる現象が頻発したため追加)。
+    """
+    msg = str(e)
+    return any(
+        s in msg
+        for s in (
+            "NameResolutionError", "Failed to resolve",
+            "Connection aborted", "ConnectionError",
+            "Max retries exceeded", "Read timed out", "ConnectionResetError",
+        )
+    )
+
+
+def _post_with_retry(url, **kwargs):
+    """一時的なネットワークエラーは数秒待って最大3回までリトライする"""
+    last_err = None
+    for attempt in range(3):
+        try:
+            return requests.post(url, **kwargs)
+        except Exception as e:
+            last_err = e
+            if attempt < 2 and _is_transient_network_error(e):
+                wait = 5 * (attempt + 1)
+                log(f"   一時的な通信エラーのため{wait}秒待って再試行します({attempt + 1}/2回目): {e}")
+                time.sleep(wait)
+            else:
+                raise
+    raise last_err
+
+
 def step1_import(payload):
     """1. データ取得(登録): スクレイパーJSONをバックエンドに取り込む"""
-    r = requests.post(f"{API_BASE}/scraper-import/race", json=payload, timeout=90)
+    r = _post_with_retry(f"{API_BASE}/scraper-import/race", json=payload, timeout=90)
     if r.status_code >= 400:
         # 以前はエラーの中身(なぜダメだったか)が見えず原因調査に手間取っていたため、
         # サーバーから返ってきた理由をログに出すようにした(のんの実機運用で判明・修正)。
@@ -112,10 +146,9 @@ def step2_estimate(race_id, max_retries=5):
 
 def step3_race_plan(race_id, bankroll):
     """3. 投票プラン作成: EV計算・ステーキング(bankroll未指定なら証拠金残高を自動使用)"""
-    body = {"race_id": race_id, "apply_performance_gates": False}
+    body = {"race_id": race_id}
     if bankroll is not None:
         body["bankroll"] = bankroll
-    body["max_race_pct"] = 1.0
     r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, timeout=90)
     r.raise_for_status()
     return r.json()
@@ -299,7 +332,10 @@ def _lightweight_confirm_sweep(files):
     安全な作り(冪等)になっているので、既に確定済みのレースに対して呼んでも害はない。
     """
     confirmed, still_pending, error = 0, 0, 0
-    for fp in files:
+    total = len(files)
+    for i, fp in enumerate(files, 1):
+        if i == 1 or i % 20 == 0 or i == total:
+            log(f"   結果確定スイープ進捗: {i}/{total}件目")
         try:
             with open(fp, encoding="utf-8") as f:
                 race_json = json.load(f)
@@ -311,7 +347,7 @@ def _lightweight_confirm_sweep(files):
             race_id = imp.get("race_id")
             if not race_id:
                 continue
-            r = requests.post(
+            r = _post_with_retry(
                 f"{API_BASE}/races/{race_id}/confirm-result",
                 params={"actual_result": actual_result},
                 timeout=90,
