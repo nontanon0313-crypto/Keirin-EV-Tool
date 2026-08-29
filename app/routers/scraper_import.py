@@ -28,44 +28,163 @@ from ..keirin_data import venue_name_from_jo_code
 
 router = APIRouter(prefix="/scraper-import", tags=["scraper-import"])
 
-# oddspark表記→アプリ内表記の脚質マッピング(不明な値はそのまま素通しする)
-LEG_STYLE_MAP = {"逃": "逃げ", "追": "追込", "両": "両方"}
-
-# 過去(修正前)のインポートで文字化けしたまま保存されてしまった脚質データの復旧用。
-# 原因: 本来「逃げ/追込/両方」という文字列がEntryテーブルに保存されるべきところ、
-# 当時のコードの文字コード不整合により、UTF-8のバイト列がCyrillic系の文字コード
-# (cp1251)として誤って解釈された状態で保存されてしまっていた
-# (のんの実機運用で発覚。現在のコードは正常)。
-MOJIBAKE_LEG_STYLE_FIX = {
-    "逃".encode("utf-8").decode("cp1251"): "逃げ",
-    "追".encode("utf-8").decode("cp1251"): "追込",
-    "両".encode("utf-8").decode("cp1251"): "両方",
-    # ドキュメントで確認された、上記とは微妙に異なる化け方のパターンも念のため含める
-    "йҖғ": "逃げ",
-    "иҝҪ": "追込",
-    "дёЎ": "両方",
+# oddspark表記→アプリ内表記の脚質マッピング
+LEG_STYLE_MAP = {
+    "逃": "逃げ", "逃げ": "逃げ",
+    "追": "追込", "追込": "追込", "追込み": "追込",
+    "両": "両方", "両方": "両方", "両複": "両方",
 }
+
+# UTF-8をcp1251等で誤解釈した文字化けの復旧テーブル。
+# 単体のほか、集計ラベル「混在(A・B)」に混入した断片も replace で直す。
+_MOJIBAKE_PAIRS = []
+for src, dst in (("逃", "逃げ"), ("追", "追込"), ("両", "両方")):
+    try:
+        _MOJIBAKE_PAIRS.append((src.encode("utf-8").decode("cp1251"), dst))
+    except Exception:
+        pass
+    try:
+        _MOJIBAKE_PAIRS.append((src.encode("utf-8").decode("latin-1"), dst))
+    except Exception:
+        pass
+# 実データで確認されたパターン(ユーザー貼付の文字化け)
+_MOJIBAKE_PAIRS.extend([
+    ("йҖғ", "逃げ"),
+    ("иҝҪ", "追込"),
+    ("дёЎ", "両方"),
+    ("Ð³Ð°", "逃げ"),  # 万一の別化け
+])
+# 長い断片を先に置換するため長さ降順
+_MOJIBAKE_PAIRS = sorted(set(_MOJIBAKE_PAIRS), key=lambda x: -len(x[0]))
+MOJIBAKE_LEG_STYLE_FIX = {a: b for a, b in _MOJIBAKE_PAIRS}
+
+
+def normalize_leg_style(raw) -> str | None:
+    """脚質を「逃げ/追込/両方」に正規化する。文字化け・略称・空を吸収する。"""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s or s in ("-", "—", "－", "不明", "None", "null"):
+        return None
+    # 文字化け断片を先に置換(混在ラベル用)
+    for bad, good in _MOJIBAKE_PAIRS:
+        if bad and bad in s:
+            s = s.replace(bad, good)
+    if s in LEG_STYLE_MAP:
+        return LEG_STYLE_MAP[s]
+    # 既に正規化済み
+    if s in ("逃げ", "追込", "両方"):
+        return s
+    return s
 
 
 @router.post("/fix-leg-style-mojibake")
 def fix_leg_style_mojibake(db: Session = Depends(get_db)):
     """
-    過去に文字化けした状態で保存されてしまったEntry.leg_styleを復旧する
-    (のんの指摘により追加。1回実行すれば十分)。
+    Entry.leg_style の文字化け・略称をすべて正規化する。
+    完全一致だけでなく、値が文字化け文字を含む場合も置換する。
     """
-    entries = (
-        db.query(models.Entry)
-        .filter(models.Entry.leg_style.in_(list(MOJIBAKE_LEG_STYLE_FIX.keys())))
+    entries = db.query(models.Entry).filter(models.Entry.leg_style.isnot(None)).all()
+    fixed = 0
+    samples = []
+    for e in entries:
+        before = e.leg_style
+        after = normalize_leg_style(before)
+        if after != before:
+            e.leg_style = after
+            fixed += 1
+            if len(samples) < 20:
+                samples.append({"before": before, "after": after})
+    db.commit()
+    return {"fixed_count": fixed, "scanned": len(entries), "samples": samples}
+
+
+def _fetch_grade_from_oddspark(jo_code: str, kaisai_bi: str):
+    """
+    AllRaceList.do からグレードを取得する(アプリ側の既存データ修復用)。
+    scraper パッケージに依存せず requests+正規表現だけで動かす。
+    """
+    import re
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return None, None
+    url = "https://www.oddspark.com/keirin/AllRaceList.do"
+    try:
+        r = requests.get(url, params={"joCode": jo_code, "kaisaiBi": kaisai_bi}, timeout=20)
+        r.encoding = r.apparent_encoding or "utf-8"
+        text = BeautifulSoup(r.text, "lxml").get_text(" ", strip=True)
+    except Exception:
+        return None, None
+    grade_pat = (
+        r"([GgＧｇ](?:[PpＰｐ]|[1-3１２３]|[ⅠⅡⅢ]|I{1,3})|[FfＦｆ][12１２])"
+    )
+    m = re.search(rf"競輪場[\s　]*{grade_pat}[\s　]*([^\s　]{{2,30}})?", text)
+    if not m:
+        m = re.search(rf"{grade_pat}[\s　]+([^\s　]{{2,30}})", text)
+    if not m:
+        return None, None
+    raw = m.group(1)
+    grade = (
+        raw.replace("Ｇ", "G").replace("ｇ", "G").replace("Ｆ", "F").replace("ｆ", "F")
+        .replace("Ｐ", "P").replace("ｐ", "P")
+        .replace("Ⅰ", "1").replace("Ⅱ", "2").replace("Ⅲ", "3")
+        .replace("II", "2").replace("III", "3").replace("I", "1")
+        .translate(str.maketrans("１２３", "123"))
+        .upper()
+    )
+    title = m.group(2) if m.lastindex and m.lastindex >= 2 else None
+    return grade, title
+
+
+@router.post("/fix-missing-grades")
+def fix_missing_grades(db: Session = Depends(get_db), limit: int = 500):
+    """
+    grade が空の Race について、external_ref(oddspark:jo:date:race) から
+    オッズパークの AllRaceList を見てグレードを埋める。
+    同じ開催(jo+date)は1回だけ取得して全レースに適用する。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(
+            (models.Race.grade.is_(None)) | (models.Race.grade == ""),
+            models.Race.external_ref.isnot(None),
+        )
+        .limit(limit)
         .all()
     )
-    fixed = 0
-    for e in entries:
-        correct = MOJIBAKE_LEG_STYLE_FIX.get(e.leg_style)
-        if correct:
-            e.leg_style = correct
-            fixed += 1
+    cache = {}
+    updated = 0
+    failed = 0
+    samples = []
+    for race in races:
+        ref = race.external_ref or ""
+        # oddspark:{jo}:{kaisaiBi}:{raceNo}
+        parts = ref.split(":")
+        if len(parts) < 4 or parts[0] != "oddspark":
+            failed += 1
+            continue
+        jo, kaisai = parts[1], parts[2]
+        key = (jo, kaisai)
+        if key not in cache:
+            cache[key] = _fetch_grade_from_oddspark(jo, kaisai)
+        grade, title = cache[key]
+        if not grade:
+            failed += 1
+            continue
+        race.grade = grade
+        updated += 1
+        if len(samples) < 15:
+            samples.append({"race_id": race.id, "venue": race.venue_name, "grade": grade, "title": title})
     db.commit()
-    return {"fixed_count": fixed}
+    return {
+        "updated": updated,
+        "failed_or_skipped": failed,
+        "cache_keys": len(cache),
+        "samples": samples,
+    }
+
 
 
 def _to_int(v):
@@ -223,9 +342,11 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
             race.season = season
         if bank and not race.bank_id:
             race.bank_id = bank.id
-        if grade and not race.grade:
+        # グレード/ステージは再取り込み時も上書きする
+        # (初回が null のままだと「グレード別=不明」固定になる再発を防ぐ)
+        if grade:
             race.grade = grade
-        if race_stage and not race.race_stage:
+        if race_stage:
             race.race_stage = race_stage
         if lines:
             race.lines_data = lines
@@ -239,8 +360,7 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
             car_no = _to_int(r.get("車番"))
             if car_no is None or not r.get("選手名"):
                 continue
-            leg_style_raw = r.get("脚質") or ""
-            leg_style = LEG_STYLE_MAP.get(leg_style_raw, leg_style_raw or None)
+            leg_style = normalize_leg_style(r.get("脚質") or r.get("leg_style"))
             finish = r.get("直近着順") or {}
             if not isinstance(finish, dict):
                 finish = {}

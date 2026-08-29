@@ -1614,12 +1614,33 @@ def purchase_stats(db: Session = Depends(get_db)):
                 return f"買い目内平均得点:{name}"
         return "買い目内平均得点:75以上"
 
+    def _norm_leg(s):
+        """集計表示時の脚質文字化け・略称を吸収(DB未修復でも画面を壊さない)。"""
+        if not s:
+            return s
+        t = str(s)
+        for bad, good in (
+            ("йҖғ", "逃げ"), ("иҝҪ", "追込"), ("дёЎ", "両方"),
+            ("逃", "逃げ"), ("追込", "追込"), ("追", "追込"), ("両", "両方"),
+        ):
+            if bad in t and bad != good:
+                # 「逃」→「逃げ」は「逃げ」内の「逃」を二重化しないよう注意
+                if bad == "逃" and "逃げ" in t:
+                    continue
+                if bad == "追" and "追込" in t:
+                    continue
+                if bad == "両" and "両方" in t:
+                    continue
+                t = t.replace(bad, good)
+        return t
+
     def leg_style_bucket(p):
         cars = _combination_cars(p)
         if not cars:
             return "脚質情報なし"
         entries = [e for e in entries_by_race_id.get(p.race_id, []) if e.car_number in cars]
-        styles = [e.leg_style for e in entries if e.leg_style]
+        styles = [_norm_leg(e.leg_style) for e in entries if e.leg_style]
+        styles = [s for s in styles if s]
         if not styles:
             return "脚質情報なし"
         unique_styles = set(styles)
