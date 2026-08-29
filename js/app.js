@@ -1231,6 +1231,22 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
       html += `<tr><td>${bucket}</td><td>${sampleLabel}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
     }
     html += "</table>";
+
+    if (data.by_bet_type_bucket && Object.keys(data.by_bet_type_bucket).length) {
+      html += `<p style="margin-top:14px;"><strong>券種×勝率帯の交差係数(新設)</strong></p>`;
+      html += `<p class="note">同じ勝率帯でも券種によってズレ方が違う場合、こちらの係数が優先して使われます(サンプル30件以上の場合)。</p>`;
+      html += `<table><tr><th>券種</th><th>勝率帯</th><th>試行数</th><th>必要数</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
+      for (const [bt, bucketMap] of Object.entries(data.by_bet_type_bucket)) {
+        for (const [bucket, info] of Object.entries(bucketMap)) {
+          const sign2 = info.deviation_pct > 0 ? "+" : "";
+          const devCls = Math.abs(info.deviation_pct) >= 5 ? ' style="color:#f59e0b;font-weight:bold;"' : "";
+          const pCls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : "";
+          html += `<tr><td>${bt}</td><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${info.actual_win_rate_pct}%</td><td>${info.predicted_avg_prob_pct}%</td><td${devCls}>${sign2}${info.deviation_pct}pt</td><td${pCls}>${info.significance_p_value_pct}%</td><td>${info.calibration_factor}倍</td></tr>`;
+        }
+      }
+      html += `</table>`;
+    }
+
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;

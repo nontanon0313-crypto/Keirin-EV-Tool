@@ -88,9 +88,13 @@ def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str
     予想確率を実績的中率に寄せる補正(足切りではない)。
 
     優先順:
-    1. 勝率帯の係数が十分なサンプルならそれを使う
-    2. なければ全体係数(overall)を使う
-    3. 券種係数がある場合は、全体に対する残差を弱く掛けて微調整
+    1. 券種×勝率帯の交差係数(サンプル30件以上ならこれを最優先。券種・帯両方の
+       ズレを同時に反映した最も精密な補正。のんの分析結果=「勝率帯が上がるほど
+       ワイド・2車・3連複の想定と実績の乖離が大きい」への対応として追加)
+    2. なければ勝率帯の係数が十分なサンプルならそれを使う
+    3. なければ全体係数(overall)を使う
+    4. 1で交差係数を使わなかった場合のみ、券種係数がある場合は全体に対する
+       残差を弱く掛けて微調整(交差係数を使った場合は二重補正になるため行わない)
 
     これにより「想定的中率 >> 実績的中率」の系統ズレを確率値で修正する。
     """
@@ -108,21 +112,30 @@ def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str
     if accuracy_pct is None and overall:
         accuracy_pct = overall.get("prediction_accuracy_pct")
 
+    MIN_CROSS_SAMPLE = 30
+    cross_map = calibration_factors.get("by_bet_type_bucket") or {}
+    cross_info = (cross_map.get(bet_type) or {}).get(bucket_name) if bet_type else None
+    cross_used = False
+
     factor = 1.0
-    if info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
+    if cross_info and cross_info.get("sample_count", 0) >= MIN_CROSS_SAMPLE and cross_info.get("calibration_factor") is not None:
+        factor = cross_info["calibration_factor"]
+        cross_used = True
+    elif info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
         factor = info["calibration_factor"]
     elif overall and overall.get("calibration_factor") is not None:
         factor = overall["calibration_factor"]
 
-    by_bt = calibration_factors.get("by_bet_type") or {}
-    if bet_type and bet_type in by_bt and overall and overall.get("calibration_factor"):
-        bt_f = by_bt[bet_type]["calibration_factor"]
-        ov_f = overall["calibration_factor"]
-        if ov_f > 1e-9:
-            residual = bt_f / ov_f
-            # 残差は半分だけ反映(二重補正を避ける)
-            residual = 1.0 + 0.5 * (residual - 1.0)
-            factor *= residual
+    if not cross_used:
+        by_bt = calibration_factors.get("by_bet_type") or {}
+        if bet_type and bet_type in by_bt and overall and overall.get("calibration_factor"):
+            bt_f = by_bt[bet_type]["calibration_factor"]
+            ov_f = overall["calibration_factor"]
+            if ov_f > 1e-9:
+                residual = bt_f / ov_f
+                # 残差は半分だけ反映(二重補正を避ける)
+                residual = 1.0 + 0.5 * (residual - 1.0)
+                factor *= residual
 
     factor = max(0.25, min(2.0, factor))
     if abs(factor - 1.0) < 1e-9:
@@ -313,7 +326,7 @@ def threshold_table(
         )
         for combo in combos:
             est_prob = _estimate_prob(win_probs, bet_type, combo)
-            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob, calibration_factors)
+            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob, calibration_factors, bet_type=bet_type)
             is_skip, _ = calc.apply_min_prob_filter(est_prob, 100, min_win_prob)  # 勝率フィルターのみ判定
             if is_skip or est_prob <= 0:
                 continue

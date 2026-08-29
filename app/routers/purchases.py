@@ -200,6 +200,42 @@ def get_calibration_factors(db: Session) -> dict:
         }
     result["by_bet_type"] = by_bet_type
 
+    # 券種×勝率帯の交差係数(のんの分析結果を受けて追加)。
+    # 「想定勝率帯が上がるほど、ワイド・2車・3連複を中心に想定と実績の乖離が
+    # 大きい」という発見に対応するため、勝率帯単体・券種単体それぞれの平均では
+    # 薄まってしまう「この券種×この帯」特有のズレを直接学習する。
+    # 必要サンプル数・段階的補正(shrinkage)の考え方は勝率帯単体の補正と全く同じ
+    # 関数をそのまま使う(新しい閾値は作らない)。
+    by_bet_type_bucket = {}
+    for bt in sorted({r[3] for r in records if r[3]}):
+        bucket_map = {}
+        for lo, hi, name, mid in calc.PROB_BUCKETS:
+            cell = [(prob, won) for prob, won, _src, b in records if b == bt and lo <= prob < hi]
+            n = len(cell)
+            if n < 30:
+                continue
+            wins = sum(1 for _, w in cell if w)
+            actual = wins / n
+            predicted = sum(pr for pr, _ in cell) / n
+            if predicted <= 0:
+                continue
+            raw_factor = calc.compute_calibration_factor(actual, predicted)
+            required = calc.required_sample_size(mid)
+            p_val = calc.binomial_lower_tail_p(wins, n, predicted)
+            factor = calc.shrunk_calibration_factor(raw_factor, n, required, p_value=p_val)
+            bucket_map[name] = {
+                "sample_count": n,
+                "required_sample_count": required,
+                "actual_win_rate_pct": round(actual * 100, 2),
+                "predicted_avg_prob_pct": round(predicted * 100, 2),
+                "deviation_pct": round((actual - predicted) * 100, 2),
+                "significance_p_value_pct": round(p_val * 100, 4),
+                "calibration_factor": round(factor, 3),
+            }
+        if bucket_map:
+            by_bet_type_bucket[bt] = bucket_map
+    result["by_bet_type_bucket"] = by_bet_type_bucket
+
     return result
 
 
@@ -512,21 +548,25 @@ def calibration_status(db: Session = Depends(get_db)):
         }
 
     by_bt = None
+    by_bt_bucket = None
     factor_overall = None
     bucket_only = buckets
     if isinstance(buckets, dict):
         factor_overall = buckets.get("overall")
         by_bt = buckets.get("by_bet_type")
-        bucket_only = {k: v for k, v in buckets.items() if k not in ("by_bet_type", "overall")}
+        by_bt_bucket = buckets.get("by_bet_type_bucket")
+        bucket_only = {k: v for k, v in buckets.items() if k not in ("by_bet_type", "by_bet_type_bucket", "overall")}
     # overall: 画面用の簡易集計と、実際に確率へ掛ける係数の両方を返す
     return {
         "overall": overall,
         "factor_overall": factor_overall,
         "buckets": bucket_only,
         "by_bet_type": by_bt,
+        "by_bet_type_bucket": by_bt_bucket,
         "message": (
-            "新しい予想・投票プランでは factor_overall / 勝率帯の calibration_factor を"
-            "確率に掛けて想定を実績に寄せます(足切りではありません)。"
+            "新しい予想・投票プランでは、券種×勝率帯の交差係数(サンプル30件以上の場合)→"
+            "勝率帯の係数→全体係数(factor_overall)の優先順で確率に掛けて想定を実績に寄せます"
+            "(足切りではありません)。"
         ),
     }
 
@@ -691,9 +731,13 @@ def calibration_compare(db: Session = Depends(get_db)):
         name, _ = calc.get_prob_bucket(prob)
         return name
 
+    def bet_type_x_prob_bucket(r):
+        return f"{bet_type_bucket(r)} × {prob_bucket_cal(r)}"
+
     axes = {
         "券種別": bet_type_bucket,
         "勝率帯別": prob_bucket_cal,
+        "券種×勝率帯(新設した交差補正)": bet_type_x_prob_bucket,
         "バンク別": bank_bucket,
         "ライン絡み別": line_bucket,
         "並び有無": lines_presence,
