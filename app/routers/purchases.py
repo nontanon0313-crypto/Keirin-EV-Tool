@@ -1699,17 +1699,59 @@ def purchase_stats(db: Session = Depends(get_db)):
     )
     expected_profit_total = round(expected_profit_sum, 0) if ev_purchases else None
     overall_win_count = sum(1 for p in purchases if p.result == "win")
-    overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1)
+    overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1) if purchases else 0.0
 
-    # 資金管理シミュレーション用: 投資額加重平均オッズ(実際に賭けてきたオッズの実態)。
-    # 単純平均だと少額の買い目と高額の買い目が同じ重みになってしまうため、
-    # 実績収支率と同じ考え方で投資額加重にする(のんの要望により追加)。
-    odds_purchases = [p for p in purchases if p.odds_at_purchase is not None]
-    avg_odds_weighted = (
-        round(sum(p.stake_amount * p.odds_at_purchase for p in odds_purchases)
-              / sum(p.stake_amount for p in odds_purchases), 2)
-        if odds_purchases else None
-    )
+    # 資金管理シミュレーション用の勝率・オッズ。
+    # 【バグ修正】以前は「全買い目の投資額加重平均オッズ」(外れ含む)をモンテカルロに
+    # 渡していた。モデルは「的中率pでオッズO倍」なので、全件平均オッズ×的中率だと
+    # 期待値が大きくマイナスになり、実績ROIと矛盾して長期でほぼ全破産になる。
+    # 正しい組: O = (総払戻/総投資) / (的中数/総件数)  →  p×O = 実績の回収倍率。
+    def _sim_params_for(subset):
+        if not subset:
+            return None
+        n = len(subset)
+        wins = [p for p in subset if p.result == "win"]
+        n_win = len(wins)
+        hit_pct = round(n_win / n * 100, 2)
+        stake_sum = sum(p.stake_amount for p in subset)
+        payout_sum = sum(p.payout_amount or 0 for p in subset)
+        roi_mult = (payout_sum / stake_sum) if stake_sum > 0 else 0.0
+        p = n_win / n
+        odds_ev = round(roi_mult / p, 2) if p > 0 else None
+        odds_on_wins = None
+        wins_with_odds = [p for p in wins if p.odds_at_purchase is not None]
+        w_stake = sum(p.stake_amount for p in wins_with_odds)
+        if w_stake > 0:
+            odds_on_wins = round(
+                sum(p.stake_amount * p.odds_at_purchase for p in wins_with_odds) / w_stake, 2
+            )
+        all_with_odds = [p for p in subset if p.odds_at_purchase is not None]
+        odds_all_bets = None
+        if all_with_odds:
+            a_stake = sum(p.stake_amount for p in all_with_odds)
+            if a_stake > 0:
+                odds_all_bets = round(
+                    sum(p.stake_amount * p.odds_at_purchase for p in all_with_odds) / a_stake, 2
+                )
+        return {
+            "win_rate_pct": hit_pct,
+            "odds_for_sim": odds_ev,
+            "odds_on_wins_weighted": odds_on_wins,
+            "avg_odds_all_bets_weighted": odds_all_bets,
+            "roi_pct": round(roi_mult * 100, 2),
+            "n": n,
+            "wins": n_win,
+        }
+
+    sim_overall = _sim_params_for(purchases)
+    sim_by_bet_type = {}
+    for bt in sorted({p.bet_type for p in purchases if p.bet_type}):
+        params = _sim_params_for([p for p in purchases if p.bet_type == bt])
+        if params:
+            sim_by_bet_type[bt] = params
+
+    # 後方互換: 自動入力の avg_odds_weighted は実績ROI整合の的中時倍率
+    avg_odds_weighted = sim_overall["odds_for_sim"] if sim_overall else None
 
     # 「予想と実績のズレは、単なる偶然のブレか、それとも本当に予想が偏っているのか」を
     # 統計的に判定する(のんの指摘により追加)。二項検定: 予想確率が正しいとしたら、
@@ -1770,6 +1812,8 @@ def purchase_stats(db: Session = Depends(get_db)):
         "overall_win_rate_pct": overall_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
         "avg_odds_weighted": avg_odds_weighted,
+        "sim_overall": sim_overall,
+        "sim_by_bet_type": sim_by_bet_type,
         "calibration_significance": calibration_significance,
         "total_bets": len(purchases),
         "best_conditions_ranking": ranking[:10],

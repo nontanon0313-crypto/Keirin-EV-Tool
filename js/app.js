@@ -925,24 +925,64 @@ for (const id of SIM_INPUT_IDS) {
 }
 const simRestored = restoreSimInputs();
 
-// 検証タブを開いた時、実績の的中率・投資額加重平均オッズを自動入力する
-// (架空の数字ではなく、のん自身の実際の投票実績を土台にシミュレートするため)
-let simDefaultsFilled = simRestored; // 前回値を復元できた場合は、初回の自動上書きをしない
+// 検証タブ: 実績の的中率・シミュレーション用オッズを自動入力する。
+// オッズは「全件の平均オッズ」ではなく、実績ROIと整合する的中時倍率
+// (回収倍率 / 的中率) を使う。旧定義だと長期シミュレーションがほぼ全破産になる。
+let simDefaultsFilled = simRestored;
+let _lastSimStats = null;
+
+function _applySimParams(params, label) {
+  if (!params) return false;
+  if (params.win_rate_pct !== undefined && params.win_rate_pct !== null) {
+    document.getElementById("simWinProb").value = params.win_rate_pct;
+  }
+  if (params.odds_for_sim !== null && params.odds_for_sim !== undefined) {
+    document.getElementById("simOdds").value = params.odds_for_sim;
+  }
+  const note = document.getElementById("simDefaultsNote");
+  if (note) {
+    const oldOdds = params.avg_odds_all_bets_weighted;
+    note.textContent =
+      `実績値を自動入力しました[${label}](的中率${params.win_rate_pct}%・シミュレーション用オッズ${params.odds_for_sim}倍、` +
+      `実績収支率${params.roi_pct}%、${params.wins}/${params.n}件)。` +
+      (oldOdds != null ? ` 旧・全件平均オッズ${oldOdds}倍は使いません(期待値が実績と食い違うため)。` : "") +
+      " データが増えたら再読み込みしてください。";
+  }
+  return true;
+}
+
+function applySimScopeFromStats(data) {
+  if (!data) return;
+  const scopeEl = document.getElementById("simScope");
+  const scope = scopeEl ? scopeEl.value : "overall";
+  if (scope === "overall") {
+    _applySimParams(data.sim_overall || {
+      win_rate_pct: data.overall_win_rate_pct,
+      odds_for_sim: data.avg_odds_weighted,
+      roi_pct: data.overall_roi_pct,
+      n: data.total_bets,
+      wins: null,
+      avg_odds_all_bets_weighted: null,
+    }, "全体");
+  } else {
+    const byBt = data.sim_by_bet_type || {};
+    const params = byBt[scope];
+    if (!_applySimParams(params, scope + "のみ")) {
+      const note = document.getElementById("simDefaultsNote");
+      if (note) note.textContent = scope + "の実績がまだありません。全体を選ぶか、データ収集後に再読み込みしてください。";
+    }
+  }
+}
+
 async function fillSimDefaultsFromActuals() {
-  if (simDefaultsFilled) return; // 一度埋めたら、以降はユーザーの手入力を尊重して上書きしない
+  if (simDefaultsFilled) return;
   try {
     const res = await fetch(apiUrl("/purchases/stats"));
     const data = await res.json();
-    if (data.message) return; // 実績データがまだ無い
-    if (data.overall_win_rate_pct !== undefined && data.overall_win_rate_pct !== null) {
-      document.getElementById("simWinProb").value = data.overall_win_rate_pct;
-    }
-    if (data.avg_odds_weighted !== null && data.avg_odds_weighted !== undefined) {
-      document.getElementById("simOdds").value = data.avg_odds_weighted;
-    }
+    if (data.message) return;
+    _lastSimStats = data;
+    applySimScopeFromStats(data);
     simDefaultsFilled = true;
-    const note = document.getElementById("simDefaultsNote");
-    if (note) note.textContent = `実績値を自動入力しました(的中率${data.overall_win_rate_pct}%・投資額加重平均オッズ${data.avg_odds_weighted}倍、総ベット数${data.total_bets}件)。データが増えたら再読み込みしてください。`;
   } catch (e) {
     console.error(e);
   }
@@ -952,6 +992,19 @@ document.getElementById("reloadSimDefaultsBtn").addEventListener("click", () => 
   simDefaultsFilled = false;
   fillSimDefaultsFromActuals();
 });
+const simScopeEl = document.getElementById("simScope");
+if (simScopeEl) {
+  simScopeEl.addEventListener("change", async () => {
+    if (_lastSimStats) {
+      applySimScopeFromStats(_lastSimStats);
+      saveSimInputs();
+      return;
+    }
+    simDefaultsFilled = false;
+    await fillSimDefaultsFromActuals();
+    saveSimInputs();
+  });
+}
 
 document.getElementById("runSimBtn").addEventListener("click", async () => {
   saveSimInputs();
@@ -1175,13 +1228,9 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     resultBox.innerHTML = html;
 
     // 集計結果をもとに、シミュレーションの勝率・オッズを最新値に更新し、
-    // 1レースあたりの投資上限も自動計算しておく(のんの要望により追加)。
-    if (data.overall_win_rate_pct !== undefined && data.overall_win_rate_pct !== null) {
-      document.getElementById("simWinProb").value = data.overall_win_rate_pct;
-    }
-    if (data.avg_odds_weighted !== null && data.avg_odds_weighted !== undefined) {
-      document.getElementById("simOdds").value = data.avg_odds_weighted;
-    }
+    // 1レースあたりの投資上限も自動計算しておく。オッズは実績ROI整合値を使用。
+    _lastSimStats = data;
+    applySimScopeFromStats(data);
     saveSimInputs();
     runRecommendRacePct(true);
   } catch (e) {

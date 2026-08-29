@@ -147,6 +147,11 @@
     <p class="note">証拠金タブの現在残高を初期資金として、同じ勝率・オッズ・投資ペースで賭け続けた場合の資金推移を5000パターン試算し、初期資金の半分以下まで減った割合(破産確率)を計算します。勝率・オッズは実績値を自動入力しますが、手入力で上書きもできます。</p>
     <p id="simDefaultsNote" class="note" style="color:#22c55e;"></p>
     <button id="reloadSimDefaultsBtn" style="background:#475569;width:auto;padding:6px 12px;font-size:13px;">🔄実績値を再読み込み</button>
+    <label>シミュレーション対象</label>
+    <select id="simScope">
+      <option value="overall">全体</option>
+      <option value="3連単">3連単のみ</option>
+    </select>
     <label>勝率(%、1点あたりの想定的中率)</label>
     <input type="number" id="simWinProb" value="30">
     <label>オッズ(的中時の倍率)</label>
