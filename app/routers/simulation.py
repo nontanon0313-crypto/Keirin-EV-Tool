@@ -38,7 +38,9 @@ def recommend_race_pct(req: schemas.RecommendRacePctRequest):
 
     lo, hi = 0.0, 100.0
     best = None  # (1レース上限%, そのときのシミュレーション結果)
-    for _ in range(18):  # 100 / 2^18 ≈ 0.0004pt まで絞り込める
+    # 二分探索中は試行を薄く、最後に本計算(レース数が多いと18×5000がタイムアウトするため)
+    search_trials = min(800, max(300, req.num_trials // 3))
+    for _ in range(12):  # 0.02pt 程度まで十分
         mid = (lo + hi) / 2
         stake_fraction = (mid / 100) / req.bets_per_race
         sim = calc.monte_carlo_bankruptcy(
@@ -47,7 +49,7 @@ def recommend_race_pct(req: schemas.RecommendRacePctRequest):
             odds_value=req.odds_value,
             stake_fraction=stake_fraction,
             num_bets_per_trial=req.bets_per_race * req.num_races,
-            num_trials=req.num_trials,
+            num_trials=search_trials,
             ruin_threshold_pct=req.ruin_threshold_pct,
         )
         if sim["ruin_probability_pct"] <= req.max_ruin_probability_pct:
@@ -66,12 +68,24 @@ def recommend_race_pct(req: schemas.RecommendRacePctRequest):
             ),
         }
 
-    pct, sim = best
+    pct, _ = best
+    # 採用候補で本計算(表示用に精度を上げる)
+    final_sim = calc.monte_carlo_bankruptcy(
+        initial_bankroll=req.initial_bankroll,
+        win_prob=req.win_prob,
+        odds_value=req.odds_value,
+        stake_fraction=(pct / 100) / req.bets_per_race,
+        num_bets_per_trial=req.bets_per_race * req.num_races,
+        num_trials=req.num_trials,
+        ruin_threshold_pct=req.ruin_threshold_pct,
+    )
     return {
         "見つかった": True,
         "メッセージ": f"1レース上限{pct:.1f}%なら、破産確率を{req.max_ruin_probability_pct}%以下に抑えられます。",
         "推奨_1レース上限%": round(pct, 1),
-        "その上限での破産確率%": sim["ruin_probability_pct"],
-        "黒字化率%": sim["profit_probability_pct"],
-        "平均最終資金": sim["average_final_bankroll"],
+        "その上限での破産確率%": final_sim["ruin_probability_pct"],
+        "黒字化率%": final_sim["profit_probability_pct"],
+        "平均最終資金": final_sim["average_final_bankroll"],
+        "中央値最終資金": final_sim["median_final_bankroll"],
+        "試行回数": final_sim["num_trials"],
     }

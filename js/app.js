@@ -246,6 +246,7 @@ document.getElementById("loadFavoritesBtn").addEventListener("click", async () =
   const minProb = (parseFloat(document.getElementById("favoritesMinProb").value) || 25) / 100;
   try {
     const res = await fetch(apiUrl(`/races/favorites?min_win_prob=${minProb}`));
+    clearTimeout(timer);
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
     if (!data.length) {
@@ -1032,9 +1033,12 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
   const stakeFraction = racePct / betsPerRace;
   const numBets = betsPerRace * numRaces;
 
-  resultBox.textContent = "シミュレーション実行中...";
+  resultBox.textContent = "シミュレーション実行中...(レース数が多い場合は最大十数秒かかることがあります)";
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90000);
     const res = await fetch(apiUrl("/simulation/bankruptcy"), {
+      signal: controller.signal,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1051,7 +1055,9 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
       `<p><strong>破産確率</strong>（資金が${data.ruin_threshold_pct * 100}%以下になる確率）: <strong>${data.ruin_probability_pct}%</strong></p>` +
       `<p>黒字化率（初期資金より増えて終わった割合）: ${data.profit_probability_pct}%</p>` +
       `<p>平均最終資金: ${data.average_final_bankroll}円 / 中央値: ${data.median_final_bankroll}円</p>` +
-      `<p class="note">試行${data.num_trials}回 × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>` +
+      `<p class="note">試行${data.num_trials}回` +
+      (data.trials_capped ? `（計算量上限のため要求より削減。レース数が多いほど自動で間引きます）` : ``) +
+      ` × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>` +
       `<p class="note">この「1レース上限%」を投票プランの上限に使う場合は、下のボタンで詳細設定へ反映し、投票タブの「検証タブの投資上限を使う」をオンにしてください。</p>` +
       `<button type="button" id="applySimRacePctBtn" style="background:#16a34a;width:auto;padding:8px 14px;">この1レース上限${(racePct * 100).toFixed(0)}%を詳細設定に反映する</button>`;
     const applyBtn = document.getElementById("applySimRacePctBtn");

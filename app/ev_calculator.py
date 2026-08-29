@@ -451,34 +451,42 @@ def monte_carlo_bankruptcy(
     num_trials: int = 5000,
     ruin_threshold_pct: float = 0.5,
     seed: int = 42,
+    max_ops: int = 1_200_000,
 ) -> Dict[str, float]:
     """
     同一の勝率・オッズ・賭け比率で繰り返し賭け続けた場合の資金推移をシミュレーションし、
     「初期資金のruin_threshold_pct(例:50%)以下まで減る確率」を推定する。
 
-    単純化のため、1試行=同一の win_prob/odds/stake_fraction を num_bets_per_trial 回繰り返す
-    モデル(複数の異なる買い目を混在させる場合は呼び出し側で加重平均値を渡すか、
-    複数パターンをまとめてシミュレーションする拡張が必要)。
+    レース数×点数×試行回数が大きくなるとRender等でタイムアウトするため、
+    総演算量(max_ops)を超えないよう試行回数を自動で間引く。
     """
+    num_bets_per_trial = max(1, int(num_bets_per_trial))
+    requested_trials = max(1, int(num_trials))
+    # 総ベット評価回数を上限内に収める(50レース×7点×5000回などが重い問題への対策)
+    max_trials_by_ops = max(200, int(max_ops) // num_bets_per_trial)
+    effective_trials = min(requested_trials, max_trials_by_ops)
+
     rng = random.Random(seed)
     ruin_count = 0
     final_bankrolls = []
+    ruin_line = initial_bankroll * ruin_threshold_pct
+    win_gain = odds_value - 1.0  # 的中時の純増倍率
 
-    for _ in range(num_trials):
+    for _ in range(effective_trials):
         bankroll = initial_bankroll
         ruined = False
         for _ in range(num_bets_per_trial):
             if bankroll <= 0:
                 ruined = True
+                bankroll = 0.0
                 break
             stake = bankroll * stake_fraction
             if rng.random() < win_prob:
-                bankroll += stake * (odds_value - 1.0)
+                bankroll += stake * win_gain
             else:
                 bankroll -= stake
-            if bankroll <= initial_bankroll * ruin_threshold_pct:
+            if bankroll <= ruin_line:
                 ruined = True
-                # 破産扱いにするが、シミュレーションは最後まで続ける(以後もそのまま推移させる)
         if ruined:
             ruin_count += 1
         final_bankrolls.append(bankroll)
@@ -486,18 +494,17 @@ def monte_carlo_bankruptcy(
     avg_final = sum(final_bankrolls) / len(final_bankrolls)
     sorted_finals = sorted(final_bankrolls)
     median_final = sorted_finals[len(sorted_finals) // 2]
-    # 平均だけだと「一部の大勝ちが平均を押し上げているだけ」で見えなくなるため、
-    # 「初期資金を上回って終えた試行の割合」も別途出す(のんの要望により追加。
-    # 「安定してプラス収支になっているか」を確認する指標)。
     profit_count = sum(1 for b in final_bankrolls if b > initial_bankroll)
     return {
-        "ruin_probability_pct": round(ruin_count / num_trials * 100, 2),
+        "ruin_probability_pct": round(ruin_count / effective_trials * 100, 2),
         "average_final_bankroll": round(avg_final, 0),
         "median_final_bankroll": round(median_final, 0),
-        "profit_probability_pct": round(profit_count / num_trials * 100, 2),
-        "num_trials": num_trials,
+        "profit_probability_pct": round(profit_count / effective_trials * 100, 2),
+        "num_trials": effective_trials,
+        "num_trials_requested": requested_trials,
         "num_bets_per_trial": num_bets_per_trial,
         "ruin_threshold_pct": ruin_threshold_pct,
+        "trials_capped": effective_trials < requested_trials,
     }
 
 
