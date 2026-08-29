@@ -744,8 +744,13 @@ def calibration_compare(db: Session = Depends(get_db)):
             })
         result_axes[axis_name] = rows
 
-    overall_before = metrics([(r.prob_raw, r.won) for r in recs if r.prob_raw is not None])
-    overall_after = metrics([(r.prob_cal, r.won) for r in recs if r.prob_cal is not None])
+    # 総括(全条件合計)は、実際にお金を賭けた分だけで計算する(のんの指摘により修正。
+    # 以前は見送りも含めた全件で計算しており、大穴帯の見送り件数が圧倒的に多いため、
+    # 「自動補正の状態を確認」(実購入のみ・乖離-5.52pt)と、この総括(乖離-0.68pt)の
+    # 数字が大きく食い違って見えていた)。
+    purchased_recs = [r for r in recs if r.stake_amount > 0]
+    overall_before = metrics([(r.prob_raw, r.won) for r in purchased_recs if r.prob_raw is not None])
+    overall_after = metrics([(r.prob_cal, r.won) for r in purchased_recs if r.prob_cal is not None])
     overall_roi_pct, overall_n_purchased = actual_roi(recs)
 
     return {

@@ -1250,7 +1250,7 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
       const ob = data.overall.before || {};
       const oa = data.overall.after || {};
       html += `<div style="background:#1e3a5f;padding:10px;border-radius:8px;margin:8px 0;">
-        <strong>📈 総括(全条件合計)</strong><br>
+        <strong>📈 総括(実際に購入した分のみ)</strong><br>
         補正前の乖離: ${ob.deviation_pt ?? "-"}pt(予想精度${ob.accuracy_pct ?? "-"}%)<br>
         補正後の乖離: <strong>${oa.deviation_pt ?? "-"}pt</strong>(予想精度${oa.accuracy_pct ?? "-"}%)<br>
         実績収支率(実際に購入した分): ${data.overall.actual_roi_pct ?? "-"}${data.overall.actual_roi_pct != null ? "%" : ""}(${data.overall.n_purchased}件)

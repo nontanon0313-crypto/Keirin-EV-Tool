@@ -68,13 +68,62 @@ def get_soup(url, params=None, retries=4, timeout=(5, 20)):
         try:
             r = get_session().get(url, params=params, timeout=timeout)
             r.raise_for_status()
-            r.encoding = r.apparent_encoding or "utf-8"
+            # 以前はr.apparent_encoding(自動推測)を使っていたが、この推測が
+            # ときどき日本語のバイト列をキリル文字系のコード(cp1251等)と誤認識し、
+            # 脚質(逃/追/両)などの一部の文字だけが文字化けした状態で保存され
+            # 続けていた(のんの実機運用で判明・修正)。オッズパークは常にUTF-8で
+            # 配信されているため、推測せず固定する。
+            r.encoding = "utf-8"
             return BeautifulSoup(r.text, "html.parser")
         except Exception as e:
             last_err = e
             if i < retries - 1:
                 time.sleep(min(1.0 * (2 ** i) + random.uniform(0, 0.5), 8.0))
     raise last_err
+
+_grade_cache = {}  # (jo_code, kaisai_bi) -> (grade, event_title)。同じ開催日の12レースで使い回す
+
+
+def fetch_grade_and_event_title(jo_code, kaisai_bi):
+    """
+    グレード(ＧⅠ/ＧⅡ/ＧⅢ/ＦⅠ/ＦⅡ等)と大会名を取得する。
+
+    以前は各レースの出走表ページ(RaceList.do)のテキストから探していたが、
+    実際にこの情報が載っているのは「その開催日の全レース出走表」ページ
+    (AllRaceList.do)の見出し部分(例:「岐阜競輪場 F2 Ｋドリームス杯」)のみで、
+    個別レースのRaceList.doには一切含まれていなかった。そのため常に取得0件
+    (「不明」)になっていた(のんの指摘により判明・修正)。
+    同じ開催日は12レース分どれも同じ値になるため、無駄な取得を避けて
+    プロセス内でキャッシュする。
+    """
+    cache_key = (jo_code, kaisai_bi)
+    if cache_key in _grade_cache:
+        return _grade_cache[cache_key]
+    try:
+        url = f"{BASE}/AllRaceList.do"
+        params = {"joCode": jo_code, "kaisaiBi": kaisai_bi}
+        soup = get_soup(url, params, retries=2)
+        page_text = soup.get_text(" ", strip=True)
+        # 「◯◯競輪場 F2 Kドリームス杯」のように、venue名の直後に半角/全角の
+        # グレード表記(GP/G1〜G3/F1〜F2)が続く形式(全角数字にも対応)。
+        m = re.search(
+            r"競輪場\s*([GgＧｇ](?:[Pp]|[1-3１２３])|[FfＦｆ][12１２])\s*([^\s　]{2,20})?",
+            page_text,
+        )
+        if not m:
+            result = (None, None)
+        else:
+            raw_grade = m.group(1)
+            grade = (
+                raw_grade.replace("Ｇ", "G").replace("Ｆ", "F")
+                .translate(str.maketrans("１２３", "123"))
+            )
+            result = (grade, m.group(2))
+    except Exception:
+        result = (None, None)
+    _grade_cache[cache_key] = result
+    return result
+
 
 def parse_entry(jo_code, kaisai_bi, race_no):
     url = f"{BASE}/RaceList.do"
@@ -86,21 +135,7 @@ def parse_entry(jo_code, kaisai_bi, race_no):
     if m:
         race_name = m.group(1).strip()
 
-    # グレード(ＧⅠ/ＧⅡ/ＧⅢ/ＦⅠ/ＦⅡ等)と大会名を、ページ全体のテキストから探す。
-    # 例:「大垣競輪場 ＦⅠ デイリースポーツ杯」のような見出し行から抽出する
-    # (のんの指摘=バンク・グレード等の未設定を受けて追加)。
-    grade = None
-    event_title = None
-    page_text = soup.get_text(" ", strip=True)
-    grade_m = re.search(r"([ＧGgｇ][ⅠⅡⅢ123]|[ＦFｆ][ⅠⅡ12])(?:[\s　]*)([^\s　]{2,20}杯|[^\s　]{2,20}記念|[^\s　]{2,20}選抜)?", page_text)
-    if grade_m:
-        raw_grade = grade_m.group(1)
-        grade = (
-            raw_grade.replace("Ｇ", "G").replace("Ｆ", "F")
-            .replace("Ⅰ", "1").replace("Ⅱ", "2").replace("Ⅲ", "3")
-        )
-        if grade_m.group(2):
-            event_title = grade_m.group(2)
+    grade, event_title = fetch_grade_and_event_title(jo_code, kaisai_bi)
 
     riders = []
     for table in soup.find_all("table"):
@@ -163,7 +198,8 @@ def _sp_get_soup(jo_code, kaisai_bi, race_no):
         try:
             r = sess.get(url, params=params, headers=headers, timeout=(5, 20))
             r.raise_for_status()
-            r.encoding = r.apparent_encoding or "utf-8"
+            # get_soupと同じ理由(自動推測がキリル文字系コードに誤爆する)で固定する。
+            r.encoding = "utf-8"
             return BeautifulSoup(r.text, "html.parser"), (
                 f"{url}?kaisaiBi={kaisai_bi}&joCode={jo_code}&joCd={jo_code}&raceNo={race_no}"
             )
