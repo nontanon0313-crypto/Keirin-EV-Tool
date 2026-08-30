@@ -1330,17 +1330,31 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
     if (data.by_bet_type_bucket && Object.keys(data.by_bet_type_bucket).length) {
       html += `<p style="margin-top:12px;"><strong>券種×勝率帯の交差係数</strong></p>`;
       html += `<table><tr><th>券種</th><th>勝率帯</th><th>試行数</th><th>必要数</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
-      for (const [key, info] of Object.entries(data.by_bet_type_bucket)) {
-        const parts = key.split("|");
-        const bt = parts[0] || key;
-        const band = parts[1] || "";
-        const sign = (info.deviation_pct != null && info.deviation_pct > 0) ? "+" : "";
-        html += `<tr><td>${bt}</td><td>${band}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td>`;
-        html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
-        html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
-        html += `<td>${info.deviation_pct != null ? sign + info.deviation_pct + "pt" : "-"}</td>`;
-        html += `<td>${info.significance_p_value_pct != null ? info.significance_p_value_pct + "%" : "-"}</td>`;
-        html += `<td>${info.calibration_factor}倍</td></tr>`;
+      for (const [bt, bands] of Object.entries(data.by_bet_type_bucket)) {
+        // APIは { "3連単": { "0-5%(大穴)": {sample_count...} } } の入れ子
+        if (!bands || typeof bands !== "object" || bands.sample_count != null) {
+          // 旧形式(フラット)のフォールバック
+          const info = bands;
+          if (!info || info.sample_count == null) continue;
+          html += `<tr><td>${bt}</td><td></td><td>${info.sample_count}</td><td>${info.required_sample_count}</td>`;
+          html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
+          html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
+          const sign = (info.deviation_pct != null && info.deviation_pct > 0) ? "+" : "";
+          html += `<td>${info.deviation_pct != null ? sign + info.deviation_pct + "pt" : "-"}</td>`;
+          html += `<td>${info.significance_p_value_pct != null ? info.significance_p_value_pct + "%" : "-"}</td>`;
+          html += `<td>${info.calibration_factor}倍</td></tr>`;
+          continue;
+        }
+        for (const [band, info] of Object.entries(bands)) {
+          if (!info || info.sample_count == null) continue;
+          const sign = (info.deviation_pct != null && info.deviation_pct > 0) ? "+" : "";
+          html += `<tr><td>${bt}</td><td>${band}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td>`;
+          html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
+          html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
+          html += `<td>${info.deviation_pct != null ? sign + info.deviation_pct + "pt" : "-"}</td>`;
+          html += `<td>${info.significance_p_value_pct != null ? info.significance_p_value_pct + "%" : "-"}</td>`;
+          html += `<td>${info.calibration_factor}倍</td></tr>`;
+        }
       }
       html += "</table>";
     }

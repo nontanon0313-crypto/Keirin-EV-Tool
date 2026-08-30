@@ -623,24 +623,37 @@ def calibration_status(db: Session = Depends(get_db)):
             ),
         }
 
-    # 2) 直近ウィンドウ: 購入時点の勝率 vs 実績(本当に「最近の運用」の精度)
+    # 2) 直近ウィンドウ: 購入時点の勝率 vs 実績
+    # 日付が無いレコードを「今」扱いすると全件が直近に入るバグがあったため、
+    # purchased_at/created_at が無いものは直近集計から除外する。
     now = datetime.utcnow()
+    dated = []
+    no_date_count = 0
+    for p in purchases:
+        t = getattr(p, "purchased_at", None) or getattr(p, "created_at", None)
+        if t is None:
+            no_date_count += 1
+            continue
+        dated.append((p, t))
+
     recent = {}
     for days, key in ((3, "直近3日"), (7, "直近7日"), (14, "直近14日")):
         cutoff = now - timedelta(days=days)
-        subset = [
-            p for p in purchases
-            if (getattr(p, "purchased_at", None) or getattr(p, "created_at", None) or now) >= cutoff
-        ]
-        block = _purchase_gap_block(subset, lambda p: p.win_prob_at_purchase)
+        subset = [p for p, t in dated if t >= cutoff]
+        block = _purchase_gap_block(subset, lambda x: x.win_prob_at_purchase)
         if block:
             block["window_days"] = days
+            block["no_date_excluded"] = no_date_count
             recent[key] = block
         else:
+            msg = f"{key}に確定済み購入がありません"
+            if no_date_count:
+                msg += f"（日付なし{no_date_count}件は直近集計から除外）"
             recent[key] = {
                 "sample_count": 0,
                 "window_days": days,
-                "メッセージ": f"{key}に確定済み購入がありません",
+                "no_date_excluded": no_date_count,
+                "メッセージ": msg,
             }
 
     return {
