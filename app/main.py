@@ -37,4 +37,10 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy"}
+    from .database import get_active_db_info, ensure_active_connection
+    try:
+        ensure_active_connection()
+        info = get_active_db_info()
+        return {"status": "healthy", "database": info}
+    except Exception as e:
+        return {"status": "degraded", "error": str(e)}
