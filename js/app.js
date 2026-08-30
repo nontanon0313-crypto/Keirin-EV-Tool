@@ -1251,23 +1251,58 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
     const res = await fetch(apiUrl("/purchases/calibration"));
     const data = await res.json();
     let html = "";
+
+    if (data.effectiveness) {
+      const e = data.effectiveness;
+      const ok = e.improvement_pt > 0.5;
+      const color = ok ? "#16a34a" : (e.improvement_pt > -0.5 ? "#f59e0b" : "#ef4444");
+      const judge = e["判定"] || e.判定 || "";
+      const desc = e["説明"] || e.説明 || "";
+      html += `<div style="border:1px solid ${color};border-radius:8px;padding:12px;margin-bottom:12px;">`;
+      html += `<p style="margin:0 0 6px 0;"><strong>① 補正の効き（同じ購入への before/after）</strong></p>`;
+      html += `<p style="margin:0;">補正前の乖離: <strong>${e.before_deviation_pt}pt</strong> → 補正後: <strong>${e.after_deviation_pt}pt</strong></p>`;
+      html += `<p style="margin:6px 0;color:${color};font-size:1.1em;"><strong>縮んだ量: ${e.improvement_pt > 0 ? "+" : ""}${e.improvement_pt}pt</strong> ／ ${judge}</p>`;
+      html += `<p class="note" style="margin:0;">対象 ${e.n}件。${desc}</p>`;
+      html += `</div>`;
+    } else {
+      html += `<p class="note">① 補正の効き: raw確率がある購入がまだ無いため表示できません。</p>`;
+    }
+
+    html += `<div style="border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:12px;">`;
+    html += `<p style="margin:0 0 8px 0;"><strong>② 直近の購入精度（購入時点の勝率 vs 実績）</strong></p>`;
+    html += `<p class="note" style="margin:0 0 8px 0;">全期間平均ではなく、最近の運用が合っているかを見ます。</p>`;
+    html += `<table><tr><th>期間</th><th>件数</th><th>的中</th><th>実績的中率</th><th>予想平均</th><th>乖離</th></tr>`;
+    const recent = data.recent || {};
+    for (const key of ["直近3日", "直近7日", "直近14日"]) {
+      const r = recent[key];
+      if (!r || !r.sample_count) {
+        html += `<tr><td>${key}</td><td colspan="5">${(r && (r["メッセージ"] || r.メッセージ)) || "データなし"}</td></tr>`;
+        continue;
+      }
+      const sign = r.deviation_pct > 0 ? "+" : "";
+      const cls = Math.abs(r.deviation_pct) >= 5 ? ' style="color:#f59e0b;font-weight:bold;"' : "";
+      html += `<tr><td>${key}</td><td>${r.sample_count}</td><td>${r.wins ?? "-"}</td>`;
+      html += `<td>${r.actual_win_rate_pct}%</td><td>${r.predicted_avg_prob_pct}%</td>`;
+      html += `<td${cls}>${sign}${r.deviation_pct}pt</td></tr>`;
+    }
+    html += `</table></div>`;
+
+    if (data.factor_overall) {
+      const f = data.factor_overall;
+      html += `<p><strong>全体補正係数: ${f.calibration_factor}倍</strong>`;
+      html += `(学習用: 実績${f.actual_win_rate_pct}% / 想定${f.predicted_avg_prob_pct}%、${f.sample_count}件)</p>`;
+    }
+    if (data.message) html += `<p class="note">${data.message}</p>`;
+
     if (data.overall) {
       const o = data.overall;
       const sign = o.deviation_pct > 0 ? "+" : "";
-      html += `<p><strong>全体のズレ: ${sign}${o.deviation_pct}pt</strong>(実績的中率${o.actual_win_rate_pct}% - 予想平均${o.predicted_avg_prob_pct}%、${o.sample_count}件)<br>プラスなら予想が控えめ、マイナスなら予想が強気すぎです。</p>`;
-      const cls = o.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (o.significance_p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
-      html += `<p${cls}>📊 このズレが偶然起きる確率: ${o.significance_p_value_pct}%</p>`;
-    } else {
-      html += "<p>まだ確定した購入履歴がありません。</p>";
+      html += `<details style="margin-top:10px;"><summary class="note">参考: 全期間購入の乖離（数日ではほぼ動きません）</summary>`;
+      html += `<p>全期間: ${sign}${o.deviation_pct}pt（実績${o.actual_win_rate_pct}% − 予想${o.predicted_avg_prob_pct}%、${o.sample_count}件）</p>`;
+      html += `<p class="note">判断は①②を優先してください。</p></details>`;
     }
-    if (data.factor_overall) {
-      const f = data.factor_overall;
-      html += `<p><strong>実際に確率へ掛ける全体補正係数: ${f.calibration_factor}倍</strong>` +
-        `(実績${f.actual_win_rate_pct}% / 想定${f.predicted_avg_prob_pct}%、${f.sample_count}件)<br>` +
-        `<span class="note">新しい予想・プランでは、この係数で勝率を実績に寄せます。買い目を捨てる処理ではありません。</span></p>`;
-    }
-    if (data.message) html += `<p class="note">${data.message}</p>`;
-    html += "<p>以下は勝率帯ごとの内訳です。帯の係数が十分なとき、その帯では帯の係数を優先します。</p>";
+
+    html += "<p style=\"margin-top:12px;\">勝率帯ごとの係数内訳:</p>";
     html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
     for (const [bucket, info] of Object.entries(data.buckets || {})) {
       const status = info.is_reliable ? '<span class="ev-positive">適用中</span>' : "未達(補正なし)";
@@ -1279,27 +1314,35 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
       }
       let pText = "-";
       if (info.significance_p_value_pct !== null && info.significance_p_value_pct !== undefined) {
-        const cls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : "";
+        const cls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (info.significance_p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
         pText = `<span${cls}>${info.significance_p_value_pct}%</span>`;
       }
-      const sampleLabel = `${info.sample_count}<span class="note">(購入${info.purchase_count}+見送り${info.skipped_count})</span>`;
-      html += `<tr><td>${bucket}</td><td>${sampleLabel}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
+      const sc = info.sample_count != null
+        ? `${info.sample_count}(購入${info.purchase_count || 0}+見送り${info.skipped_count || 0})`
+        : "-";
+      html += `<tr><td>${bucket}</td><td>${sc}</td><td>${info.required_sample_count}</td><td>${status}</td>`;
+      html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
+      html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
+      html += `<td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
     }
     html += "</table>";
 
     if (data.by_bet_type_bucket && Object.keys(data.by_bet_type_bucket).length) {
-      html += `<p style="margin-top:14px;"><strong>券種×勝率帯の交差係数(新設)</strong></p>`;
-      html += `<p class="note">同じ勝率帯でも券種によってズレ方が違う場合、こちらの係数が優先して使われます(サンプル30件以上の場合)。</p>`;
+      html += `<p style="margin-top:12px;"><strong>券種×勝率帯の交差係数</strong></p>`;
       html += `<table><tr><th>券種</th><th>勝率帯</th><th>試行数</th><th>必要数</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
-      for (const [bt, bucketMap] of Object.entries(data.by_bet_type_bucket)) {
-        for (const [bucket, info] of Object.entries(bucketMap)) {
-          const sign2 = info.deviation_pct > 0 ? "+" : "";
-          const devCls = Math.abs(info.deviation_pct) >= 5 ? ' style="color:#f59e0b;font-weight:bold;"' : "";
-          const pCls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : "";
-          html += `<tr><td>${bt}</td><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${info.actual_win_rate_pct}%</td><td>${info.predicted_avg_prob_pct}%</td><td${devCls}>${sign2}${info.deviation_pct}pt</td><td${pCls}>${info.significance_p_value_pct}%</td><td>${info.calibration_factor}倍</td></tr>`;
-        }
+      for (const [key, info] of Object.entries(data.by_bet_type_bucket)) {
+        const parts = key.split("|");
+        const bt = parts[0] || key;
+        const band = parts[1] || "";
+        const sign = (info.deviation_pct != null && info.deviation_pct > 0) ? "+" : "";
+        html += `<tr><td>${bt}</td><td>${band}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td>`;
+        html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
+        html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
+        html += `<td>${info.deviation_pct != null ? sign + info.deviation_pct + "pt" : "-"}</td>`;
+        html += `<td>${info.significance_p_value_pct != null ? info.significance_p_value_pct + "%" : "-"}</td>`;
+        html += `<td>${info.calibration_factor}倍</td></tr>`;
       }
-      html += `</table>`;
+      html += "</table>";
     }
 
     resultBox.innerHTML = html;

@@ -523,9 +523,45 @@ def suggested_margin(db: Session = Depends(get_db)):
     }
 
 
+def _purchase_gap_block(purchases, prob_getter):
+    """購入リストから実績的中 vs 予想平均の乖離ブロックを作る。"""
+    rows = []
+    for p in purchases:
+        prob = prob_getter(p)
+        if prob is None:
+            continue
+        rows.append((float(prob), p.result == "win"))
+    if not rows:
+        return None
+    n = len(rows)
+    wins = sum(1 for _, w in rows if w)
+    actual = wins / n
+    predicted = sum(pr for pr, _ in rows) / n
+    p_value = calc.binomial_lower_tail_p(wins, n, predicted) if predicted > 0 else 1.0
+    return {
+        "sample_count": n,
+        "wins": wins,
+        "actual_win_rate_pct": round(actual * 100, 2),
+        "predicted_avg_prob_pct": round(predicted * 100, 2),
+        "deviation_pct": round((actual - predicted) * 100, 2),
+        "significance_p_value_pct": round(p_value * 100, 4),
+    }
+
+
 @router.get("/calibration")
 def calibration_status(db: Session = Depends(get_db)):
-    """勝率帯ごとの自動補正の状態(補正係数・信頼できるか・必要試行数)と、全体1本のズレも返す。"""
+    """
+    キャリブレーションの「効き」が分かる指標を返す。
+
+    以前は全期間購入の1本の乖離(例: -5.8pt)を先頭に出していたが、
+    母数が大きく数日ではほぼ動かないため「効いていない」ように見えていた。
+    主指標を次に切り替える:
+      1) 補正の効き(同じ購入に raw と 補正後を当てた before/after)
+      2) 直近3日・7日・14日の購入(購入時点の勝率 vs 実績)
+    全期間の乖離は参考値として残す。
+    """
+    from datetime import datetime, timedelta
+
     buckets = get_calibration_factors(db)
 
     purchases = (
@@ -533,40 +569,94 @@ def calibration_status(db: Session = Depends(get_db)):
         .filter(models.Purchase.result != "pending", models.Purchase.win_prob_at_purchase.isnot(None))
         .all()
     )
-    overall = None
-    if purchases:
-        wins = sum(1 for p in purchases if p.result == "win")
-        actual = wins / len(purchases)
-        predicted = sum(p.win_prob_at_purchase for p in purchases) / len(purchases)
-        p_value = calc.binomial_lower_tail_p(wins, len(purchases), predicted)
-        overall = {
-            "sample_count": len(purchases),
-            "actual_win_rate_pct": round(actual * 100, 2),
-            "predicted_avg_prob_pct": round(predicted * 100, 2),
-            "deviation_pct": round((actual - predicted) * 100, 2),
-            "significance_p_value_pct": round(p_value * 100, 4),
-        }
 
+    # 参考: 全期間(購入時点の勝率) — 主指標にはしない
+    overall = _purchase_gap_block(purchases, lambda p: p.win_prob_at_purchase)
+
+    # 1) 補正の効き: raw がある購入だけ before/after
+    with_raw = [p for p in purchases if getattr(p, "win_prob_raw", None) is not None]
+    before = _purchase_gap_block(with_raw, lambda p: p.win_prob_raw)
+    # 補正後は「今の係数を raw に掛けた値」ではなく、保存済み win_prob_at_purchase
+    # (購入時に補正が掛かっていればそれが入る)。比較用に raw×factor も計算する。
+    factor_overall = None
     by_bt = None
     by_bt_bucket = None
-    factor_overall = None
     bucket_only = buckets
     if isinstance(buckets, dict):
         factor_overall = buckets.get("overall")
         by_bt = buckets.get("by_bet_type")
         by_bt_bucket = buckets.get("by_bet_type_bucket")
-        bucket_only = {k: v for k, v in buckets.items() if k not in ("by_bet_type", "by_bet_type_bucket", "overall")}
-    # overall: 画面用の簡易集計と、実際に確率へ掛ける係数の両方を返す
+        bucket_only = {
+            k: v for k, v in buckets.items()
+            if k not in ("by_bet_type", "by_bet_type_bucket", "overall")
+        }
+
+    def _apply_factor_to_raw(p):
+        raw = p.win_prob_raw
+        if raw is None:
+            return None
+        # 簡易: 全体係数のみ(詳細な交差は compare API 側)。効きの方向を見る用途。
+        f = 1.0
+        if factor_overall and factor_overall.get("calibration_factor"):
+            f = float(factor_overall["calibration_factor"])
+        return max(1e-9, min(0.99, raw * f))
+
+    after_virtual = _purchase_gap_block(with_raw, _apply_factor_to_raw)
+    effectiveness = None
+    if before and after_virtual:
+        # 乖離の絶対値が縮んだ量(pt)。プラスなら補正が効いている。
+        improved = abs(before["deviation_pct"]) - abs(after_virtual["deviation_pct"])
+        effectiveness = {
+            "n": before["sample_count"],
+            "before_deviation_pt": before["deviation_pct"],
+            "after_deviation_pt": after_virtual["deviation_pct"],
+            "improvement_pt": round(improved, 2),
+            "before_accuracy_hint": before.get("predicted_avg_prob_pct"),
+            "after_accuracy_hint": after_virtual.get("predicted_avg_prob_pct"),
+            "判定": (
+                "効いている(乖離が縮んだ)" if improved > 0.5
+                else ("ほぼ横ばい" if improved > -0.5 else "効いていない(乖離が拡大)")
+            ),
+            "説明": (
+                "同じ購入データに対し、補正前(raw)と全体係数適用後の乖離を比較。"
+                "全期間の1本のズレが動かなくても、ここで縮んでいれば補正自体は機能している。"
+            ),
+        }
+
+    # 2) 直近ウィンドウ: 購入時点の勝率 vs 実績(本当に「最近の運用」の精度)
+    now = datetime.utcnow()
+    recent = {}
+    for days, key in ((3, "直近3日"), (7, "直近7日"), (14, "直近14日")):
+        cutoff = now - timedelta(days=days)
+        subset = [
+            p for p in purchases
+            if (getattr(p, "purchased_at", None) or getattr(p, "created_at", None) or now) >= cutoff
+        ]
+        block = _purchase_gap_block(subset, lambda p: p.win_prob_at_purchase)
+        if block:
+            block["window_days"] = days
+            recent[key] = block
+        else:
+            recent[key] = {
+                "sample_count": 0,
+                "window_days": days,
+                "メッセージ": f"{key}に確定済み購入がありません",
+            }
+
     return {
+        # 主指標
+        "effectiveness": effectiveness,
+        "recent": recent,
+        # 参考(主表示しない)
         "overall": overall,
         "factor_overall": factor_overall,
         "buckets": bucket_only,
         "by_bet_type": by_bt,
         "by_bet_type_bucket": by_bt_bucket,
         "message": (
-            "新しい予想・投票プランでは、券種×勝率帯の交差係数(サンプル30件以上の場合)→"
-            "勝率帯の係数→全体係数(factor_overall)の優先順で確率に掛けて想定を実績に寄せます"
-            "(足切りではありません)。"
+            "【見方】主に「補正の効き」と「直近3日/7日」を見てください。"
+            "全期間の1本の乖離は母数が大きく数日ではほぼ動きません(参考値)。"
+            "新しいプランでは交差係数→勝率帯→全体係数の順で確率に掛けます(足切りではありません)。"
         ),
     }
 
