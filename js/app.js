@@ -1270,7 +1270,7 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
 
     html += `<div style="border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:12px;">`;
     html += `<p style="margin:0 0 8px 0;"><strong>② 直近の購入精度（購入時点の勝率 vs 実績）</strong></p>`;
-    html += `<p class="note" style="margin:0 0 8px 0;">全期間平均ではなく、最近の運用が合っているかを見ます。</p>`;
+    html += `<p class="note" style="margin:0 0 8px 0;">レース開催日ベースです（取込日ではありません）。最近開催分の購入精度を見ます。</p>`;
     html += `<table><tr><th>期間</th><th>件数</th><th>的中</th><th>実績的中率</th><th>予想平均</th><th>乖離</th></tr>`;
     const recent = data.recent || {};
     for (const key of ["直近3日", "直近7日", "直近14日"]) {

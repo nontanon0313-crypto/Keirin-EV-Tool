@@ -623,35 +623,53 @@ def calibration_status(db: Session = Depends(get_db)):
             ),
         }
 
-    # 2) 直近ウィンドウ: 購入時点の勝率 vs 実績
-    # 日付が無いレコードを「今」扱いすると全件が直近に入るバグがあったため、
-    # purchased_at/created_at が無いものは直近集計から除外する。
-    now = datetime.utcnow()
+    # 2) 直近ウィンドウ: レース開催日(race_date)基準で切る。
+    # purchased_at は一括取込日になりやすく、全件が「直近3日」に入ってしまうため使わない。
+    from datetime import date as date_cls
+    today = datetime.utcnow().date()
+    race_rows = (
+        db.query(models.Purchase, models.Race.race_date)
+        .outerjoin(models.Race, models.Race.id == models.Purchase.race_id)
+        .filter(
+            models.Purchase.result != "pending",
+            models.Purchase.win_prob_at_purchase.isnot(None),
+        )
+        .all()
+    )
     dated = []
     no_date_count = 0
-    for p in purchases:
-        t = getattr(p, "purchased_at", None) or getattr(p, "created_at", None)
-        if t is None:
+    for p, rd in race_rows:
+        d = None
+        if rd is not None:
+            d = rd.date() if hasattr(rd, "date") and callable(rd.date) else rd
+            if not isinstance(d, date_cls):
+                try:
+                    d = datetime.fromisoformat(str(d)[:10]).date()
+                except Exception:
+                    d = None
+        if d is None:
             no_date_count += 1
             continue
-        dated.append((p, t))
+        dated.append((p, d))
 
     recent = {}
     for days, key in ((3, "直近3日"), (7, "直近7日"), (14, "直近14日")):
-        cutoff = now - timedelta(days=days)
-        subset = [p for p, t in dated if t >= cutoff]
+        cutoff = today - timedelta(days=days)
+        subset = [p for p, d in dated if d >= cutoff]
         block = _purchase_gap_block(subset, lambda x: x.win_prob_at_purchase)
         if block:
             block["window_days"] = days
+            block["basis"] = "race_date"
             block["no_date_excluded"] = no_date_count
             recent[key] = block
         else:
-            msg = f"{key}に確定済み購入がありません"
+            msg = f"{key}(開催日)に確定済み購入がありません"
             if no_date_count:
-                msg += f"（日付なし{no_date_count}件は直近集計から除外）"
+                msg += f"（開催日なし{no_date_count}件は除外）"
             recent[key] = {
                 "sample_count": 0,
                 "window_days": days,
+                "basis": "race_date",
                 "no_date_excluded": no_date_count,
                 "メッセージ": msg,
             }
