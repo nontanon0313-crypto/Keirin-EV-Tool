@@ -60,6 +60,16 @@ class RecommendRacePctRequest(BaseModel):
     max_ruin_probability_pct: float
     num_trials: int = 2000
     ruin_threshold_pct: float = 0.5
+    bet_type: Optional[str] = None  # 指定すると実績ブートストラップをその券種に限定する
+
+
+class BootstrapSimulationRequest(BaseModel):
+    initial_bankroll: float
+    stake_fraction: float
+    num_bets_per_trial: int = 100
+    num_trials: int = 5000
+    ruin_threshold_pct: float = 0.5
+    bet_type: Optional[str] = None  # 指定すると実績データをその券種に限定する
 
 
 class EvCalcRequest(BaseModel):
@@ -86,7 +96,6 @@ class RacePlanRequest(BaseModel):
     exclude_low_prob_warning: bool = True  # 大穴帯(0-5%・実績未検証)の買い目を自動プランから除外するか
     apply_calibration: bool = True  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
-    apply_performance_gates: bool = True  # 実績に基づく券種・ステージ・本命帯のゲート(検証集計ではOFF)
 
 
 class BankrollSet(BaseModel):

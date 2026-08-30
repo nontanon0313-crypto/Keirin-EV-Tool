@@ -351,13 +351,16 @@ def shrunk_calibration_factor(raw_factor: float, sample_count: int, required_sam
     weight = min(1.0, sample_count / required_sample_count)
 
     if p_value is not None and sample_count >= 50:
-        # p値が非常に小さいほど weight の下限を引き上げる(証拠が強いほど実績係数を早く効かせる)
+        # p値が非常に小さい(統計的に確からしい)ほど、weightの下限を引き上げる。
+        # p値0.1%未満なら最低70%、1%未満なら最低50%、5%未満なら最低30%は信頼する。
+        # (閾値・下限値は保守的に設定。過剰補正を避けるため、証拠が弱い場合は
+        # 通常のサンプル数ベースweightのみを使う)
         if p_value < 0.001:
-            weight = max(weight, 0.85)
+            weight = max(weight, 0.7)
         elif p_value < 0.01:
-            weight = max(weight, 0.65)
+            weight = max(weight, 0.5)
         elif p_value < 0.05:
-            weight = max(weight, 0.4)
+            weight = max(weight, 0.3)
 
     return 1.0 * (1 - weight) + raw_factor * weight
 
@@ -451,41 +454,97 @@ def monte_carlo_bankruptcy(
     num_trials: int = 5000,
     ruin_threshold_pct: float = 0.5,
     seed: int = 42,
-    max_ops: int = 1_200_000,
 ) -> Dict[str, float]:
     """
     同一の勝率・オッズ・賭け比率で繰り返し賭け続けた場合の資金推移をシミュレーションし、
     「初期資金のruin_threshold_pct(例:50%)以下まで減る確率」を推定する。
 
-    レース数×点数×試行回数が大きくなるとRender等でタイムアウトするため、
-    総演算量(max_ops)を超えないよう試行回数を自動で間引く。
-    """
-    num_bets_per_trial = max(1, int(num_bets_per_trial))
-    requested_trials = max(1, int(num_trials))
-    # 総ベット評価回数を上限内に収める(50レース×7点×5000回などが重い問題への対策)
-    max_trials_by_ops = max(200, int(max_ops) // num_bets_per_trial)
-    effective_trials = min(requested_trials, max_trials_by_ops)
+    単純化のため、1試行=同一の win_prob/odds/stake_fraction を num_bets_per_trial 回繰り返す
+    モデル(複数の異なる買い目を混在させる場合は呼び出し側で加重平均値を渡すか、
+    複数パターンをまとめてシミュレーションする拡張が必要)。
 
+    注意: 実際の券種構成は「大穴(低勝率・高オッズ)」と「本命(高勝率・低オッズ)」が
+    混ざっている。この関数に平均勝率と加重平均オッズを別々に渡すと、実在しない
+    「まあまあの確率で超高配当」という架空の買い目を再現してしまい、結果が
+    非現実的に膨らむことがある(のんの実機運用で発覚)。実績データがある場合は
+    monte_carlo_bankruptcy_bootstrap の方が現実に即した結果になる。
+    """
     rng = random.Random(seed)
     ruin_count = 0
     final_bankrolls = []
-    ruin_line = initial_bankroll * ruin_threshold_pct
-    win_gain = odds_value - 1.0  # 的中時の純増倍率
 
-    for _ in range(effective_trials):
+    for _ in range(num_trials):
         bankroll = initial_bankroll
         ruined = False
         for _ in range(num_bets_per_trial):
             if bankroll <= 0:
                 ruined = True
-                bankroll = 0.0
                 break
             stake = bankroll * stake_fraction
             if rng.random() < win_prob:
-                bankroll += stake * win_gain
+                bankroll += stake * (odds_value - 1.0)
             else:
                 bankroll -= stake
-            if bankroll <= ruin_line:
+            if bankroll <= initial_bankroll * ruin_threshold_pct:
+                ruined = True
+                # 破産扱いにするが、シミュレーションは最後まで続ける(以後もそのまま推移させる)
+        if ruined:
+            ruin_count += 1
+        final_bankrolls.append(bankroll)
+
+    avg_final = sum(final_bankrolls) / len(final_bankrolls)
+    sorted_finals = sorted(final_bankrolls)
+    median_final = sorted_finals[len(sorted_finals) // 2]
+    # 平均だけだと「一部の大勝ちが平均を押し上げているだけ」で見えなくなるため、
+    # 「初期資金を上回って終えた試行の割合」も別途出す(のんの要望により追加。
+    # 「安定してプラス収支になっているか」を確認する指標)。
+    profit_count = sum(1 for b in final_bankrolls if b > initial_bankroll)
+    return {
+        "ruin_probability_pct": round(ruin_count / num_trials * 100, 2),
+        "average_final_bankroll": round(avg_final, 0),
+        "median_final_bankroll": round(median_final, 0),
+        "profit_probability_pct": round(profit_count / num_trials * 100, 2),
+        "num_trials": num_trials,
+        "num_bets_per_trial": num_bets_per_trial,
+        "ruin_threshold_pct": ruin_threshold_pct,
+    }
+
+
+def monte_carlo_bankruptcy_bootstrap(
+    initial_bankroll: float,
+    outcome_multipliers: List[float],
+    stake_fraction: float,
+    num_bets_per_trial: int = 100,
+    num_trials: int = 5000,
+    ruin_threshold_pct: float = 0.5,
+    seed: int = 42,
+) -> Dict[str, float]:
+    """
+    「平均勝率」と「平均オッズ」を別々に組み合わせず、実際の購入履歴(1件ごとの
+    「当たったか・当たった時の倍率は何倍だったか」のペア)からランダムに1件ずつ
+    抽出して賭け続けるシミュレーション(のんの実機運用で発覚した問題を受けて追加)。
+
+    outcome_multipliers: 過去の購入1件ごとの payout/stake の実績値のリスト。
+    外れは0.0、当たりは実際の倍率(例:オッズ25倍で当たれば25.0)。
+    こうすることで「大穴は当たりにくい」という実際の相関関係を保ったまま
+    シミュレーションできる。
+    """
+    rng = random.Random(seed)
+    ruin_count = 0
+    final_bankrolls = []
+    n_outcomes = len(outcome_multipliers)
+
+    for _ in range(num_trials):
+        bankroll = initial_bankroll
+        ruined = False
+        for _ in range(num_bets_per_trial):
+            if bankroll <= 0:
+                ruined = True
+                break
+            stake = bankroll * stake_fraction
+            multiplier = outcome_multipliers[rng.randrange(n_outcomes)]
+            bankroll += stake * (multiplier - 1.0)
+            if bankroll <= initial_bankroll * ruin_threshold_pct:
                 ruined = True
         if ruined:
             ruin_count += 1
@@ -496,15 +555,14 @@ def monte_carlo_bankruptcy(
     median_final = sorted_finals[len(sorted_finals) // 2]
     profit_count = sum(1 for b in final_bankrolls if b > initial_bankroll)
     return {
-        "ruin_probability_pct": round(ruin_count / effective_trials * 100, 2),
+        "ruin_probability_pct": round(ruin_count / num_trials * 100, 2),
         "average_final_bankroll": round(avg_final, 0),
         "median_final_bankroll": round(median_final, 0),
-        "profit_probability_pct": round(profit_count / effective_trials * 100, 2),
-        "num_trials": effective_trials,
-        "num_trials_requested": requested_trials,
+        "profit_probability_pct": round(profit_count / num_trials * 100, 2),
+        "num_trials": num_trials,
         "num_bets_per_trial": num_bets_per_trial,
         "ruin_threshold_pct": ruin_threshold_pct,
-        "trials_capped": effective_trials < requested_trials,
+        "n_historical_outcomes": n_outcomes,
     }
 
 

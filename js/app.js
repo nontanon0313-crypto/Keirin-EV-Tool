@@ -246,7 +246,6 @@ document.getElementById("loadFavoritesBtn").addEventListener("click", async () =
   const minProb = (parseFloat(document.getElementById("favoritesMinProb").value) || 25) / 100;
   try {
     const res = await fetch(apiUrl(`/races/favorites?min_win_prob=${minProb}`));
-    clearTimeout(timer);
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
     if (!data.length) {
@@ -926,64 +925,24 @@ for (const id of SIM_INPUT_IDS) {
 }
 const simRestored = restoreSimInputs();
 
-// 検証タブ: 実績の的中率・シミュレーション用オッズを自動入力する。
-// オッズは「全件の平均オッズ」ではなく、実績ROIと整合する的中時倍率
-// (回収倍率 / 的中率) を使う。旧定義だと長期シミュレーションがほぼ全破産になる。
-let simDefaultsFilled = simRestored;
-let _lastSimStats = null;
-
-function _applySimParams(params, label) {
-  if (!params) return false;
-  if (params.win_rate_pct !== undefined && params.win_rate_pct !== null) {
-    document.getElementById("simWinProb").value = params.win_rate_pct;
-  }
-  if (params.odds_for_sim !== null && params.odds_for_sim !== undefined) {
-    document.getElementById("simOdds").value = params.odds_for_sim;
-  }
-  const note = document.getElementById("simDefaultsNote");
-  if (note) {
-    const oldOdds = params.avg_odds_all_bets_weighted;
-    note.textContent =
-      `実績値を自動入力しました[${label}](的中率${params.win_rate_pct}%・シミュレーション用オッズ${params.odds_for_sim}倍、` +
-      `実績収支率${params.roi_pct}%、${params.wins}/${params.n}件)。` +
-      (oldOdds != null ? ` 旧・全件平均オッズ${oldOdds}倍は使いません(期待値が実績と食い違うため)。` : "") +
-      " データが増えたら再読み込みしてください。";
-  }
-  return true;
-}
-
-function applySimScopeFromStats(data) {
-  if (!data) return;
-  const scopeEl = document.getElementById("simScope");
-  const scope = scopeEl ? scopeEl.value : "overall";
-  if (scope === "overall") {
-    _applySimParams(data.sim_overall || {
-      win_rate_pct: data.overall_win_rate_pct,
-      odds_for_sim: data.avg_odds_weighted,
-      roi_pct: data.overall_roi_pct,
-      n: data.total_bets,
-      wins: null,
-      avg_odds_all_bets_weighted: null,
-    }, "全体");
-  } else {
-    const byBt = data.sim_by_bet_type || {};
-    const params = byBt[scope];
-    if (!_applySimParams(params, scope + "のみ")) {
-      const note = document.getElementById("simDefaultsNote");
-      if (note) note.textContent = scope + "の実績がまだありません。全体を選ぶか、データ収集後に再読み込みしてください。";
-    }
-  }
-}
-
+// 検証タブを開いた時、実績の的中率・投資額加重平均オッズを自動入力する
+// (架空の数字ではなく、のん自身の実際の投票実績を土台にシミュレートするため)
+let simDefaultsFilled = simRestored; // 前回値を復元できた場合は、初回の自動上書きをしない
 async function fillSimDefaultsFromActuals() {
-  if (simDefaultsFilled) return;
+  if (simDefaultsFilled) return; // 一度埋めたら、以降はユーザーの手入力を尊重して上書きしない
   try {
     const res = await fetch(apiUrl("/purchases/stats"));
     const data = await res.json();
-    if (data.message) return;
-    _lastSimStats = data;
-    applySimScopeFromStats(data);
+    if (data.message) return; // 実績データがまだ無い
+    if (data.overall_win_rate_pct !== undefined && data.overall_win_rate_pct !== null) {
+      document.getElementById("simWinProb").value = data.overall_win_rate_pct;
+    }
+    if (data.avg_odds_weighted !== null && data.avg_odds_weighted !== undefined) {
+      document.getElementById("simOdds").value = data.avg_odds_weighted;
+    }
     simDefaultsFilled = true;
+    const note = document.getElementById("simDefaultsNote");
+    if (note) note.textContent = `実績値を自動入力しました(的中率${data.overall_win_rate_pct}%・投資額加重平均オッズ${data.avg_odds_weighted}倍、総ベット数${data.total_bets}件)。データが増えたら再読み込みしてください。`;
   } catch (e) {
     console.error(e);
   }
@@ -993,19 +952,6 @@ document.getElementById("reloadSimDefaultsBtn").addEventListener("click", () => 
   simDefaultsFilled = false;
   fillSimDefaultsFromActuals();
 });
-const simScopeEl = document.getElementById("simScope");
-if (simScopeEl) {
-  simScopeEl.addEventListener("change", async () => {
-    if (_lastSimStats) {
-      applySimScopeFromStats(_lastSimStats);
-      saveSimInputs();
-      return;
-    }
-    simDefaultsFilled = false;
-    await fillSimDefaultsFromActuals();
-    saveSimInputs();
-  });
-}
 
 document.getElementById("runSimBtn").addEventListener("click", async () => {
   saveSimInputs();
@@ -1033,12 +979,9 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
   const stakeFraction = racePct / betsPerRace;
   const numBets = betsPerRace * numRaces;
 
-  resultBox.textContent = "シミュレーション実行中...(レース数が多い場合は最大十数秒かかることがあります)";
+  resultBox.textContent = "シミュレーション実行中...";
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 90000);
     const res = await fetch(apiUrl("/simulation/bankruptcy"), {
-      signal: controller.signal,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1055,9 +998,7 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
       `<p><strong>破産確率</strong>（資金が${data.ruin_threshold_pct * 100}%以下になる確率）: <strong>${data.ruin_probability_pct}%</strong></p>` +
       `<p>黒字化率（初期資金より増えて終わった割合）: ${data.profit_probability_pct}%</p>` +
       `<p>平均最終資金: ${data.average_final_bankroll}円 / 中央値: ${data.median_final_bankroll}円</p>` +
-      `<p class="note">試行${data.num_trials}回` +
-      (data.trials_capped ? `（計算量上限のため要求より削減。レース数が多いほど自動で間引きます）` : ``) +
-      ` × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>` +
+      `<p class="note">試行${data.num_trials}回 × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>` +
       `<p class="note">この「1レース上限%」を投票プランの上限に使う場合は、下のボタンで詳細設定へ反映し、投票タブの「検証タブの投資上限を使う」をオンにしてください。</p>` +
       `<button type="button" id="applySimRacePctBtn" style="background:#16a34a;width:auto;padding:8px 14px;">この1レース上限${(racePct * 100).toFixed(0)}%を詳細設定に反映する</button>`;
     const applyBtn = document.getElementById("applySimRacePctBtn");
@@ -1153,6 +1094,52 @@ async function runRecommendRacePct(silent) {
   }
 }
 
+document.getElementById("runSimBootstrapBtn").addEventListener("click", async () => {
+  saveSimInputs();
+  const resultBox = document.getElementById("simResult");
+  let bankroll;
+  try {
+    const bankrollRes = await fetch(apiUrl("/bankroll/"));
+    const bankrollData = await bankrollRes.json();
+    bankroll = bankrollData.current_balance;
+  } catch (e) {
+    resultBox.textContent = "証拠金の取得に失敗しました。先に証拠金タブで設定してください。";
+    return;
+  }
+  if (!bankroll) {
+    resultBox.textContent = "証拠金が未設定です。証拠金タブで初期額を設定してください。";
+    return;
+  }
+  const racePct = parseFloat(document.getElementById("simRacePct").value) / 100;
+  const betsPerRace = parseInt(document.getElementById("simBetsPerRace").value);
+  const numRaces = parseInt(document.getElementById("simNumRaces").value);
+  const stakeFraction = racePct / betsPerRace;
+  const numBets = betsPerRace * numRaces;
+
+  resultBox.textContent = "実績データでシミュレーション実行中...";
+  try {
+    const res = await fetch(apiUrl("/simulation/bankruptcy-bootstrap"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initial_bankroll: bankroll,
+        stake_fraction: stakeFraction,
+        num_bets_per_trial: numBets,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    resultBox.innerHTML =
+      `<p class="note">📊 実績データ${data.n_historical_outcomes}件からのブートストラップ方式</p>` +
+      `<p><strong>破産確率</strong>（資金が${data.ruin_threshold_pct * 100}%以下になる確率）: <strong>${data.ruin_probability_pct}%</strong></p>` +
+      `<p>黒字化率（初期資金より増えて終わった割合）: ${data.profit_probability_pct}%</p>` +
+      `<p>平均最終資金: ${data.average_final_bankroll}円 / 中央値: ${data.median_final_bankroll}円</p>` +
+      `<p class="note">試行${data.num_trials}回 × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>`;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("recommendRacePctBtn").addEventListener("click", () => { saveSimInputs(); runRecommendRacePct(false); });
 
 
@@ -1234,9 +1221,13 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     resultBox.innerHTML = html;
 
     // 集計結果をもとに、シミュレーションの勝率・オッズを最新値に更新し、
-    // 1レースあたりの投資上限も自動計算しておく。オッズは実績ROI整合値を使用。
-    _lastSimStats = data;
-    applySimScopeFromStats(data);
+    // 1レースあたりの投資上限も自動計算しておく(のんの要望により追加)。
+    if (data.overall_win_rate_pct !== undefined && data.overall_win_rate_pct !== null) {
+      document.getElementById("simWinProb").value = data.overall_win_rate_pct;
+    }
+    if (data.avg_odds_weighted !== null && data.avg_odds_weighted !== undefined) {
+      document.getElementById("simOdds").value = data.avg_odds_weighted;
+    }
     saveSimInputs();
     runRecommendRacePct(true);
   } catch (e) {
@@ -1251,58 +1242,23 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
     const res = await fetch(apiUrl("/purchases/calibration"));
     const data = await res.json();
     let html = "";
-
-    if (data.effectiveness) {
-      const e = data.effectiveness;
-      const ok = e.improvement_pt > 0.5;
-      const color = ok ? "#16a34a" : (e.improvement_pt > -0.5 ? "#f59e0b" : "#ef4444");
-      const judge = e["判定"] || e.判定 || "";
-      const desc = e["説明"] || e.説明 || "";
-      html += `<div style="border:1px solid ${color};border-radius:8px;padding:12px;margin-bottom:12px;">`;
-      html += `<p style="margin:0 0 6px 0;"><strong>① 補正の効き（同じ購入への before/after）</strong></p>`;
-      html += `<p style="margin:0;">補正前の乖離: <strong>${e.before_deviation_pt}pt</strong> → 補正後: <strong>${e.after_deviation_pt}pt</strong></p>`;
-      html += `<p style="margin:6px 0;color:${color};font-size:1.1em;"><strong>縮んだ量: ${e.improvement_pt > 0 ? "+" : ""}${e.improvement_pt}pt</strong> ／ ${judge}</p>`;
-      html += `<p class="note" style="margin:0;">対象 ${e.n}件。${desc}</p>`;
-      html += `</div>`;
-    } else {
-      html += `<p class="note">① 補正の効き: raw確率がある購入がまだ無いため表示できません。</p>`;
-    }
-
-    html += `<div style="border:1px solid #334155;border-radius:8px;padding:12px;margin-bottom:12px;">`;
-    html += `<p style="margin:0 0 8px 0;"><strong>② 直近の購入精度（購入時点の勝率 vs 実績）</strong></p>`;
-    html += `<p class="note" style="margin:0 0 8px 0;">レース開催日ベースです（取込日ではありません）。最近開催分の購入精度を見ます。</p>`;
-    html += `<table><tr><th>期間</th><th>件数</th><th>的中</th><th>実績的中率</th><th>予想平均</th><th>乖離</th></tr>`;
-    const recent = data.recent || {};
-    for (const key of ["直近3日", "直近7日", "直近14日"]) {
-      const r = recent[key];
-      if (!r || !r.sample_count) {
-        html += `<tr><td>${key}</td><td colspan="5">${(r && (r["メッセージ"] || r.メッセージ)) || "データなし"}</td></tr>`;
-        continue;
-      }
-      const sign = r.deviation_pct > 0 ? "+" : "";
-      const cls = Math.abs(r.deviation_pct) >= 5 ? ' style="color:#f59e0b;font-weight:bold;"' : "";
-      html += `<tr><td>${key}</td><td>${r.sample_count}</td><td>${r.wins ?? "-"}</td>`;
-      html += `<td>${r.actual_win_rate_pct}%</td><td>${r.predicted_avg_prob_pct}%</td>`;
-      html += `<td${cls}>${sign}${r.deviation_pct}pt</td></tr>`;
-    }
-    html += `</table></div>`;
-
-    if (data.factor_overall) {
-      const f = data.factor_overall;
-      html += `<p><strong>全体補正係数: ${f.calibration_factor}倍</strong>`;
-      html += `(学習用: 実績${f.actual_win_rate_pct}% / 想定${f.predicted_avg_prob_pct}%、${f.sample_count}件)</p>`;
-    }
-    if (data.message) html += `<p class="note">${data.message}</p>`;
-
     if (data.overall) {
       const o = data.overall;
       const sign = o.deviation_pct > 0 ? "+" : "";
-      html += `<details style="margin-top:10px;"><summary class="note">参考: 全期間購入の乖離（数日ではほぼ動きません）</summary>`;
-      html += `<p>全期間: ${sign}${o.deviation_pct}pt（実績${o.actual_win_rate_pct}% − 予想${o.predicted_avg_prob_pct}%、${o.sample_count}件）</p>`;
-      html += `<p class="note">判断は①②を優先してください。</p></details>`;
+      html += `<p><strong>全体のズレ: ${sign}${o.deviation_pct}pt</strong>(実績的中率${o.actual_win_rate_pct}% - 予想平均${o.predicted_avg_prob_pct}%、${o.sample_count}件)<br>プラスなら予想が控えめ、マイナスなら予想が強気すぎです。</p>`;
+      const cls = o.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (o.significance_p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
+      html += `<p${cls}>📊 このズレが偶然起きる確率: ${o.significance_p_value_pct}%</p>`;
+    } else {
+      html += "<p>まだ確定した購入履歴がありません。</p>";
     }
-
-    html += "<p style=\"margin-top:12px;\">勝率帯ごとの係数内訳:</p>";
+    if (data.factor_overall) {
+      const f = data.factor_overall;
+      html += `<p><strong>実際に確率へ掛ける全体補正係数: ${f.calibration_factor}倍</strong>` +
+        `(実績${f.actual_win_rate_pct}% / 想定${f.predicted_avg_prob_pct}%、${f.sample_count}件)<br>` +
+        `<span class="note">新しい予想・プランでは、この係数で勝率を実績に寄せます。買い目を捨てる処理ではありません。</span></p>`;
+    }
+    if (data.message) html += `<p class="note">${data.message}</p>`;
+    html += "<p>以下は勝率帯ごとの内訳です。帯の係数が十分なとき、その帯では帯の係数を優先します。</p>";
     html += `<table><tr><th>勝率帯</th><th>試行数</th><th>必要数</th><th>状態</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
     for (const [bucket, info] of Object.entries(data.buckets || {})) {
       const status = info.is_reliable ? '<span class="ev-positive">適用中</span>' : "未達(補正なし)";
@@ -1314,49 +1270,27 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
       }
       let pText = "-";
       if (info.significance_p_value_pct !== null && info.significance_p_value_pct !== undefined) {
-        const cls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (info.significance_p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
+        const cls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : "";
         pText = `<span${cls}>${info.significance_p_value_pct}%</span>`;
       }
-      const sc = info.sample_count != null
-        ? `${info.sample_count}(購入${info.purchase_count || 0}+見送り${info.skipped_count || 0})`
-        : "-";
-      html += `<tr><td>${bucket}</td><td>${sc}</td><td>${info.required_sample_count}</td><td>${status}</td>`;
-      html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
-      html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
-      html += `<td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
+      const sampleLabel = `${info.sample_count}<span class="note">(購入${info.purchase_count}+見送り${info.skipped_count})</span>`;
+      html += `<tr><td>${bucket}</td><td>${sampleLabel}</td><td>${info.required_sample_count}</td><td>${status}</td><td>${info.actual_win_rate_pct ?? "-"}%</td><td>${info.predicted_avg_prob_pct ?? "-"}%</td><td>${devText}</td><td>${pText}</td><td>${info.calibration_factor}倍</td></tr>`;
     }
     html += "</table>";
 
     if (data.by_bet_type_bucket && Object.keys(data.by_bet_type_bucket).length) {
-      html += `<p style="margin-top:12px;"><strong>券種×勝率帯の交差係数</strong></p>`;
+      html += `<p style="margin-top:14px;"><strong>券種×勝率帯の交差係数(新設)</strong></p>`;
+      html += `<p class="note">同じ勝率帯でも券種によってズレ方が違う場合、こちらの係数が優先して使われます(サンプル30件以上の場合)。</p>`;
       html += `<table><tr><th>券種</th><th>勝率帯</th><th>試行数</th><th>必要数</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
-      for (const [bt, bands] of Object.entries(data.by_bet_type_bucket)) {
-        // APIは { "3連単": { "0-5%(大穴)": {sample_count...} } } の入れ子
-        if (!bands || typeof bands !== "object" || bands.sample_count != null) {
-          // 旧形式(フラット)のフォールバック
-          const info = bands;
-          if (!info || info.sample_count == null) continue;
-          html += `<tr><td>${bt}</td><td></td><td>${info.sample_count}</td><td>${info.required_sample_count}</td>`;
-          html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
-          html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
-          const sign = (info.deviation_pct != null && info.deviation_pct > 0) ? "+" : "";
-          html += `<td>${info.deviation_pct != null ? sign + info.deviation_pct + "pt" : "-"}</td>`;
-          html += `<td>${info.significance_p_value_pct != null ? info.significance_p_value_pct + "%" : "-"}</td>`;
-          html += `<td>${info.calibration_factor}倍</td></tr>`;
-          continue;
-        }
-        for (const [band, info] of Object.entries(bands)) {
-          if (!info || info.sample_count == null) continue;
-          const sign = (info.deviation_pct != null && info.deviation_pct > 0) ? "+" : "";
-          html += `<tr><td>${bt}</td><td>${band}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td>`;
-          html += `<td>${info.actual_win_rate_pct != null ? info.actual_win_rate_pct + "%" : "-"}</td>`;
-          html += `<td>${info.predicted_avg_prob_pct != null ? info.predicted_avg_prob_pct + "%" : "-"}</td>`;
-          html += `<td>${info.deviation_pct != null ? sign + info.deviation_pct + "pt" : "-"}</td>`;
-          html += `<td>${info.significance_p_value_pct != null ? info.significance_p_value_pct + "%" : "-"}</td>`;
-          html += `<td>${info.calibration_factor}倍</td></tr>`;
+      for (const [bt, bucketMap] of Object.entries(data.by_bet_type_bucket)) {
+        for (const [bucket, info] of Object.entries(bucketMap)) {
+          const sign2 = info.deviation_pct > 0 ? "+" : "";
+          const devCls = Math.abs(info.deviation_pct) >= 5 ? ' style="color:#f59e0b;font-weight:bold;"' : "";
+          const pCls = info.significance_p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : "";
+          html += `<tr><td>${bt}</td><td>${bucket}</td><td>${info.sample_count}</td><td>${info.required_sample_count}</td><td>${info.actual_win_rate_pct}%</td><td>${info.predicted_avg_prob_pct}%</td><td${devCls}>${sign2}${info.deviation_pct}pt</td><td${pCls}>${info.significance_p_value_pct}%</td><td>${info.calibration_factor}倍</td></tr>`;
         }
       }
-      html += "</table>";
+      html += `</table>`;
     }
 
     resultBox.innerHTML = html;

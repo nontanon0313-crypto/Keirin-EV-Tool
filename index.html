@@ -147,11 +147,6 @@
     <p class="note">証拠金タブの現在残高を初期資金として、同じ勝率・オッズ・投資ペースで賭け続けた場合の資金推移を5000パターン試算し、初期資金の半分以下まで減った割合(破産確率)を計算します。勝率・オッズは実績値を自動入力しますが、手入力で上書きもできます。</p>
     <p id="simDefaultsNote" class="note" style="color:#22c55e;"></p>
     <button id="reloadSimDefaultsBtn" style="background:#475569;width:auto;padding:6px 12px;font-size:13px;">🔄実績値を再読み込み</button>
-    <label>シミュレーション対象</label>
-    <select id="simScope">
-      <option value="overall">全体</option>
-      <option value="3連単">3連単のみ</option>
-    </select>
     <label>勝率(%、1点あたりの想定的中率)</label>
     <input type="number" id="simWinProb" value="30">
     <label>オッズ(的中時の倍率)</label>
@@ -164,9 +159,11 @@
     <input type="number" id="simNumRaces" value="20" step="1">
     <label>許容する破産確率(%)</label>
     <input type="number" id="simMaxRuinPct" value="5" step="0.5" min="0" max="100">
-    <button id="runSimBtn">指定した上限%でシミュレーション実行</button>
+    <button id="runSimBtn">指定した上限%でシミュレーション実行(手入力の勝率・オッズを使用)</button>
+    <button id="runSimBootstrapBtn" style="background:#0ea5e9;">指定した上限%でシミュレーション実行(実績データを使用・推奨)</button>
+    <p class="note">「実績データを使用」は、勝率・オッズを平均値として組み合わせず、実際の購入履歴(勝ち負けとその時の倍率のペア)をそのまま抽出してシミュレートするため、大穴と本命が混ざった実際の券種構成をより正確に反映します。20件以上の確定済み購入が必要です。</p>
     <button id="recommendRacePctBtn" style="background:#16a34a;">許容破産確率から1レース上限%を自動計算</button>
-    <p class="note">手で上限%を合わせる必要はありませ ん。「自動計算」を押すと、許容破産確率以下になる最大の1レース上限%を探します。結果を詳細設定へ反映してから<strong>実投票</strong>してください。検証集計には使いま せん。</p>
+    <p class="note">手で上限%を合わせる必要はありませ ん。「自動計算」を押すと、許容破産確率以下になる最大の1レース上限%を探します(実績データが20件以上あれば自動的に実績ベースの方式を使います)。結果を詳細設定へ反映してから<strong>実投票</strong>してください。検証集計には使いま せん。</p>
     <div style="display:flex;gap:6px;margin-top:8px;">
       <button type="button" id="copySimBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">📋 コピー</button>
       <button type="button" id="downloadSimBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">💾 テキスト保存</button>
