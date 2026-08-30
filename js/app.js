@@ -7,6 +7,26 @@ function apiUrl(path) {
   return API_BASE_URL + path;
 }
 
+// 会場名→地区番号(バックエンドの会場コード表app/keirin_data.pyのJO_CODE_TO_VENUEと同じ並び順)
+// 番号の小さい順に並べると「北日本→関東→南関東→中部→近畿→中国→四国→九州」の地区順になる
+const VENUE_SORT_ORDER = {
+  "函館": 11, "青森": 12, "いわき平": 13,
+  "弥彦": 21, "前橋": 22, "取手": 23, "宇都宮": 24,
+  "大宮": 25, "西武園": 26, "京王閣": 27, "立川": 28,
+  "松戸": 31, "千葉": 32, "川崎": 34, "平塚": 35,
+  "小田原": 36, "伊東温泉": 37, "静岡": 38,
+  "一宮(廃止)": 41, "名古屋": 42, "岐阜": 43, "大垣": 44, "豊橋": 45,
+  "富山": 46, "松阪": 47, "四日市": 48,
+  "福井": 51, "奈良": 53, "向日町": 54, "和歌山": 55, "岸和田": 56,
+  "玉野": 61, "広島": 62, "防府": 63,
+  "高松": 71, "小松島": 73, "高知": 74, "松山": 75,
+  "小倉": 81, "久留米": 83, "武雄": 84, "佐世保": 85, "別府": 86, "熊本": 87,
+};
+// 未知の会場名(表記ゆれ等)は末尾に回す
+function venueSortKey(venueName) {
+  return VENUE_SORT_ORDER[venueName] ?? 999;
+}
+
 document.getElementById("rebateCheckbox").addEventListener("change", (e) => {
   document.getElementById("rebatePctWrapper").style.display = e.target.checked ? "block" : "none";
 });
@@ -210,6 +230,7 @@ async function loadRaces(selectRaceId) {
       const data = await res.json();
       races = data.map(r => ({ ...r, label_extra: null }));
     }
+    races.sort((a, b) => venueSortKey(a.venue_name) - venueSortKey(b.venue_name) || a.race_number - b.race_number);
     select.innerHTML = races.map(r =>
       `<option value="${r.id}">${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R${r.label_extra ? " " + r.label_extra : ` (選手${r.entry_count}/オッズ${r.odds_count})`}</option>`
     ).join("");
@@ -246,7 +267,6 @@ document.getElementById("loadFavoritesBtn").addEventListener("click", async () =
   const minProb = (parseFloat(document.getElementById("favoritesMinProb").value) || 25) / 100;
   try {
     const res = await fetch(apiUrl(`/races/favorites?min_win_prob=${minProb}`));
-    clearTimeout(timer);
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
     if (!data.length) {
