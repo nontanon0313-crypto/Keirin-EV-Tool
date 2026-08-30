@@ -40,7 +40,6 @@ def health():
     from .database import get_active_db_info, ensure_active_connection
     try:
         ensure_active_connection()
-        info = get_active_db_info()
-        return {"status": "healthy", "database": info}
+        return {"status": "healthy", "database": get_active_db_info()}
     except Exception as e:
         return {"status": "degraded", "error": str(e)}

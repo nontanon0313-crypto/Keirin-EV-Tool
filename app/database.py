@@ -9,22 +9,16 @@ from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
 
 logger = logging.getLogger("keirin.database")
 
-# ---------------------------------------------------------------------------
-# 接続先
-#   DATABASE_URL          … 主系 (現状: Neon など)
-#   DATABASE_URL_FALLBACK … 副系 (推奨: Supabase の Postgres 接続文字列)
-#   DATABASE_PREFER       … "primary" | "fallback" 起動時の優先 (省略時 primary)
-#
-# Neon 無料枠の CU-hours 超過などで主系が落ちた場合、副系へ自動切替する。
-# 注意: 両DBに同じデータが入っている必要がある(初回は手動マイグレーション)。
-# ---------------------------------------------------------------------------
+# DATABASE_URL          = 主系 (Neon など)
+# DATABASE_URL_FALLBACK = 副系 (Supabase など)  ← Neon制限時に自動使用
+# DATABASE_PREFER       = primary | fallback
 
 Base = declarative_base()
 
 _lock = threading.RLock()
-_active_name = "primary"  # "primary" | "fallback"
-_engines = {}  # name -> engine
-_sessions = {}  # name -> sessionmaker
+_active_name = "primary"
+_engines = {}
+_sessions = {}
 
 
 def _normalize_url(url: str) -> str:
@@ -37,7 +31,6 @@ def _normalize_url(url: str) -> str:
 def _make_engine(url: str):
     if not url:
         return None
-    # pool_pre_ping: 死んだ接続を検出 / connect_timeout で長待ち防止
     return create_engine(
         url,
         pool_pre_ping=True,
@@ -66,7 +59,6 @@ if FALLBACK_URL:
         autocommit=False, autoflush=False, bind=_engines["fallback"]
     )
 
-# 起動時の優先先
 if PREFER == "fallback" and "fallback" in _engines:
     _active_name = "fallback"
 elif "primary" in _engines:
@@ -76,19 +68,16 @@ elif "fallback" in _engines:
 else:
     _active_name = "primary"
 
-# 後方互換: 他モジュールが engine / SessionLocal を参照する場合がある
 engine = _engines.get(_active_name)
 SessionLocal = _sessions.get(_active_name)
 
 
 def get_active_db_info() -> dict:
-    """どの接続を使っているか(ヘルスチェック用)。"""
     with _lock:
         url = PRIMARY_URL if _active_name == "primary" else FALLBACK_URL
         host = ""
         if url:
             try:
-                # postgresql://user:pass@host:port/db
                 host = url.split("@", 1)[1].split("/", 1)[0]
             except Exception:
                 host = "(unknown)"
@@ -102,13 +91,14 @@ def get_active_db_info() -> dict:
 
 
 def _is_failover_worthy(exc: BaseException) -> bool:
-    """Neon制限・接続不能など、副系へ切替えるべきエラーか。"""
     msg = str(exc).lower()
     keywords = (
+        "data transfer quota",
         "compute time quota",
         "compute quota",
         "quota exceeded",
         "exceeded the compute",
+        "exceeded the data transfer",
         "remaining compute",
         "free tier limit",
         "limit exceeded",
@@ -128,11 +118,11 @@ def _is_failover_worthy(exc: BaseException) -> bool:
         "name or service not known",
         "temporarily unavailable",
         "cannot acquire",
-        "neon",  # neon固有メッセージの兜底
+        "upgrade your plan",
+        "neon",
     )
     if any(k in msg for k in keywords):
         return True
-    # SQLAlchemy の接続系
     if isinstance(exc, (OperationalError, InterfaceError)):
         return True
     if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
@@ -141,7 +131,6 @@ def _is_failover_worthy(exc: BaseException) -> bool:
 
 
 def _switch_to(name: str) -> bool:
-    """アクティブ接続を name に切替。成功したら True。"""
     global engine, SessionLocal, _active_name
     with _lock:
         if name not in _engines or name not in _sessions:
@@ -173,9 +162,6 @@ def _ping(session_factory) -> None:
 
 
 def ensure_active_connection() -> None:
-    """
-    起動時・必要時に、優先先が生きているか確認し、ダメなら副系へ。
-    """
     global engine, SessionLocal, _active_name
     order = []
     if PREFER == "fallback":
@@ -197,17 +183,14 @@ def ensure_active_connection() -> None:
             logger.warning("database probe failed (%s): %s", name, e)
     if last_err:
         logger.error("all database endpoints failed; last error: %s", last_err)
+        raise last_err
 
 
 def get_db():
-    """
-    リクエストごとにセッションを返す。
-    接続エラーが「制限・不通」系なら副系へ切替えて1回だけリトライする。
-    """
     if not _sessions:
         raise RuntimeError(
-            "DATABASE_URL が未設定です。Render の環境変数に "
-            "DATABASE_URL (と必要なら DATABASE_URL_FALLBACK) を設定してください。"
+            "DATABASE_URL が未設定です。Render に DATABASE_URL "
+            "(と必要なら DATABASE_URL_FALLBACK) を設定してください。"
         )
 
     with _lock:
@@ -217,7 +200,6 @@ def get_db():
     db = None
     try:
         db = factory()
-        # 軽い生存確認(死んだコネクションを早めに検出)
         db.execute(text("SELECT 1"))
     except Exception as e:
         if db is not None:
@@ -228,9 +210,7 @@ def get_db():
             db = None
         other = _other_name(name)
         if other and _is_failover_worthy(e):
-            logger.warning(
-                "database error on %s (%s); trying %s", name, e, other
-            )
+            logger.warning("database error on %s (%s); trying %s", name, e, other)
             if _switch_to(other):
                 try:
                     db = _sessions[other]()
@@ -258,10 +238,16 @@ def get_db():
 
 
 def init_db():
-    """テーブル作成 + 簡易マイグレーション。アクティブな接続先に対して実行。"""
-    ensure_active_connection()
+    """起動時: 生きている方のDBでテーブル作成。主系が死んでいれば副系へ。"""
+    try:
+        ensure_active_connection()
+    except Exception as e:
+        logger.error("init_db: no usable database: %s", e)
+        raise
+
     if engine is None:
         return
+
     Base.metadata.create_all(bind=engine)
 
     migrations = [
@@ -294,7 +280,6 @@ def init_db():
 
     _seed_bank_master()
 
-    # 副系がある場合、スキーマだけ揃えておく(データ移行は手動)
     other = _other_name(_active_name)
     if other and other in _engines:
         try:
@@ -306,13 +291,12 @@ def init_db():
                         conn.commit()
                     except Exception:
                         conn.rollback()
-            logger.info("schema ensured on fallback database as well")
+            logger.info("schema ensured on secondary database as well")
         except Exception as e:
-            logger.warning("could not prepare fallback schema: %s", e)
+            logger.warning("could not prepare secondary schema: %s", e)
 
 
 def _seed_bank_master():
-    """bank_master が空のとき全国43場を投入。"""
     from . import models
     from .keirin_data import get_bank_seed_data
 
@@ -320,8 +304,7 @@ def _seed_bank_master():
         return
     db = SessionLocal()
     try:
-        existing_count = db.query(models.BankMaster).count()
-        if existing_count > 0:
+        if db.query(models.BankMaster).count() > 0:
             return
         for row in get_bank_seed_data():
             db.add(models.BankMaster(**row))
