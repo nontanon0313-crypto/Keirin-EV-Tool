@@ -586,62 +586,112 @@ def brier_score(records: list) -> float:
     return total / n
 
 
-def ranking_diagnostics(groups: dict) -> dict:
+def ranking_diagnostics(groups: dict, top_ns=(1, 3, 5, 10)) -> dict:
     """
-    「予想精度・識別能力(B)」を測るための指標。
-    キャリブレーションが完璧でも、外れる買い目より当たる買い目を上位に
-    予想できていなければ実際の投票判断には役立たない、という観点で計測する
-    (のんの要望「Aだけ改善してBが変化していないのを予想精度改善と判定しない」に対応)。
+    「予想精度・識別能力(B)」を、候補捕捉と候補内ランキングに分離して測定する。
 
-    groups: {group_key: [(combination, prob, won: bool), ...], ...}
-    (group_key は通常 (race_id, bet_type) 。1グループ=1レース×1券種で
-    評価対象になった買い目(購入+見送り)の集合)
+    groups:
+        {
+            group_key: [
+                (combination, probability, won: bool),
+                ...
+            ]
+        }
 
-    戻り値:
-    - n_groups: 評価対象レース数(この券種で1件以上の候補が評価されたレース数)
-    - winner_captured_groups: 実際の的中買い目が候補の中に含まれていたレース数
-      (含まれていなければ、そもそも予想の候補生成・box選定の時点で取りこぼしている
-      ことを意味し、確率の精度以前の問題として別枠で扱う)
-    - winner_captured_rate_pct: 上記の捕捉率
-    - top1_hit_rate_pct: 候補の中で最も予想確率が高かった買い目が実際に的中していた割合
-      (捕捉できたレースのみが対象。的中買い目を1位に予想できているかを直接表す)
-    - avg_winner_rank_percentile_pct: 的中買い目が、予想確率で並べた順位の何%目にいたか
-      の平均(0%=常に1位で予想できている、50%=順位付けが的中と無関係、
-      100%=常に最下位に予想してしまっている)
+    1グループは通常「1レース×1券種」。
+
+    指標:
+    - winner_captured_rate_pct:
+        的中買い目が評価候補に存在したレースの割合。
+        低い場合は、確率計算以前の候補生成・box選定の問題を疑う。
+
+    - top_n_hit_rate_pct:
+        「的中買い目を候補に捕捉できたレース」だけを分母にして、
+        最上位の的中買い目がTopN以内だった割合。
+        これにより候補生成能力と候補内ランキング能力を混ぜない。
+
+    - avg_winner_rank_percentile_pct:
+        最上位の的中候補の順位を候補数で正規化した平均。
+        0%=常に1位、50%=順位付けが的中と概ね無関係、
+        100%=常に最下位。
+
+    同着等で同一グループに複数の的中候補がある場合は、
+    「最も上位にランクされた的中候補」を採用する。
     """
+    top_ns = tuple(sorted({int(n) for n in top_ns if int(n) >= 1}))
+
     n_groups = 0
     winner_captured_groups = 0
-    top1_hits = 0
+    top_n_hits = {n: 0 for n in top_ns}
+
     percentile_sum = 0.0
     percentile_count = 0
 
     for _key, candidates in groups.items():
         if not candidates:
             continue
+
         n_groups += 1
-        n = len(candidates)
-        # 予想確率の高い順に並べる(同率は安定ソートで元の順序を維持)
+        n_candidates = len(candidates)
+
+        # 確率の高い順。Pythonの安定ソートにより同率時は元順序を維持。
         ranked = sorted(candidates, key=lambda c: c[1], reverse=True)
-        winner_rank = None
-        for idx, (_combo, _prob, won) in enumerate(ranked):
-            if won:
-                winner_rank = idx  # 0-indexed(0=1位)
-                break
-        if winner_rank is None:
-            continue  # 的中買い目がこのレースの評価対象に含まれていなかった
+
+        winner_ranks = [
+            idx
+            for idx, (_combo, _prob, won) in enumerate(ranked)
+            if won
+        ]
+
+        if not winner_ranks:
+            # 的中買い目が候補集合に存在しない。
+            continue
+
         winner_captured_groups += 1
-        if winner_rank == 0:
-            top1_hits += 1
-        percentile = (winner_rank / (n - 1)) * 100 if n > 1 else 0.0
+
+        # 同着等で複数的中候補がある場合は最も上位を採用。
+        best_winner_rank = min(winner_ranks)
+
+        for top_n in top_ns:
+            effective_top_n = min(top_n, n_candidates)
+            if best_winner_rank < effective_top_n:
+                top_n_hits[top_n] += 1
+
+        percentile = (
+            best_winner_rank / (n_candidates - 1) * 100
+            if n_candidates > 1
+            else 0.0
+        )
         percentile_sum += percentile
         percentile_count += 1
+
+    top_n_result = {
+        f"top{top_n}": (
+            round(top_n_hits[top_n] / winner_captured_groups * 100, 1)
+            if winner_captured_groups
+            else None
+        )
+        for top_n in top_ns
+    }
+
+    # 既存APIとの後方互換を維持するためtop1を従来キーにも残す。
+    top1_rate = top_n_result.get("top1")
 
     return {
         "n_groups": n_groups,
         "winner_captured_groups": winner_captured_groups,
-        "winner_captured_rate_pct": round(winner_captured_groups / n_groups * 100, 1) if n_groups else None,
-        "top1_hit_rate_pct": round(top1_hits / winner_captured_groups * 100, 1) if winner_captured_groups else None,
-        "avg_winner_rank_percentile_pct": round(percentile_sum / percentile_count, 1) if percentile_count else None,
+        "winner_captured_rate_pct": (
+            round(winner_captured_groups / n_groups * 100, 1)
+            if n_groups
+            else None
+        ),
+        "top1_hit_rate_pct": top1_rate,
+        "top_n_hit_rate_pct": top_n_result,
+        "avg_winner_rank_percentile_pct": (
+            round(percentile_sum / percentile_count, 1)
+            if percentile_count
+            else None
+        ),
     }
 
 

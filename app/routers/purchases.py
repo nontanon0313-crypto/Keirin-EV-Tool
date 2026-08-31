@@ -938,20 +938,25 @@ TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 @router.get("/bet-type-diagnostics")
 def bet_type_diagnostics(db: Session = Depends(get_db)):
     """
-    券種別に「予想精度そのもの」を診断する(のんの分析依頼: 優先1)。
+    券種別に、結果が悪い原因を次の段階へ分解して診断する。
 
-    重要: ここでは以下の2つを明確に分けて確認できるようにしている。
-    A. キャリブレーション精度 = 想定的中率が実績的中率に一致しているか
-       (=deviation_pct。既存のcalibration-compareと同じ考え方)
-    B. 予想精度・識別能力 = 当たる買い目をより上位に予想できているか
-       (=Brier Score、上位1位的中率、的中買い目の順位パーセンタイル)
+    Stage 1: Candidate Capture
+        的中買い目を候補集合に含められたか
 
-    「Aが改善してもBが変化していない」状態を見分けられるよう、
-    補正前(win_prob_raw)と補正後(win_prob_at_purchase/win_prob_estimated)の
-    両方でBrier Scoreと識別能力を算出して並べる。
+    Stage 2: Ranking
+        捕捉した的中買い目を候補上位に置けたか
 
-    集計対象は結果確定済みのPurchaseとSkippedBetの両方
-    (見送りを除外しない、という既存方針を維持)。
+    Stage 3: Purchase Survival
+        捕捉した的中買い目が実際の購入まで残ったか
+
+    Stage 4: Probability
+        予測確率が実績とどれだけ一致しているか
+
+    Stage 5: Monetization
+        実際に購入した分がROIとして利益化できているか
+
+    PurchaseとSkippedBetの両方を対象にする。
+    DBスキーマ変更は不要。
     """
     purchases = (
         db.query(models.Purchase)
@@ -959,6 +964,7 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
         .filter(models.Purchase.bet_type.in_(TARGET_BET_TYPES))
         .all()
     )
+
     skipped = (
         db.query(models.SkippedBet)
         .filter(models.SkippedBet.actual_result.isnot(None))
@@ -966,91 +972,533 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
         .all()
     )
 
-    # (race_id, bet_type, combination, prob_raw, prob_calibrated, won, is_purchase,
-    #  stake_amount, payout_amount)
+    class Rec:
+        __slots__ = (
+            "race_id",
+            "bet_type",
+            "combination",
+            "prob_raw",
+            "prob_cal",
+            "won",
+            "is_purchase",
+            "stake_amount",
+            "payout_amount",
+            "skip_reason",
+        )
+
+        def __init__(
+            self,
+            race_id,
+            bet_type,
+            combination,
+            prob_raw,
+            prob_cal,
+            won,
+            is_purchase,
+            stake_amount=0.0,
+            payout_amount=0.0,
+            skip_reason=None,
+        ):
+            self.race_id = race_id
+            self.bet_type = bet_type
+            self.combination = combination
+            self.prob_raw = prob_raw
+            self.prob_cal = prob_cal
+            self.won = won
+            self.is_purchase = is_purchase
+            self.stake_amount = stake_amount or 0.0
+            self.payout_amount = payout_amount or 0.0
+            self.skip_reason = skip_reason
+
     all_records = []
+
     for p in purchases:
-        won = p.result == "win"
-        prob_raw = p.win_prob_raw if p.win_prob_raw is not None else p.win_prob_at_purchase
-        prob_cal = p.win_prob_at_purchase
-        all_records.append((
-            p.race_id, p.bet_type, p.combination, prob_raw, prob_cal, won,
-            True, p.stake_amount or 0.0, p.payout_amount or 0.0,
-        ))
+        prob_raw = (
+            p.win_prob_raw
+            if getattr(p, "win_prob_raw", None) is not None
+            else p.win_prob_at_purchase
+        )
+
+        all_records.append(
+            Rec(
+                race_id=p.race_id,
+                bet_type=p.bet_type,
+                combination=p.combination,
+                prob_raw=prob_raw,
+                prob_cal=p.win_prob_at_purchase,
+                won=(p.result == "win"),
+                is_purchase=True,
+                stake_amount=p.stake_amount,
+                payout_amount=p.payout_amount,
+            )
+        )
+
     for s in skipped:
-        won = s.actual_result == "win"
-        prob_raw = s.win_prob_raw if s.win_prob_raw is not None else s.win_prob_estimated
-        prob_cal = s.win_prob_estimated
-        all_records.append((
-            s.race_id, s.bet_type, s.combination, prob_raw, prob_cal, won,
-            False, 0.0, 0.0,
-        ))
+        prob_raw = (
+            s.win_prob_raw
+            if getattr(s, "win_prob_raw", None) is not None
+            else s.win_prob_estimated
+        )
+
+        all_records.append(
+            Rec(
+                race_id=s.race_id,
+                bet_type=s.bet_type,
+                combination=s.combination,
+                prob_raw=prob_raw,
+                prob_cal=s.win_prob_estimated,
+                won=(s.actual_result == "win"),
+                is_purchase=False,
+                skip_reason=getattr(s, "reason", None),
+            )
+        )
+
+    def _pct(numerator, denominator):
+        if denominator <= 0:
+            return None
+        return round(numerator / denominator * 100, 1)
+
+    def _probability_metrics(records, prob_attr):
+        pairs = [
+            (getattr(r, prob_attr), r.won)
+            for r in records
+            if getattr(r, prob_attr) is not None
+        ]
+
+        if not pairs:
+            return {
+                "n": 0,
+                "actual_win_rate_pct": None,
+                "predicted_avg_prob_pct": None,
+                "deviation_pct": None,
+                "brier_score": None,
+            }
+
+        n = len(pairs)
+        wins = sum(1 for _, won in pairs if won)
+        actual = wins / n
+        predicted = sum(prob for prob, _ in pairs) / n
+        brier = calc.brier_score(pairs)
+
+        return {
+            "n": n,
+            "actual_win_rate_pct": round(actual * 100, 2),
+            "predicted_avg_prob_pct": round(predicted * 100, 2),
+            "deviation_pct": round((actual - predicted) * 100, 2),
+            "brier_score": round(brier, 4) if brier is not None else None,
+        }
+
+    def _build_ranking_groups(records, prob_attr):
+        groups = {}
+
+        for r in records:
+            prob = getattr(r, prob_attr)
+            if prob is None:
+                continue
+
+            groups.setdefault(r.race_id, []).append(
+                (r.combination, prob, r.won)
+            )
+
+        return groups
+
+    def _purchase_funnel(records):
+        """
+        レース単位で評価する。
+
+        captured:
+            そのレースの候補集合に的中買い目が存在する。
+
+        winner_purchased:
+            的中買い目のうち少なくとも1つが実際にPurchaseになっている。
+
+        同着等で複数的中候補がある場合も、
+        1つでも購入されていればsurvivedとする。
+        """
+        by_race = {}
+
+        for r in records:
+            by_race.setdefault(r.race_id, []).append(r)
+
+        n_groups = 0
+        captured_groups = 0
+        winner_purchased_groups = 0
+        winner_lost_groups = 0
+
+        reason_counts = {}
+
+        for _race_id, group in by_race.items():
+            if not group:
+                continue
+
+            n_groups += 1
+
+            winners = [r for r in group if r.won]
+
+            if not winners:
+                continue
+
+            captured_groups += 1
+
+            if any(r.is_purchase for r in winners):
+                winner_purchased_groups += 1
+                continue
+
+            winner_lost_groups += 1
+
+            # 同着等で複数winnerがある場合は理由を全件カウントすると
+            # グループ数を超えるため、同一レース内のreasonは重複除去。
+            reasons = {
+                (r.skip_reason or "理由未記録")
+                for r in winners
+                if not r.is_purchase
+            }
+
+            if not reasons:
+                reasons = {"理由未記録"}
+
+            for reason in reasons:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+        return {
+            "n_groups": n_groups,
+            "captured_winner_groups": captured_groups,
+            "winner_purchased_groups": winner_purchased_groups,
+            "winner_purchase_survival_rate_pct": _pct(
+                winner_purchased_groups,
+                captured_groups,
+            ),
+            "winner_lost_before_purchase_groups": winner_lost_groups,
+            "winner_lost_before_purchase_rate_pct": _pct(
+                winner_lost_groups,
+                captured_groups,
+            ),
+            "winner_filter_loss_breakdown": dict(
+                sorted(
+                    reason_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ),
+        }
+
+    def _diagnose(
+        n_groups,
+        ranking,
+        funnel,
+        probability_metrics,
+        purchase_count,
+        roi_pct,
+    ):
+        """
+        閾値だけで「原因確定」と断定しない。
+
+        primary_issueは現データ上で最も先に確認すべき段階を示す。
+        券種間の絶対比較だけではなく、同一券種の時系列比較にも使えるよう、
+        evidenceを併記する。
+        """
+        evidence = []
+
+        capture_rate = ranking.get("winner_captured_rate_pct")
+        top_n = ranking.get("top_n_hit_rate_pct") or {}
+        top1 = top_n.get("top1")
+        top3 = top_n.get("top3")
+        top5 = top_n.get("top5")
+
+        survival_rate = funnel.get("winner_purchase_survival_rate_pct")
+
+        deviation = probability_metrics.get("deviation_pct")
+        brier = probability_metrics.get("brier_score")
+
+        primary_issue = "データ不足または複合要因"
+        secondary_issue = None
+        recommended_action = (
+            "サンプルを追加し、候補捕捉→ランキング→購入生存→確率→ROIの順で"
+            "ボトルネックを比較してください。"
+        )
+
+        # 1. 候補捕捉
+        if capture_rate is not None:
+            evidence.append(
+                f"winner_captured_rate={capture_rate}%"
+            )
+
+        # 2. ランキング
+        if top1 is not None:
+            evidence.append(f"Top1={top1}%")
+
+        if top3 is not None:
+            evidence.append(f"Top3={top3}%")
+
+        # 3. 購入生存
+        if survival_rate is not None:
+            evidence.append(
+                f"winner_purchase_survival={survival_rate}%"
+            )
+
+        # 4. 確率
+        if deviation is not None:
+            evidence.append(
+                f"probability_deviation={deviation}pt"
+            )
+
+        if brier is not None:
+            evidence.append(f"brier={brier}")
+
+        # 購入数が極端に少ない場合、ROIを主因判定に使わない。
+        roi_reliable = purchase_count >= 30
+
+        # 優先順位:
+        # 候補捕捉 → ランキング → 購入フィルタ → 確率 → ROI
+        #
+        # capture率は券種固有の候補数に左右されるため、
+        # 「50%未満=必ず悪い」とはしない。
+        # ただし、捕捉できた後のTop3との差が小さい場合は、
+        # 捕捉段階がより有力なボトルネックになる。
+        if (
+            capture_rate is not None
+            and top3 is not None
+            and capture_rate < 50
+            and top3 >= 70
+        ):
+            primary_issue = "候補生成・候補範囲"
+            secondary_issue = "候補内ランキングは相対的に保たれている可能性"
+            recommended_action = (
+                "候補数、box範囲、展開候補を見直してください。"
+                "確率補正だけでは候補外の的中買い目は救えません。"
+            )
+
+        elif (
+            capture_rate is not None
+            and capture_rate >= 20
+            and top1 is not None
+            and top3 is not None
+            and top1 < 25
+            and top3 - top1 >= 20
+        ):
+            primary_issue = "候補内ランキング"
+            secondary_issue = "候補生成"
+            recommended_action = (
+                "候補自体には正解が入っているが上位へ押し上げられていない可能性があります。"
+                "組み合わせ確率、Harville式への入力確率、ライン補正を優先検証してください。"
+            )
+
+        elif (
+            survival_rate is not None
+            and capture_rate is not None
+            and capture_rate >= 20
+            and survival_rate < 50
+        ):
+            primary_issue = "購入フィルタ"
+            secondary_issue = "候補生成またはランキング"
+            recommended_action = (
+                "的中候補が候補集合に存在しているのに購入まで残っていない可能性があります。"
+                "winner_filter_loss_breakdownを確認し、EV閾値・最低勝率・賭け金0円化を分離検証してください。"
+            )
+
+        elif (
+            deviation is not None
+            and abs(deviation) >= 1.0
+        ):
+            primary_issue = "確率キャリブレーション"
+            secondary_issue = "候補内ランキング"
+            recommended_action = (
+                "rawとcalibratedのBrier Scoreおよびランキングを比較してください。"
+                "ランキングが変わらず乖離だけ縮むなら、予想能力ではなく確率尺度の問題です。"
+            )
+
+        elif roi_reliable and roi_pct is not None and roi_pct < 0:
+            primary_issue = "収益化・オッズ/EV評価"
+            secondary_issue = "確率または購入条件"
+            recommended_action = (
+                "候補捕捉・ランキング・購入生存が大きく崩れていない場合、"
+                "投票時オッズと最終払戻、EV閾値、安全マージンを確認してください。"
+            )
+
+        confidence = "low"
+
+        if n_groups >= 100:
+            confidence = "high"
+        elif n_groups >= 30:
+            confidence = "medium"
+
+        if purchase_count < 10 and confidence == "high":
+            # 予想診断はサンプルが多くても、購入ROIの判断は弱い。
+            evidence.append(
+                f"purchase_count={purchase_count}のためROI評価は不安定"
+            )
+
+        return {
+            "primary_issue": primary_issue,
+            "secondary_issue": secondary_issue,
+            "recommended_action": recommended_action,
+            "confidence": confidence,
+            "evidence": evidence,
+            "note": (
+                "これは原因候補の優先順位であり、単一指標だけで原因を確定するものではありません。"
+            ),
+        }
 
     result = {}
+
     for bt in TARGET_BET_TYPES:
-        bt_records = [r for r in all_records if r[1] == bt]
+        bt_records = [
+            r
+            for r in all_records
+            if r.bet_type == bt
+        ]
+
         n = len(bt_records)
+
         if n == 0:
-            result[bt] = {"sample_count": 0}
+            result[bt] = {
+                "sample_count": 0,
+                "diagnosis": {
+                    "primary_issue": "データ不足",
+                    "confidence": "low",
+                },
+            }
             continue
 
-        purchase_records = [r for r in bt_records if r[6]]
+        purchase_records = [
+            r
+            for r in bt_records
+            if r.is_purchase
+        ]
+
         n_purchased = len(purchase_records)
-        wins_purchased = sum(1 for r in purchase_records if r[5])
-        stake_total = sum(r[7] for r in purchase_records)
-        payout_total = sum(r[8] for r in purchase_records)
-        roi_pct = round((payout_total / stake_total - 1) * 100, 2) if stake_total > 0 else None
 
-        wins_all = sum(1 for r in bt_records if r[5])
-        actual_win_rate = wins_all / n
+        stake_total = sum(
+            r.stake_amount
+            for r in purchase_records
+        )
 
-        raw_probs = [r[3] for r in bt_records if r[3] is not None]
-        cal_probs = [r[4] for r in bt_records if r[4] is not None]
-        predicted_avg_raw = sum(raw_probs) / len(raw_probs) if raw_probs else None
-        predicted_avg_cal = sum(cal_probs) / len(cal_probs) if cal_probs else None
+        payout_total = sum(
+            r.payout_amount
+            for r in purchase_records
+        )
 
-        brier_raw = calc.brier_score([(r[3], r[5]) for r in bt_records if r[3] is not None])
-        brier_cal = calc.brier_score([(r[4], r[5]) for r in bt_records if r[4] is not None])
+        roi_pct = (
+            round(
+                (payout_total / stake_total - 1) * 100,
+                2,
+            )
+            if stake_total > 0
+            else None
+        )
 
-        # 識別能力(B)は「同一レース内での順位付け」で測るため、レース単位にグルーピングする
-        groups_raw = {}
-        groups_cal = {}
-        for race_id, _bt, combo, prob_raw, prob_cal, won, *_ in bt_records:
-            if prob_raw is not None:
-                groups_raw.setdefault(race_id, []).append((combo, prob_raw, won))
-            if prob_cal is not None:
-                groups_cal.setdefault(race_id, []).append((combo, prob_cal, won))
-        ranking_raw = calc.ranking_diagnostics(groups_raw)
-        ranking_cal = calc.ranking_diagnostics(groups_cal)
+        raw_metrics = _probability_metrics(
+            bt_records,
+            "prob_raw",
+        )
+
+        cal_metrics = _probability_metrics(
+            bt_records,
+            "prob_cal",
+        )
+
+        groups_raw = _build_ranking_groups(
+            bt_records,
+            "prob_raw",
+        )
+
+        groups_cal = _build_ranking_groups(
+            bt_records,
+            "prob_cal",
+        )
+
+        ranking_raw = calc.ranking_diagnostics(
+            groups_raw,
+        )
+
+        ranking_cal = calc.ranking_diagnostics(
+            groups_cal,
+        )
+
+        funnel = _purchase_funnel(
+            bt_records,
+        )
+
+        # 主診断は実際の購入判断に使われるcalibrated側を優先。
+        # calibratedが無い場合はrawへフォールバック。
+        ranking_for_diagnosis = (
+            ranking_cal
+            if ranking_cal.get("n_groups", 0) > 0
+            else ranking_raw
+        )
+
+        probability_for_diagnosis = (
+            cal_metrics
+            if cal_metrics.get("n", 0) > 0
+            else raw_metrics
+        )
+
+        diagnosis = _diagnose(
+            n_groups=ranking_for_diagnosis.get("n_groups", 0),
+            ranking=ranking_for_diagnosis,
+            funnel=funnel,
+            probability_metrics=probability_for_diagnosis,
+            purchase_count=n_purchased,
+            roi_pct=roi_pct,
+        )
 
         result[bt] = {
             "sample_count": n,
             "purchase_count": n_purchased,
             "skipped_count": n - n_purchased,
-            "actual_win_rate_pct": round(actual_win_rate * 100, 2),
+
+            "actual_win_rate_pct": (
+                cal_metrics["actual_win_rate_pct"]
+                if cal_metrics["actual_win_rate_pct"] is not None
+                else raw_metrics["actual_win_rate_pct"]
+            ),
+
+            # 既存レスポンス互換
             "predicted_avg_prob_pct": {
-                "raw": round(predicted_avg_raw * 100, 2) if predicted_avg_raw is not None else None,
-                "calibrated": round(predicted_avg_cal * 100, 2) if predicted_avg_cal is not None else None,
+                "raw": raw_metrics["predicted_avg_prob_pct"],
+                "calibrated": cal_metrics["predicted_avg_prob_pct"],
             },
+
             "deviation_pct": {
-                "raw": round((actual_win_rate - predicted_avg_raw) * 100, 2) if predicted_avg_raw is not None else None,
-                "calibrated": round((actual_win_rate - predicted_avg_cal) * 100, 2) if predicted_avg_cal is not None else None,
+                "raw": raw_metrics["deviation_pct"],
+                "calibrated": cal_metrics["deviation_pct"],
             },
-            "brier_score": {"raw": round(brier_raw, 4) if brier_raw is not None else None, "calibrated": round(brier_cal, 4) if brier_cal is not None else None},
-            "ranking_diagnostics": {"raw": ranking_raw, "calibrated": ranking_cal},
+
+            "brier_score": {
+                "raw": raw_metrics["brier_score"],
+                "calibrated": cal_metrics["brier_score"],
+            },
+
+            "ranking_diagnostics": {
+                "raw": ranking_raw,
+                "calibrated": ranking_cal,
+            },
+
+            # 新規
+            "purchase_funnel": funnel,
+            "winner_filter_loss_breakdown": (
+                funnel["winner_filter_loss_breakdown"]
+            ),
+            "diagnosis": diagnosis,
+
             "actual_roi_pct_purchased_only": roi_pct,
         }
 
     return {
         "by_bet_type": result,
+        "diagnostic_stages": [
+            "candidate_capture",
+            "ranking",
+            "purchase_survival",
+            "probability",
+            "monetization",
+        ],
         "message": (
-            "【見方】deviation_pctとbrier_scoreは「キャリブレーション(A)」寄りの指標、"
-            "ranking_diagnosticsのtop1_hit_rate_pctとavg_winner_rank_percentile_pctは"
-            "「予想精度・識別能力(B)」の指標です。rawとcalibratedを比べて、"
-            "calibratedでdeviationやBrierだけが改善しranking_diagnosticsが変わっていない場合、"
-            "『確率を実績に合わせただけで、当たる買い目を見抜く力自体は向上していない』ことを意味します。"
-            "winner_captured_rate_pctが低い券種は、的中買い目がそもそも候補(box/展開)に"
-            "含まれていないケースが多いことを示しており、確率計算より先に候補生成側を確認してください。"
+            "券種ごとに、候補生成→候補内ランキング→購入フィルタ→確率→ROIの順で"
+            "原因を分離します。winner_captured_rateが低ければ候補生成側、"
+            "capture後にTop1が低くTop3/Top5で改善するならランキング側、"
+            "winner_purchase_survival_rateが低ければ購入フィルタ側を優先確認してください。"
+            "rawとcalibratedでBrierや順位指標を比較し、確率尺度の改善と"
+            "識別能力の改善を混同しないでください。"
         ),
     }
 
