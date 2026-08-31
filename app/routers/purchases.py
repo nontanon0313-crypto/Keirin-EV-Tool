@@ -935,6 +935,33 @@ def calibration_compare(db: Session = Depends(get_db)):
 TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 
 
+# app/routers/ev.pyで実際に生成されるSkippedBet.reasonの文言パターン。
+# 「運用ゲート」= 券種・ステージ単位で機械的に見送りにしている仕組み(サンプル不足・
+# 実績不振ステージ除外)。「購入判断」= 個々の買い目のEV・確率・金額を見て見送っている
+# もの。この2つは原因が全く別なので、原文を推測で意味づけするのではなく、
+# アプリ自身が生成する固定文言のプレフィックス一致でのみ分類する
+# (ChatGPTの実装方針「reasonを推測で勝手に分類しない。既存コード上で明確に統一
+# されている理由だけは正規化してよい」に従う)。
+_SKIP_REASON_CATEGORY_RULES = [
+    ("このステージの検証データ不足(", "運用ゲート:ステージサンプル不足(着順指定券種を一律見送り)"),
+    ("不調ステージ除外(", "運用ゲート:実績不振ステージを丸ごと除外"),
+    ("実績に基づくEV閾値未達(", "運用ゲート:実績ベースでEV閾値を引き上げ"),
+    ("買い示唆なし(EV/確率が閾値未満)", "購入判断:EV/確率が基準未満"),
+    ("大穴帯(未補正)のため除外", "購入判断:大穴帯(未補正)のため除外"),
+    ("ガミり回避のため除外", "購入判断:ガミり回避のため除外"),
+    ("理論上の賭け金が最低単位", "購入判断:最低賭け金(100円)未満"),
+]
+
+
+def _categorize_skip_reason(reason: str) -> str:
+    if not reason:
+        return "理由未記録"
+    for prefix, category in _SKIP_REASON_CATEGORY_RULES:
+        if reason.startswith(prefix):
+            return category
+    return "その他(原文のまま)"
+
+
 @router.get("/bet-type-diagnostics")
 def bet_type_diagnostics(db: Session = Depends(get_db)):
     """
@@ -1126,6 +1153,7 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
         winner_lost_groups = 0
 
         reason_counts = {}
+        category_counts = {}
 
         for _race_id, group in by_race.items():
             if not group:
@@ -1160,6 +1188,11 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             for reason in reasons:
                 reason_counts[reason] = reason_counts.get(reason, 0) + 1
 
+            # カテゴリ側も同様に、同一レース内では重複除去してから集計する
+            categories = {_categorize_skip_reason(r) for r in reasons}
+            for category in categories:
+                category_counts[category] = category_counts.get(category, 0) + 1
+
         return {
             "n_groups": n_groups,
             "captured_winner_groups": captured_groups,
@@ -1172,6 +1205,12 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             "winner_lost_before_purchase_rate_pct": _pct(
                 winner_lost_groups,
                 captured_groups,
+            ),
+            "winner_filter_loss_breakdown_by_category": dict(
+                sorted(
+                    category_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
             ),
             "winner_filter_loss_breakdown": dict(
                 sorted(
@@ -1292,7 +1331,11 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             secondary_issue = "候補生成またはランキング"
             recommended_action = (
                 "的中候補が候補集合に存在しているのに購入まで残っていない可能性があります。"
-                "winner_filter_loss_breakdownを確認し、EV閾値・最低勝率・賭け金0円化を分離検証してください。"
+                "winner_filter_loss_breakdown_by_categoryを確認し、"
+                "『運用ゲート』(サンプル不足・実績不振ステージによる機械的な見送り)由来か、"
+                "『購入判断』(EV/確率閾値)由来かをまず区別してください。"
+                "運用ゲート由来が大半なら、それは安全策が意図通り働いている結果であり、"
+                "確率やEV計算そのものの問題ではありません。"
             )
 
         elif (
@@ -1479,6 +1522,9 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             "purchase_funnel": funnel,
             "winner_filter_loss_breakdown": (
                 funnel["winner_filter_loss_breakdown"]
+            ),
+            "winner_filter_loss_breakdown_by_category": (
+                funnel["winner_filter_loss_breakdown_by_category"]
             ),
             "diagnosis": diagnosis,
 
