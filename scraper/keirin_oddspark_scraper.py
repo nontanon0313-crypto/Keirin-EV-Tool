@@ -104,38 +104,21 @@ def fetch_grade_and_event_title(jo_code, kaisai_bi):
         params = {"joCode": jo_code, "kaisaiBi": kaisai_bi}
         soup = get_soup(url, params, retries=2)
         page_text = soup.get_text(" ", strip=True)
-        # 「◯◯競輪場 F2 Kドリームス杯」形式。全角G/F・ローマ数字ⅠⅡⅢ・GPにも対応。
-        # 以前は一部表記でマッチせず grade=None のまま「不明」になっていた。
-        grade_pat = (
-            r"([GgＧｇ](?:[PpＰｐ]|[1-3１２３]|[ⅠⅡⅢ]|I{1,3}|Ⅱ|Ⅲ)|[FfＦｆ][12１２])"
-        )
+        # 「◯◯競輪場 F2 Kドリームス杯」のように、venue名の直後に半角/全角の
+        # グレード表記(GP/G1〜G3/F1〜F2)が続く形式(全角数字にも対応)。
         m = re.search(
-            rf"競輪場[\s　]*{grade_pat}[\s　]*([^\s　]{{2,30}})?",
+            r"競輪場\s*([GgＧｇ](?:[Pp]|[1-3１２３])|[FfＦｆ][12１２])\s*([^\s　]{2,20})?",
             page_text,
         )
-        if not m:
-            # 見出しが「奈良 Ｆ１ 大会名」のように「競輪場」を挟まない場合のフォールバック
-            m = re.search(
-                rf"{grade_pat}[\s　]+([^\s　]{{2,30}})",
-                page_text,
-            )
         if not m:
             result = (None, None)
         else:
             raw_grade = m.group(1)
             grade = (
-                raw_grade.replace("Ｇ", "G").replace("ｇ", "G").replace("Ｆ", "F").replace("ｆ", "F")
-                .replace("Ｐ", "P").replace("ｐ", "P")
-                .replace("Ⅰ", "1").replace("Ⅱ", "2").replace("Ⅲ", "3")
-                .replace("II", "2").replace("III", "3").replace("I", "1")
+                raw_grade.replace("Ｇ", "G").replace("Ｆ", "F")
                 .translate(str.maketrans("１２３", "123"))
             )
-            # G1/F1/GP に正規化
-            grade = grade.upper()
-            if grade.startswith("G") and len(grade) >= 2:
-                grade = "G" + grade[1:].replace("P", "P")
-            title = m.group(2) if m.lastindex and m.lastindex >= 2 else None
-            result = (grade, title)
+            result = (grade, m.group(2))
     except Exception:
         result = (None, None)
     _grade_cache[cache_key] = result
@@ -843,6 +826,12 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
         "sp_stats_ok": any(
             (r.get("S") is not None or r.get("逃") is not None)
             for r in (data.get("entry", {}).get("riders") or [])
+        ),
+        # コメント欄(commentTable)自体がページに存在しないレースがある(取得失敗ではなく、
+        # そのレースにはコメントが元々掲載されていないケース)。的中率検証等で
+        # 「取得できていない」と「そもそも無い」を後から区別できるようフラグを残す
+        "comments_ok": any(
+            r.get("コメント") for r in (data.get("entry", {}).get("riders") or [])
         ),
         "odds_complete": odds_complete,
         "all_complete": bool(data.get("entry", {}).get("riders")) and bool(data.get("result", {}).get("results")) and all(odds_complete.values()),

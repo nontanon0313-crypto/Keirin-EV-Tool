@@ -382,7 +382,7 @@ async function checkRace() {
     html += `<p class="note">得点=競走得点、S/H/B=各回数、決まり手は逃げ/捲り/差し/マークの回数、直近着順は1着/2着/3着の回数です。数字が全て「-」の場合、その項目がOCRで読み取れていません。</p>`;
 
 
-    html += `<p>オッズ件数: ${data.odds_count}件</p><ul>`;
+    html += `<p>オッズ件数: ${data.odds_count}件 <button id="refreshOddsBtn" type="button">🔄このレースのオッズだけ今すぐ再取得</button></p><ul>`;
     if (Object.keys(data.odds_by_type).length === 0) {
       html += `<li style="color:#ef4444;">オッズが1件も読み込まれていません</li>`;
     } else {
@@ -393,6 +393,25 @@ async function checkRace() {
     html += `</ul>`;
 
     box.innerHTML = html;
+
+    const refreshOddsBtn = document.getElementById("refreshOddsBtn");
+    if (refreshOddsBtn) {
+      refreshOddsBtn.addEventListener("click", async () => {
+        refreshOddsBtn.disabled = true;
+        const originalLabel = refreshOddsBtn.textContent;
+        refreshOddsBtn.textContent = "更新中...(数秒〜十数秒かかります)";
+        try {
+          const r = await fetch(apiUrl(`/scraper-import/refresh-odds/${raceId}`), { method: "POST" });
+          const d = await r.json();
+          if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+          await checkRace();
+        } catch (e) {
+          alert("オッズ再取得に失敗しました: " + e.message);
+          refreshOddsBtn.disabled = false;
+          refreshOddsBtn.textContent = originalLabel;
+        }
+      });
+    }
   } catch (e) {
     box.textContent = "エラー: " + e.message;
   }
