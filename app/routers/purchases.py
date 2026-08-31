@@ -1321,8 +1321,10 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
         elif n_groups >= 30:
             confidence = "medium"
 
-        if purchase_count < 10 and confidence == "high":
-            # 予想診断はサンプルが多くても、購入ROIの判断は弱い。
+        if purchase_count < 10:
+            # 予想診断側のサンプル(n_groups)が多くても、
+            # 購入ROIの判断は購入件数(purchase_count)が少なければ別途弱い。
+            # confidenceの高低に関わらず、購入数が少ない場合は常に明示する。
             evidence.append(
                 f"purchase_count={purchase_count}のためROI評価は不安定"
             )
