@@ -729,6 +729,42 @@ def parse_odds_axis_based(jo_code, kaisai_bi, race_no, bet_type, n_riders=None, 
     return result
 
 
+def _normalize_player_name(name):
+    """結果表の選手名をentry照合用に正規化(空白・年齢期別を除去)。"""
+    if not name:
+        return ""
+    s = re.sub(r"\s+", "", str(name))
+    s = re.sub(r"\d+歳.*$", "", s)
+    s = re.sub(r"[／/].*$", "", s)
+    return s
+
+
+def _fill_result_car_from_entry(result, entry):
+    """
+    RaceKekka.do の一部行で車番セルが欠落し、選手名が車番列にずれることがある。
+    entryの選手名→車番で補完する。
+    """
+    if not result or not entry:
+        return result
+    name_to_car = {}
+    for r in (entry.get("riders") or []):
+        nm = _normalize_player_name(r.get("選手名"))
+        car = str(r.get("車番") or "").strip()
+        if nm and re.fullmatch(r"[1-9]", car):
+            name_to_car[nm] = car
+    for row in (result.get("results") or []):
+        car = str(row.get("車番") or "").strip()
+        if re.fullmatch(r"[1-9]", car):
+            continue
+        nm = _normalize_player_name(row.get("選手名") or car)
+        if nm and nm in name_to_car:
+            row["車番"] = name_to_car[nm]
+            row["車番_resolved_from_name"] = True
+            if not row.get("選手名"):
+                row["選手名"] = nm
+    return result
+
+
 def parse_result(jo_code, kaisai_bi, race_no):
     url = f"{BASE}/RaceKekka.do"
     params = {"joCode": jo_code, "kaisaiBi": kaisai_bi, "raceNo": race_no}
@@ -743,13 +779,35 @@ def parse_result(jo_code, kaisai_bi, race_no):
             continue
         for row in rows[1:]:
             cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-            if len(cells) < 6 or not re.fullmatch(r"[1-9]", cells[0]):
+            if len(cells) < 2 or not re.fullmatch(r"[1-9]", cells[0]):
                 continue
             if int(cells[0]) > 3:
                 continue
-            results.append({"着順": cells[0], "車番": cells[1], "決まり手_着差": cells[5] if len(cells) > 5 else "", "上り": cells[6] if len(cells) > 6 else "", "SB": cells[7] if len(cells) > 7 else ""})
-    text = soup.get_text(" ", strip=True)
-    nums = re.findall(r"([\d,]+円)\((\d+)\)", text)
+            place = cells[0]
+            car_raw = cells[1] if len(cells) > 1 else ""
+            # 正常: cells[1]が車番1桁。欠落時は選手名がここにずれる
+            if re.fullmatch(r"[1-9]", car_raw):
+                car = car_raw
+                kimarite = cells[5] if len(cells) > 5 else ""
+                agari = cells[6] if len(cells) > 6 else ""
+                sb = cells[7] if len(cells) > 7 else ""
+                player = cells[2] if len(cells) > 2 else ""
+            else:
+                car = ""  # 後でentryから補完
+                player = car_raw
+                kimarite = cells[4] if len(cells) > 4 else ""
+                agari = cells[5] if len(cells) > 5 else ""
+                sb = cells[6] if len(cells) > 6 else ""
+            results.append({
+                "着順": place,
+                "車番": car,
+                "選手名": player,
+                "決まり手_着差": kimarite,
+                "上り": agari,
+                "SB": sb,
+            })
+    page_text = soup.get_text(" ", strip=True)
+    nums = re.findall(r"([\d,]+円)\((\d+)\)", page_text)
     labels = ["2車複", "ワイド", "ワイド", "ワイド", "3連複", "2車単", "3連単"]
     payouts = []
     for i, (yen, pop) in enumerate(nums):
@@ -817,6 +875,12 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
             data["result"] = {"results": [], "payouts": []}
             if attempt == 0:
                 time.sleep(1.0)
+
+    # 車番セル欠落行を出走表の選手名から補完
+    try:
+        data["result"] = _fill_result_car_from_entry(data.get("result") or {}, data.get("entry") or {})
+    except Exception:
+        pass
 
     odds_complete = {bt: info.get("is_complete", False) for bt, info in data["odds"].items()}
     data["data_quality"] = {

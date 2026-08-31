@@ -202,6 +202,55 @@ def reset_races_for_reanalysis_batch(payload: dict, db: Session = Depends(get_db
     }
 
 
+
+@router.post("/repair-broken-results")
+def repair_broken_results(db: Session = Depends(get_db), apply: bool = False):
+    """
+    actual_result が車番形式(例: 1-2-3)でないレースを洗い出す。
+    apply=true のときは actual_result をクリアし、紐づく購入を pending に戻す
+    (正しい結果で再confirmできるようにする)。
+    DB切替後や結果パーサ修正後の復旧用。
+    """
+    import re
+    races = db.query(models.Race).filter(models.Race.actual_result.isnot(None)).all()
+    broken = []
+    ok_re = re.compile(r"^[1-9]([-=][1-9]){1,2}$")
+    for race in races:
+        ar = (race.actual_result or "").strip()
+        if ok_re.match(ar):
+            continue
+        item = {
+            "race_id": race.id,
+            "venue_name": race.venue_name,
+            "race_number": race.race_number,
+            "race_date": race.race_date.strftime("%Y-%m-%d") if race.race_date else None,
+            "external_ref": race.external_ref,
+            "actual_result": ar,
+        }
+        if apply:
+            race.actual_result = None
+            pending_reset = 0
+            for p in db.query(models.Purchase).filter(models.Purchase.race_id == race.id).all():
+                if p.result in ("win", "lose"):
+                    p.result = "pending"
+                    p.payout_amount = 0
+                    pending_reset += 1
+            for s in db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race.id).all():
+                if s.actual_result is not None:
+                    s.actual_result = None
+                    s.actual_payout = None
+            item["purchases_reset_to_pending"] = pending_reset
+        broken.append(item)
+    if apply and broken:
+        db.commit()
+    return {
+        "broken_count": len(broken),
+        "applied": apply,
+        "items": broken,
+        "note": "apply=falseは一覧のみ。apply=trueで結果を消し購入をpendingに戻す。その後JSONを再取得してconfirm-resultし直す",
+    }
+
+
 @router.get("/for-reanalysis")
 def list_races_for_reanalysis(db: Session = Depends(get_db), limit: int = 100):
     """
@@ -358,6 +407,8 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
         "actual_result": race.actual_result,
         "venue_name": race.venue_name,
         "race_number": race.race_number,
+        "race_date": race.race_date.strftime("%Y-%m-%d") if race.race_date else None,
+        "external_ref": race.external_ref,
         "grade": race.grade,
         "race_stage": race.race_stage,
         "weather": race.weather,

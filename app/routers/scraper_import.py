@@ -215,11 +215,14 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
         db.flush()
     else:
         # 再取り込み時は出走表由来の情報だけ更新する(手動で編集した他の項目は上書きしない)
+        # race_date / external_ref 由来の日付はDB切替や初回欠落時のため常に補完する
+        if race_date is not None:
+            race.race_date = race_date
         if event_title:
             race.event_title = event_title
         if post_time and not race.post_time:
             race.post_time = post_time
-        if season and not race.season:
+        if season:
             race.season = season
         if bank and not race.bank_id:
             race.bank_id = bank.id

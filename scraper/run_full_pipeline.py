@@ -183,13 +183,18 @@ def _extract_actual_result(race_json):
     """
     スクレイパーが取得したJSONから、確定済みの1-2-3着(車番)を取り出す。
     まだレースが行われていない・着順が取得できていない場合はNoneを返す。
+    車番が数字1桁でない行(選手名ずれ等)は無効としてNoneを返す。
     """
     results = race_json.get("result", {}).get("results", [])
-    by_place = {r["着順"]: r["車番"] for r in results}
-    parts = [by_place[str(p)] for p in (1, 2, 3) if str(p) in by_place]
-    if len(parts) != 3:
+    by_place = {}
+    for r in results:
+        place = str(r.get("着順") or "").strip()
+        car = str(r.get("車番") or "").strip()
+        if place in ("1", "2", "3") and re.fullmatch(r"[1-9]", car):
+            by_place[place] = car
+    if not all(p in by_place for p in ("1", "2", "3")):
         return None
-    return "-".join(parts)
+    return f"{by_place['1']}-{by_place['2']}-{by_place['3']}"
 
 
 def get_current_bankroll():
@@ -458,6 +463,11 @@ def main():
         excluded = len(all_json) - len(files)
         if excluded:
             log(f"({excluded}件のファイルはレースJSONの命名パターン(YYYYMMDD_jo_RR.json)に一致しないため除外しました。例: status.json, debug_*.json)")
+        if getattr(args, "date", None):
+            prefix = args.date
+            before = len(files)
+            files = [f for f in files if os.path.basename(f).startswith(prefix + "_")]
+            log(f"(--date {prefix}: {before}件中{len(files)}件に絞り込み)")
     else:
         ap.error("--file か --dir か --race-ids のいずれかを指定してください")
 
