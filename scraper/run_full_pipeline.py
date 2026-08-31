@@ -369,6 +369,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="1レース分のJSONファイル")
     ap.add_argument("--dir", help="複数レース分のJSONファイルが入ったディレクトリ")
+    ap.add_argument("--date", help="YYYYMMDD。--dir指定時にこの開催日のファイルだけ処理する")
     ap.add_argument("--race-ids", help="既存のrace_id(カンマ区切り)を再予想する。スクレイピングは行わない(例: 46,47,48)")
     ap.add_argument("--no-reset", action="store_true", help="--race-ids使用時、リセットせずに(=既存の購入記録に追加する形で)再予想する。通常は指定しない")
     ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。未指定なら固定100万円を使用(検証・集計目的のため)")
