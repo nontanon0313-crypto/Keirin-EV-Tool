@@ -932,6 +932,128 @@ def calibration_compare(db: Session = Depends(get_db)):
     }
 
 
+TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
+
+
+@router.get("/bet-type-diagnostics")
+def bet_type_diagnostics(db: Session = Depends(get_db)):
+    """
+    券種別に「予想精度そのもの」を診断する(のんの分析依頼: 優先1)。
+
+    重要: ここでは以下の2つを明確に分けて確認できるようにしている。
+    A. キャリブレーション精度 = 想定的中率が実績的中率に一致しているか
+       (=deviation_pct。既存のcalibration-compareと同じ考え方)
+    B. 予想精度・識別能力 = 当たる買い目をより上位に予想できているか
+       (=Brier Score、上位1位的中率、的中買い目の順位パーセンタイル)
+
+    「Aが改善してもBが変化していない」状態を見分けられるよう、
+    補正前(win_prob_raw)と補正後(win_prob_at_purchase/win_prob_estimated)の
+    両方でBrier Scoreと識別能力を算出して並べる。
+
+    集計対象は結果確定済みのPurchaseとSkippedBetの両方
+    (見送りを除外しない、という既存方針を維持)。
+    """
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result != "pending")
+        .filter(models.Purchase.bet_type.in_(TARGET_BET_TYPES))
+        .all()
+    )
+    skipped = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.actual_result.isnot(None))
+        .filter(models.SkippedBet.bet_type.in_(TARGET_BET_TYPES))
+        .all()
+    )
+
+    # (race_id, bet_type, combination, prob_raw, prob_calibrated, won, is_purchase,
+    #  stake_amount, payout_amount)
+    all_records = []
+    for p in purchases:
+        won = p.result == "win"
+        prob_raw = p.win_prob_raw if p.win_prob_raw is not None else p.win_prob_at_purchase
+        prob_cal = p.win_prob_at_purchase
+        all_records.append((
+            p.race_id, p.bet_type, p.combination, prob_raw, prob_cal, won,
+            True, p.stake_amount or 0.0, p.payout_amount or 0.0,
+        ))
+    for s in skipped:
+        won = s.actual_result == "win"
+        prob_raw = s.win_prob_raw if s.win_prob_raw is not None else s.win_prob_estimated
+        prob_cal = s.win_prob_estimated
+        all_records.append((
+            s.race_id, s.bet_type, s.combination, prob_raw, prob_cal, won,
+            False, 0.0, 0.0,
+        ))
+
+    result = {}
+    for bt in TARGET_BET_TYPES:
+        bt_records = [r for r in all_records if r[1] == bt]
+        n = len(bt_records)
+        if n == 0:
+            result[bt] = {"sample_count": 0}
+            continue
+
+        purchase_records = [r for r in bt_records if r[6]]
+        n_purchased = len(purchase_records)
+        wins_purchased = sum(1 for r in purchase_records if r[5])
+        stake_total = sum(r[7] for r in purchase_records)
+        payout_total = sum(r[8] for r in purchase_records)
+        roi_pct = round((payout_total / stake_total - 1) * 100, 2) if stake_total > 0 else None
+
+        wins_all = sum(1 for r in bt_records if r[5])
+        actual_win_rate = wins_all / n
+
+        raw_probs = [r[3] for r in bt_records if r[3] is not None]
+        cal_probs = [r[4] for r in bt_records if r[4] is not None]
+        predicted_avg_raw = sum(raw_probs) / len(raw_probs) if raw_probs else None
+        predicted_avg_cal = sum(cal_probs) / len(cal_probs) if cal_probs else None
+
+        brier_raw = calc.brier_score([(r[3], r[5]) for r in bt_records if r[3] is not None])
+        brier_cal = calc.brier_score([(r[4], r[5]) for r in bt_records if r[4] is not None])
+
+        # 識別能力(B)は「同一レース内での順位付け」で測るため、レース単位にグルーピングする
+        groups_raw = {}
+        groups_cal = {}
+        for race_id, _bt, combo, prob_raw, prob_cal, won, *_ in bt_records:
+            if prob_raw is not None:
+                groups_raw.setdefault(race_id, []).append((combo, prob_raw, won))
+            if prob_cal is not None:
+                groups_cal.setdefault(race_id, []).append((combo, prob_cal, won))
+        ranking_raw = calc.ranking_diagnostics(groups_raw)
+        ranking_cal = calc.ranking_diagnostics(groups_cal)
+
+        result[bt] = {
+            "sample_count": n,
+            "purchase_count": n_purchased,
+            "skipped_count": n - n_purchased,
+            "actual_win_rate_pct": round(actual_win_rate * 100, 2),
+            "predicted_avg_prob_pct": {
+                "raw": round(predicted_avg_raw * 100, 2) if predicted_avg_raw is not None else None,
+                "calibrated": round(predicted_avg_cal * 100, 2) if predicted_avg_cal is not None else None,
+            },
+            "deviation_pct": {
+                "raw": round((actual_win_rate - predicted_avg_raw) * 100, 2) if predicted_avg_raw is not None else None,
+                "calibrated": round((actual_win_rate - predicted_avg_cal) * 100, 2) if predicted_avg_cal is not None else None,
+            },
+            "brier_score": {"raw": round(brier_raw, 4) if brier_raw is not None else None, "calibrated": round(brier_cal, 4) if brier_cal is not None else None},
+            "ranking_diagnostics": {"raw": ranking_raw, "calibrated": ranking_cal},
+            "actual_roi_pct_purchased_only": roi_pct,
+        }
+
+    return {
+        "by_bet_type": result,
+        "message": (
+            "【見方】deviation_pctとbrier_scoreは「キャリブレーション(A)」寄りの指標、"
+            "ranking_diagnosticsのtop1_hit_rate_pctとavg_winner_rank_percentile_pctは"
+            "「予想精度・識別能力(B)」の指標です。rawとcalibratedを比べて、"
+            "calibratedでdeviationやBrierだけが改善しranking_diagnosticsが変わっていない場合、"
+            "『確率を実績に合わせただけで、当たる買い目を見抜く力自体は向上していない』ことを意味します。"
+            "winner_captured_rate_pctが低い券種は、的中買い目がそもそも候補(box/展開)に"
+            "含まれていないケースが多いことを示しており、確率計算より先に候補生成側を確認してください。"
+        ),
+    }
+
 
 @router.delete("/{purchase_id}")
 def delete_purchase(purchase_id: int, db: Session = Depends(get_db)):

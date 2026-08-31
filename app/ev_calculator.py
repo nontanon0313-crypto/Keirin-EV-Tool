@@ -566,6 +566,85 @@ def monte_carlo_bankruptcy_bootstrap(
     }
 
 
+def brier_score(records: list) -> float:
+    """
+    Brier Score = 平均((予想確率 - 実際に当たったか(0/1))^2)。
+    0に近いほど確率予測として優れている。
+
+    キャリブレーション(想定的中率が実績に一致しているか)とは別の指標であり、
+    「個々の買い目に対してどれだけ正確な確率を付けられているか」を測る
+    (のんの要望「A:キャリブレーション精度」と「B:予想精度・識別能力」を
+    混同しないため。Brier Scoreは主にAに近いが、母集団平均で相殺されず
+    個々のブレも拾うため、キャリブレーションだけの改善では動きにくい)。
+
+    records: [(prob, won: bool), ...]
+    """
+    if not records:
+        return None
+    n = len(records)
+    total = sum((prob - (1.0 if won else 0.0)) ** 2 for prob, won in records)
+    return total / n
+
+
+def ranking_diagnostics(groups: dict) -> dict:
+    """
+    「予想精度・識別能力(B)」を測るための指標。
+    キャリブレーションが完璧でも、外れる買い目より当たる買い目を上位に
+    予想できていなければ実際の投票判断には役立たない、という観点で計測する
+    (のんの要望「Aだけ改善してBが変化していないのを予想精度改善と判定しない」に対応)。
+
+    groups: {group_key: [(combination, prob, won: bool), ...], ...}
+    (group_key は通常 (race_id, bet_type) 。1グループ=1レース×1券種で
+    評価対象になった買い目(購入+見送り)の集合)
+
+    戻り値:
+    - n_groups: 評価対象レース数(この券種で1件以上の候補が評価されたレース数)
+    - winner_captured_groups: 実際の的中買い目が候補の中に含まれていたレース数
+      (含まれていなければ、そもそも予想の候補生成・box選定の時点で取りこぼしている
+      ことを意味し、確率の精度以前の問題として別枠で扱う)
+    - winner_captured_rate_pct: 上記の捕捉率
+    - top1_hit_rate_pct: 候補の中で最も予想確率が高かった買い目が実際に的中していた割合
+      (捕捉できたレースのみが対象。的中買い目を1位に予想できているかを直接表す)
+    - avg_winner_rank_percentile_pct: 的中買い目が、予想確率で並べた順位の何%目にいたか
+      の平均(0%=常に1位で予想できている、50%=順位付けが的中と無関係、
+      100%=常に最下位に予想してしまっている)
+    """
+    n_groups = 0
+    winner_captured_groups = 0
+    top1_hits = 0
+    percentile_sum = 0.0
+    percentile_count = 0
+
+    for _key, candidates in groups.items():
+        if not candidates:
+            continue
+        n_groups += 1
+        n = len(candidates)
+        # 予想確率の高い順に並べる(同率は安定ソートで元の順序を維持)
+        ranked = sorted(candidates, key=lambda c: c[1], reverse=True)
+        winner_rank = None
+        for idx, (_combo, _prob, won) in enumerate(ranked):
+            if won:
+                winner_rank = idx  # 0-indexed(0=1位)
+                break
+        if winner_rank is None:
+            continue  # 的中買い目がこのレースの評価対象に含まれていなかった
+        winner_captured_groups += 1
+        if winner_rank == 0:
+            top1_hits += 1
+        percentile = (winner_rank / (n - 1)) * 100 if n > 1 else 0.0
+        percentile_sum += percentile
+        percentile_count += 1
+
+    return {
+        "n_groups": n_groups,
+        "winner_captured_groups": winner_captured_groups,
+        "winner_captured_rate_pct": round(winner_captured_groups / n_groups * 100, 1) if n_groups else None,
+        "top1_hit_rate_pct": round(top1_hits / winner_captured_groups * 100, 1) if winner_captured_groups else None,
+        "avg_winner_rank_percentile_pct": round(percentile_sum / percentile_count, 1) if percentile_count else None,
+    }
+
+
 def binomial_lower_tail_p(actual_wins: int, n: int, predicted_prob: float) -> float:
     """
     「予想確率が正しいとしたら、実際の的中数がこれ以下になる確率(片側p値)」を計算する。
