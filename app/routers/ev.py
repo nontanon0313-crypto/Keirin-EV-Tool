@@ -429,9 +429,26 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         except Exception:
             stage_exp_map = {}
 
+    # 実績に基づく券種のゲート用データ。
+    # 「どの券種を選んでも、個々の券種で期待値プラスでなければならない」という
+    # のんの方針を受けて追加(ステージゲートと同じ考え方・同じ閾値を券種にも適用)。
+    # ステージゲートが「その時期のそのステージの読みが甘い」を検出するのに対し、
+    # こちらは「その券種自体の予想ロジックが継続的に実績で負けている」ことを検出する。
+    # 両者は独立していて、どちらか一方に該当すれば見送りになる。
+    bet_type_exp_map = {}
+    if apply_gates:
+        try:
+            bet_type_exp_map = purchases_router.get_bet_type_expectancy_map(db, min_samples=50)
+        except Exception:
+            bet_type_exp_map = {}
+
     # 実績ゲートは「確率を捨てる」のではなく、不調ステージのみ見送り(券種差別なし)。
     # マルチ専用の確率縮小・最低勝率・券種除外は行わない。
     STAGE_EXPECTANCY_CUTOFF = -50.0
+    # 券種ゲートもステージゲートと同じ閾値を踏襲する。実績収支率は少数サンプルでは
+    # ブレが大きいため、0%(単純な黒字/赤字の境目)ではなく-50%を基準にすることで、
+    # 健全な券種が偶然の下振れだけで頻繁に出入りしないようにしている。
+    BET_TYPE_EXPECTANCY_CUTOFF = -50.0
 
     # ライン構成を買い目確率に反映
     line_map, line_boost = _line_map_from_race(race)
@@ -458,6 +475,15 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                     gate_reason = (
                         f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
                         f"{st['n']}件)"
+                    )
+            # 不調券種を除外(全期間の実績収支率ベース。ステージゲートとは独立で、
+            # どちらか一方に該当すれば見送りになる)。
+            if gate_reason is None and o.bet_type in bet_type_exp_map:
+                bt_exp = bet_type_exp_map[o.bet_type]
+                if bt_exp["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF:
+                    gate_reason = (
+                        f"不調券種除外({o.bet_type}:実績{bt_exp['expectancy_pct']}%/"
+                        f"{bt_exp['n']}件)"
                     )
 
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
@@ -696,6 +722,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "performance_gates_applied": apply_gates,
         "performance_gated_count": len(performance_gated_keys),
         "stage_expectancy_used": stage_exp_map.get(race.race_stage) if race.race_stage else None,
+        "bet_type_expectancy_used": bet_type_exp_map,
         "garami_free": req.avoid_garami,
         "odds_safety_margins_used_pct": odds_safety_margins if req.avoid_garami else {},
         "total_expected_profit": round(total_expected_profit, 0),
