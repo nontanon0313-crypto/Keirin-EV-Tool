@@ -1130,7 +1130,7 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
 
         return groups
 
-    def _purchase_funnel(records):
+    def _purchase_funnel(records, bet_type):
         """
         レース単位で評価する。
 
@@ -1142,6 +1142,21 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
 
         同着等で複数的中候補がある場合も、
         1つでも購入されていればsurvivedとする。
+
+        捕捉できなかったレースについては、さらに2つに分離する
+        (のんの指摘: 「投票が無い組み合わせはオッズ自体が存在しない。それは
+        投票無しとして扱えばいい。box範囲の問題と一緒くたにしないでほしい」)。
+
+        odds_unavailable:
+            そのレース・その券種で、的中する買い目のオッズが
+            oddspark側にそもそも1件も存在しなかった(=誰も投票していない
+            組み合わせだった)。box範囲を広げても拾いようがない、
+            構造上どうしようもないケース。
+
+        candidate_generation_miss:
+            オッズは存在していたのに、AIの候補生成(box/展開)が
+            その的中買い目を候補に含めていなかった。これが本当に
+            改善すべき「候補生成の問題」。
         """
         by_race = {}
 
@@ -1152,11 +1167,13 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
         captured_groups = 0
         winner_purchased_groups = 0
         winner_lost_groups = 0
+        odds_unavailable_groups = 0
+        candidate_generation_miss_groups = 0
 
         reason_counts = {}
         category_counts = {}
 
-        for _race_id, group in by_race.items():
+        for race_id, group in by_race.items():
             if not group:
                 continue
 
@@ -1165,6 +1182,27 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             winners = [r for r in group if r.won]
 
             if not winners:
+                # 候補(購入+見送り)の中に的中買い目が無かったレース。
+                # ここでさらに、実際にオッズが存在していたのに候補から漏れたのか、
+                # そもそもオッズ自体が存在しなかったのかを確認する。
+                race = db.get(models.Race, race_id)
+                odds_had_winner = False
+                if race and race.actual_result:
+                    parsed_result = calc.parse_actual_result(race.actual_result)
+                    odds_rows_for_race = (
+                        db.query(models.Odds)
+                        .filter(models.Odds.race_id == race_id)
+                        .filter(models.Odds.bet_type == bet_type)
+                        .all()
+                    )
+                    odds_had_winner = any(
+                        calc.judge_purchase_result(bet_type, o.combination, parsed_result)
+                        for o in odds_rows_for_race
+                    )
+                if odds_had_winner:
+                    candidate_generation_miss_groups += 1
+                else:
+                    odds_unavailable_groups += 1
                 continue
 
             captured_groups += 1
@@ -1194,6 +1232,8 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             for category in categories:
                 category_counts[category] = category_counts.get(category, 0) + 1
 
+        not_captured_groups = odds_unavailable_groups + candidate_generation_miss_groups
+
         return {
             "n_groups": n_groups,
             "captured_winner_groups": captured_groups,
@@ -1207,6 +1247,23 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
                 winner_lost_groups,
                 captured_groups,
             ),
+            "not_captured_breakdown": {
+                "odds_unavailable_groups": odds_unavailable_groups,
+                "odds_unavailable_note": (
+                    "誰も投票しておらずoddspark側にオッズ自体が無かった組み合わせ。"
+                    "投票が無い=買いようがなかったケースなので、候補生成ロジックの"
+                    "問題ではない(改善不要・構造上の上限)。"
+                ),
+                "candidate_generation_miss_groups": candidate_generation_miss_groups,
+                "candidate_generation_miss_note": (
+                    "オッズは存在していたのに、AIの候補生成(box範囲・展開)が"
+                    "この的中買い目を候補に含めていなかった。ここが本当の改善対象。"
+                ),
+                "candidate_generation_miss_rate_pct": _pct(
+                    candidate_generation_miss_groups,
+                    not_captured_groups,
+                ),
+            },
             "winner_filter_loss_breakdown_by_category": dict(
                 sorted(
                     category_counts.items(),
@@ -1262,6 +1319,16 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
                 f"winner_captured_rate={capture_rate}%"
             )
 
+        not_captured = funnel.get("not_captured_breakdown", {}) or {}
+        cgm_rate = not_captured.get("candidate_generation_miss_rate_pct")
+        odds_unavailable_n = not_captured.get("odds_unavailable_groups")
+        cgm_n = not_captured.get("candidate_generation_miss_groups")
+        if cgm_rate is not None:
+            evidence.append(
+                f"捕捉できなかった中でオッズはあったのに候補から漏れた割合="
+                f"{cgm_rate}%(候補生成漏れ{cgm_n}件/オッズ自体無し{odds_unavailable_n}件)"
+            )
+
         # 2. ランキング
         if top1 is not None:
             evidence.append(f"Top1={top1}%")
@@ -1299,12 +1366,18 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             and top3 is not None
             and capture_rate < 50
             and top3 >= 70
+            and (cgm_rate is None or cgm_rate >= 30)
         ):
             primary_issue = "候補生成・候補範囲"
             secondary_issue = "候補内ランキングは相対的に保たれている可能性"
             recommended_action = (
                 "候補数、box範囲、展開候補を見直してください。"
                 "確率補正だけでは候補外の的中買い目は救えません。"
+                "ただしnot_captured_breakdownを見て、捕捉できなかった原因の"
+                "大半が'オッズ自体無し'(誰も投票していない組み合わせ)なら、"
+                "それは構造上の上限であり候補生成ロジックの問題ではありません。"
+                "'候補生成漏れ'(オッズはあったのに候補から外れた)の比率が"
+                "高い場合のみ、box/展開ロジックの改善に着手してください。"
             )
 
         elif (
@@ -1462,6 +1535,7 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
 
         funnel = _purchase_funnel(
             bt_records,
+            bt,
         )
 
         # 主診断は実際の購入判断に使われるcalibrated側を優先。
