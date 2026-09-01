@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import Optional
+from datetime import datetime
 
 from ..database import get_db
 from .. import models, schemas
@@ -482,7 +483,7 @@ def source_weights(db: Session = Depends(get_db)):
 
 
 @router.get("/investment-readiness")
-def investment_readiness(db: Session = Depends(get_db)):
+def investment_readiness(since: Optional[str] = None, db: Session = Depends(get_db)):
     """
     「実資金を投資してよいか」を、具体的な数値基準で自動判定する
     (のんの要望により追加)。
@@ -491,10 +492,19 @@ def investment_readiness(db: Session = Depends(get_db)):
     2. 予想と実績のズレが統計的に有意でないか(偶然の範囲に収まっているか)
     3. 実績収支率が黒字か、レース単位でも安定してプラスが多いか
     4. 実績の勝率・オッズで運用した場合、破産確率が十分低いか
+
+    sinceクエリパラメータ(ISO日時、または'calibration_switch'ショートカット)を
+    指定すると、その日時以降に作成された購入だけで判定する
+    (のんの要望により追加: 補正係数の切り替え前の古い判断が混ざると、
+    切り替えの効果が全期間の数字に埋もれて見えなくなるため)。
     """
-    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    since_dt = _parse_since_param(since)
+    purchases_query = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt:
+        purchases_query = purchases_query.filter(models.Purchase.created_at >= since_dt)
+    purchases = purchases_query.all()
     if not purchases:
-        return {"ready": False, "message": "まだ確定した購入履歴がありません。"}
+        return {"ready": False, "message": "まだ確定した購入履歴がありません。", "since": since, "since_resolved": since_dt.isoformat() if since_dt else None}
 
     n_bets = len(purchases)
     race_ids = sorted({p.race_id for p in purchases})
@@ -564,6 +574,8 @@ def investment_readiness(db: Session = Depends(get_db)):
         "checks": checks,
         "n_bets": n_bets,
         "n_races": n_races,
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
     }
 
 
@@ -1013,6 +1025,28 @@ def calibration_compare(db: Session = Depends(get_db)):
 
 TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 
+# 2026-09-01: 補正係数をPurchase/SkippedBetベース(偏りあり)からretroactiveベース
+# (偏り無し)へ切り替えた日時。それより前の購入は古い(過剰圧縮された)補正で
+# 判断されたものなので、「切り替え後の成果だけを見たい」時の基準点として使う
+# (のんの要望により追加: 全期間の集計だと過去の負債が混ざって、今回の修正が
+# 効いているかどうか見えにくいため)。
+CALIBRATION_SWITCH_AT = datetime(2026, 9, 1, 0, 0, 0)
+
+
+def _parse_since_param(since: Optional[str]) -> Optional[datetime]:
+    """
+    'calibration_switch' というショートカットか、ISO日時文字列を受け取る。
+    不正な値の場合はNone(絞り込み無し=全期間)を返す。
+    """
+    if not since:
+        return None
+    if since == "calibration_switch":
+        return CALIBRATION_SWITCH_AT
+    try:
+        return datetime.fromisoformat(since)
+    except ValueError:
+        return None
+
 
 # app/routers/ev.pyで実際に生成されるSkippedBet.reasonの文言パターン。
 # 「運用ゲート」= 券種・ステージ単位で機械的に見送りにしている仕組み(サンプル不足・
@@ -1251,7 +1285,7 @@ def calibration_factors_compare(db: Session = Depends(get_db)):
 
 
 @router.get("/bet-type-diagnostics")
-def bet_type_diagnostics(db: Session = Depends(get_db)):
+def bet_type_diagnostics(since: Optional[str] = None, db: Session = Depends(get_db)):
     """
     券種別に、結果が悪い原因を次の段階へ分解して診断する。
 
@@ -1272,20 +1306,29 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
 
     PurchaseとSkippedBetの両方を対象にする。
     DBスキーマ変更は不要。
+
+    sinceクエリパラメータ(ISO日時、または'calibration_switch'ショートカット)を
+    指定すると、その日時以降に作成された購入・見送りだけで診断する
+    (investment-readinessと同じ理由で追加)。
     """
-    purchases = (
+    since_dt = _parse_since_param(since)
+
+    purchases_q = (
         db.query(models.Purchase)
         .filter(models.Purchase.result != "pending")
         .filter(models.Purchase.bet_type.in_(TARGET_BET_TYPES))
-        .all()
     )
-
-    skipped = (
+    skipped_q = (
         db.query(models.SkippedBet)
         .filter(models.SkippedBet.actual_result.isnot(None))
         .filter(models.SkippedBet.bet_type.in_(TARGET_BET_TYPES))
-        .all()
     )
+    if since_dt:
+        purchases_q = purchases_q.filter(models.Purchase.created_at >= since_dt)
+        skipped_q = skipped_q.filter(models.SkippedBet.created_at >= since_dt)
+
+    purchases = purchases_q.all()
+    skipped = skipped_q.all()
 
     class Rec:
         __slots__ = (
@@ -1910,6 +1953,8 @@ def bet_type_diagnostics(db: Session = Depends(get_db)):
             "rawとcalibratedでBrierや順位指標を比較し、確率尺度の改善と"
             "識別能力の改善を混同しないでください。"
         ),
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
     }
 
 
