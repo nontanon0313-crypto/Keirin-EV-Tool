@@ -69,6 +69,12 @@ def get_calibration_factors(db: Session) -> dict:
     見送った買い目も「予想確率 vs 実際の結果」というデータとしては全く同じ形なので、
     的中検証・自動補正には活用できる(のんの指摘により修正。投票対象からの除外と、
     集計・検証対象からの除外は別問題)。
+
+    【既知の限界(のんの指摘により判明)】
+    このrecordsは過去にSkippedBetとして「実際に記録された」ものに限られる。
+    以前は期待値マイナスの組み合わせを記録しない仕様だったため、この係数は
+    偏ったサンプルで学習されている可能性がある。偏りの無い検証は
+    get_calibration_factors_retroactive()を参照。
     """
     purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
     skipped = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None)).all()
@@ -86,6 +92,59 @@ def get_calibration_factors(db: Session) -> dict:
         prob = s.win_prob_raw if getattr(s, "win_prob_raw", None) is not None else s.win_prob_estimated
         if prob is not None:
             records.append((prob, s.actual_result == "win", "skipped", s.bet_type))
+
+    return _compute_calibration_factors_from_records(records)
+
+
+def get_calibration_factors_retroactive(db: Session) -> dict:
+    """
+    Purchase/SkippedBetの記録(過去の運用ロジックの挙動に依存し、偏りがあり得る)に
+    頼らず、確定済みレース全件・オッズが存在する組み合わせを毎回全て使って
+    現在の確率モデルで再計算し、同じ形式で補正係数を返す。
+
+    のんの指摘により追加: 以前は期待値マイナスの組み合わせを検証記録に残して
+    いなかったため、補正係数がその偏ったサンプルで学習・評価されており、
+    「補正が効いているように見えていたのは自己参照的な見かけだけだった」
+    ことが判明した。この関数はその偏りを受けない、独立した検証経路。
+
+    本番の投票ロジック(app/routers/ev.py)はまだ使用していない(比較専用)。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    records = []
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs:
+            continue
+        odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race.id).all()
+        if not odds_rows:
+            continue
+        parsed_result = calc.parse_actual_result(race.actual_result)
+        line_map, line_boost = calc.line_map_from_race(race)
+        for o in odds_rows:
+            if o.bet_type not in TARGET_BET_TYPES:
+                continue
+            try:
+                cars = tuple(int(x) for x in o.combination.split("-"))
+            except (ValueError, AttributeError):
+                continue
+            prob_raw = calc.estimate_prob_for_bet(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
+            won = calc.judge_purchase_result(o.bet_type, o.combination, parsed_result)
+            records.append((prob_raw, won, "retroactive", o.bet_type))
+
+    return _compute_calibration_factors_from_records(records)
+
+
+def _compute_calibration_factors_from_records(records: list) -> dict:
+    """
+    get_calibration_factors / get_calibration_factors_retroactiveの共通ロジック。
+    records: [(prob, won, src, bet_type), ...]
+    """
 
     # --- 全体補正係数(想定的中率を実績的中率に寄せる本体) ---
     overall_info = None
@@ -1085,6 +1144,88 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
             "それはオッズが存在する組み合わせの中でAIの候補生成が漏らしている"
             "ことを意味します(このエンドポイントはオッズが存在する組み合わせを"
             "全て評価しているため、過去の記録漏れの影響を受けません)。"
+        ),
+    }
+
+
+def _summarize_bucket(bucket: dict) -> dict:
+    if not bucket:
+        return {}
+    return {
+        "sample_count": bucket.get("sample_count"),
+        "actual_win_rate_pct": bucket.get("actual_win_rate_pct"),
+        "predicted_avg_prob_pct": bucket.get("predicted_avg_prob_pct"),
+        "deviation_pct": bucket.get("deviation_pct"),
+        "calibration_factor": bucket.get("calibration_factor"),
+    }
+
+
+@router.get("/calibration-factors-compare")
+def calibration_factors_compare(db: Session = Depends(get_db)):
+    """
+    現行のキャリブレーション係数(Purchase/SkippedBetの記録ベース。偏りの
+    可能性あり)と、遡及検証ベース(オッズが存在する組み合わせを毎回全て使う、
+    偏りの無い方法)の係数を並べて比較する。
+
+    のんの指摘により追加: 「正しく修正し、キャリブレーションのやり直しを
+    行えばいい」という方針に沿って、まず新旧の係数を比較できる形で出す
+    (この時点では投票ロジックは一切変更しない)。比較結果を見て問題なければ、
+    実際に使う係数を切り替える。
+    """
+    current = get_calibration_factors(db)
+    retroactive = get_calibration_factors_retroactive(db)
+
+    bucket_names = [name for _lo, _hi, name, _mid in calc.PROB_BUCKETS]
+
+    overall_compare = {
+        "current": _summarize_bucket(current.get("overall") or {}),
+        "retroactive": _summarize_bucket(retroactive.get("overall") or {}),
+    }
+
+    by_bucket_compare = {}
+    for name in bucket_names:
+        by_bucket_compare[name] = {
+            "current": _summarize_bucket(current.get(name) or {}),
+            "retroactive": _summarize_bucket(retroactive.get(name) or {}),
+        }
+
+    by_bet_type_compare = {}
+    all_bts = set((current.get("by_bet_type") or {}).keys()) | set((retroactive.get("by_bet_type") or {}).keys())
+    for bt in sorted(all_bts):
+        by_bet_type_compare[bt] = {
+            "current": _summarize_bucket((current.get("by_bet_type") or {}).get(bt) or {}),
+            "retroactive": _summarize_bucket((retroactive.get("by_bet_type") or {}).get(bt) or {}),
+        }
+
+    by_bet_type_bucket_compare = {}
+    cur_cross = current.get("by_bet_type_bucket") or {}
+    retro_cross = retroactive.get("by_bet_type_bucket") or {}
+    all_cross_bts = set(cur_cross.keys()) | set(retro_cross.keys())
+    for bt in sorted(all_cross_bts):
+        cell_compare = {}
+        cur_cells = cur_cross.get(bt) or {}
+        retro_cells = retro_cross.get(bt) or {}
+        for name in bucket_names:
+            if name in cur_cells or name in retro_cells:
+                cell_compare[name] = {
+                    "current": _summarize_bucket(cur_cells.get(name) or {}),
+                    "retroactive": _summarize_bucket(retro_cells.get(name) or {}),
+                }
+        if cell_compare:
+            by_bet_type_bucket_compare[bt] = cell_compare
+
+    return {
+        "overall": overall_compare,
+        "by_bucket": by_bucket_compare,
+        "by_bet_type": by_bet_type_compare,
+        "by_bet_type_bucket": by_bet_type_bucket_compare,
+        "message": (
+            "currentは今まで実際の投票判断に使われてきた係数(Purchase/SkippedBet"
+            "の記録ベース、偏りの可能性あり)。retroactiveはオッズが存在する組み合わせを"
+            "毎回全て使う、偏りの無い方法で計算し直した係数。両者のdeviation_pctや"
+            "calibration_factorが大きくずれている場合、現行の係数は偏ったサンプルで"
+            "学習されていた可能性が高い。この比較を見て問題なければ、"
+            "ev.pyが呼び出す関数をget_calibration_factors_retroactiveに切り替える。"
         ),
     }
 
