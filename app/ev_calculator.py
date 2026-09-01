@@ -586,6 +586,90 @@ def brier_score(records: list) -> float:
     return total / n
 
 
+def build_win_probs_from_entries(entries: list) -> dict:
+    """
+    app/routers/ev.pyの_build_win_probsと同じロジック(遡及検証用に複製)。
+
+    のんの要望により追加: 過去の確定済みレースを、記録済みのPurchase/SkippedBet
+    に頼らず、現在の確率モデルでその場で再計算して検証できるようにするため。
+    本番の投票ロジック(ev.py)は一切変更せず、検証専用の複製として持つ
+    (投票ロジックへの意図しない影響を避けるため、あえて共通化しない)。
+    """
+    probs = {}
+    for e in entries:
+        if e.blended_win_prob is not None:
+            probs[e.car_number] = e.blended_win_prob
+    total = sum(probs.values())
+    if total > 0:
+        probs = {k: v / total for k, v in probs.items()}
+    return probs
+
+
+def line_map_from_race(race) -> tuple:
+    """app/routers/ev.pyの_line_map_from_raceと同じロジック(遡及検証用に複製)。"""
+    line_map = None
+    line_boost = 1.2
+    if race and race.lines_data:
+        line_map = {}
+        for idx, line in enumerate(race.lines_data):
+            for car in line:
+                try:
+                    line_map[int(car)] = idx
+                except (TypeError, ValueError):
+                    pass
+        if not line_map:
+            line_map = None
+    return line_map, line_boost
+
+
+def estimate_prob_for_bet(win_probs: dict, bet_type: str, cars: tuple, line_map: dict = None, line_boost: float = 1.0) -> float:
+    """app/routers/ev.pyの_estimate_probと同じロジック(遡及検証用に複製)。"""
+    if bet_type == "ワイド":
+        return wide_prob(win_probs, cars[0], cars[1], line_map, line_boost)
+    ordered = bet_type in ORDERED_BET_TYPES
+    return combination_prob(win_probs, cars, ordered, line_map, line_boost)
+
+
+def apply_calibration_to_prob(est_prob: float, calibration_factors: dict, bet_type: str = None) -> float:
+    """
+    app/routers/ev.pyの_apply_calibrationと完全に同じ補正ロジック(遡及検証用に複製)。
+    表示用の付随情報(low_prob_warning等)は遡及検証では不要なため、
+    補正後確率のみを返す簡略版。ロジック自体は一切変えていない。
+    """
+    bucket_name, _ = get_prob_bucket(est_prob)
+    info = calibration_factors.get(bucket_name)
+    overall = calibration_factors.get("overall")
+
+    MIN_CROSS_SAMPLE = 30
+    cross_map = calibration_factors.get("by_bet_type_bucket") or {}
+    cross_info = (cross_map.get(bet_type) or {}).get(bucket_name) if bet_type else None
+    cross_used = False
+
+    factor = 1.0
+    if cross_info and cross_info.get("sample_count", 0) >= MIN_CROSS_SAMPLE and cross_info.get("calibration_factor") is not None:
+        factor = cross_info["calibration_factor"]
+        cross_used = True
+    elif info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
+        factor = info["calibration_factor"]
+    elif overall and overall.get("calibration_factor") is not None:
+        factor = overall["calibration_factor"]
+
+    if not cross_used:
+        by_bt = calibration_factors.get("by_bet_type") or {}
+        if bet_type and bet_type in by_bt and overall and overall.get("calibration_factor"):
+            bt_f = by_bt[bet_type]["calibration_factor"]
+            ov_f = overall["calibration_factor"]
+            if ov_f > 1e-9:
+                residual = bt_f / ov_f
+                residual = 1.0 + 0.5 * (residual - 1.0)
+                factor *= residual
+
+    factor = max(0.25, min(2.0, factor))
+    if abs(factor - 1.0) < 1e-9:
+        return est_prob
+    return max(0.0, min(1.0, est_prob * factor))
+
+
 def ranking_diagnostics(groups: dict, top_ns=(1, 3, 5, 10)) -> dict:
     """
     「予想精度・識別能力(B)」を、候補捕捉と候補内ランキングに分離して測定する。

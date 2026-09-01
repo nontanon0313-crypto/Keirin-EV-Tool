@@ -964,6 +964,131 @@ def _categorize_skip_reason(reason: str) -> str:
     return "その他(原文のまま)"
 
 
+@router.get("/retroactive-capture-diagnostics")
+def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
+    """
+    過去の確定済みレースを、Purchase/SkippedBetの記録に一切頼らず、
+    現在の確率モデル(ev.pyと同じロジックの複製、app/ev_calculator.py側)で
+    その場で再計算して検証する。
+
+    のんの要望により追加: 新規データ収集を待たなくても、既にDBにある
+    Race・Entry・Oddsの過去データに対して「今のモデルなら、実際に勝った
+    組み合わせを何位に予想できていたか」をすぐ確認できるようにするため。
+
+    bet-type-diagnosticsとの違い:
+    - bet-type-diagnosticsはPurchase/SkippedBetの記録(=過去の運用ロジックの
+      挙動)を検証する。記録漏れ(過去のバグ等)があればその影響を受ける。
+    - こちらはオッズが存在する組み合わせを毎回全て再評価するため、
+      過去の記録方法に問題があっても影響を受けない、より純粋な検証。
+
+    本番の投票ロジック(app/routers/ev.py)は一切呼び出さず、変更もしない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    calibration_factors = get_calibration_factors(db)
+
+    # (race_id, bet_type) -> [(combination, prob_raw, prob_cal, won), ...]
+    groups_raw_by_type = {}
+    groups_cal_by_type = {}
+    flat_records_by_type = {}  # brier_score計算用
+
+    races_evaluated = 0
+    races_skipped_no_win_probs = 0
+    races_skipped_no_odds = 0
+
+    for race in races:
+        entries = race.entries
+        win_probs = calc.build_win_probs_from_entries(entries)
+        if not win_probs:
+            races_skipped_no_win_probs += 1
+            continue
+
+        odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race.id).all()
+        if not odds_rows:
+            races_skipped_no_odds += 1
+            continue
+
+        parsed_result = calc.parse_actual_result(race.actual_result)
+        line_map, line_boost = calc.line_map_from_race(race)
+
+        races_evaluated += 1
+
+        for o in odds_rows:
+            if o.bet_type not in TARGET_BET_TYPES:
+                continue
+            try:
+                cars = tuple(int(x) for x in o.combination.split("-"))
+            except (ValueError, AttributeError):
+                continue
+
+            prob_raw = calc.estimate_prob_for_bet(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
+            prob_cal = calc.apply_calibration_to_prob(prob_raw, calibration_factors, bet_type=o.bet_type)
+            won = calc.judge_purchase_result(o.bet_type, o.combination, parsed_result)
+
+            key = (race.id, o.bet_type)
+            groups_raw_by_type.setdefault(o.bet_type, {}).setdefault(key, []).append((o.combination, prob_raw, won))
+            groups_cal_by_type.setdefault(o.bet_type, {}).setdefault(key, []).append((o.combination, prob_cal, won))
+            flat_records_by_type.setdefault(o.bet_type, []).append((prob_raw, prob_cal, won))
+
+    result = {}
+    for bt in TARGET_BET_TYPES:
+        flat = flat_records_by_type.get(bt, [])
+        if not flat:
+            result[bt] = {"sample_count": 0}
+            continue
+
+        brier_raw = calc.brier_score([(r[0], r[2]) for r in flat])
+        brier_cal = calc.brier_score([(r[1], r[2]) for r in flat])
+        actual_win_rate = sum(1 for r in flat if r[2]) / len(flat)
+        avg_prob_raw = sum(r[0] for r in flat) / len(flat)
+        avg_prob_cal = sum(r[1] for r in flat) / len(flat)
+
+        ranking_raw = calc.ranking_diagnostics(groups_raw_by_type.get(bt, {}))
+        ranking_cal = calc.ranking_diagnostics(groups_cal_by_type.get(bt, {}))
+
+        result[bt] = {
+            "sample_count": len(flat),
+            "n_races": len(groups_raw_by_type.get(bt, {})),
+            "actual_win_rate_pct": round(actual_win_rate * 100, 2),
+            "predicted_avg_prob_pct": {
+                "raw": round(avg_prob_raw * 100, 2),
+                "calibrated": round(avg_prob_cal * 100, 2),
+            },
+            "deviation_pct": {
+                "raw": round((actual_win_rate - avg_prob_raw) * 100, 2),
+                "calibrated": round((actual_win_rate - avg_prob_cal) * 100, 2),
+            },
+            "brier_score": {
+                "raw": round(brier_raw, 4) if brier_raw is not None else None,
+                "calibrated": round(brier_cal, 4) if brier_cal is not None else None,
+            },
+            "ranking_diagnostics": {
+                "raw": ranking_raw,
+                "calibrated": ranking_cal,
+            },
+        }
+
+    return {
+        "races_evaluated": races_evaluated,
+        "races_skipped_no_win_probs": races_skipped_no_win_probs,
+        "races_skipped_no_odds": races_skipped_no_odds,
+        "by_bet_type": result,
+        "message": (
+            "これは記録(Purchase/SkippedBet)に一切頼らず、オッズが存在する"
+            "組み合わせを毎回全て使って現在のモデルで再計算した結果です。"
+            "ranking_diagnosticsのwinner_captured_rate_pctが低い場合、"
+            "それはオッズが存在する組み合わせの中でAIの候補生成が漏らしている"
+            "ことを意味します(このエンドポイントはオッズが存在する組み合わせを"
+            "全て評価しているため、過去の記録漏れの影響を受けません)。"
+        ),
+    }
+
+
 @router.get("/bet-type-diagnostics")
 def bet_type_diagnostics(db: Session = Depends(get_db)):
     """
