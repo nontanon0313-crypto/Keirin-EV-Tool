@@ -185,7 +185,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     # 既存の未反映ev_resultsは作り直す
     db.query(models.EvResult).filter(models.EvResult.race_id == race_id).delete()
 
-    calibration_factors = purchases_router.get_calibration_factors(db)
+    calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
 
     created = []
     low_prob_warnings = {}
@@ -312,7 +312,7 @@ def threshold_table(
         raise HTTPException(400, "選手の勝率データが揃っていません")
 
     car_numbers = list(win_probs.keys())
-    calibration_factors = purchases_router.get_calibration_factors(db)
+    calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
 
     results = []
     for bet_type, arity in calc.BET_TYPE_ARITY.items():
@@ -394,7 +394,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 買い示唆に至ったかどうかに関わらず、評価した組み合わせを全て保持しておく
     # (下で見送り記録に使うため)。
     all_evaluated = []
-    calibration_factors = purchases_router.get_calibration_factors(db)
+    calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
 
     # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
     # (3連複・2車複・ワイド)より難しく、レースのステージ(S級決勝等)によっては

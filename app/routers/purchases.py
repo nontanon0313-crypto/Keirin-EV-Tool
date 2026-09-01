@@ -96,7 +96,13 @@ def get_calibration_factors(db: Session) -> dict:
     return _compute_calibration_factors_from_records(records)
 
 
-def get_calibration_factors_retroactive(db: Session) -> dict:
+import time as _time
+
+_retroactive_calibration_cache = {"computed_at": 0.0, "value": None}
+RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS = 15 * 60  # 15分
+
+
+def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> dict:
     """
     Purchase/SkippedBetの記録(過去の運用ロジックの挙動に依存し、偏りがあり得る)に
     頼らず、確定済みレース全件・オッズが存在する組み合わせを毎回全て使って
@@ -107,8 +113,19 @@ def get_calibration_factors_retroactive(db: Session) -> dict:
     「補正が効いているように見えていたのは自己参照的な見かけだけだった」
     ことが判明した。この関数はその偏りを受けない、独立した検証経路。
 
-    本番の投票ロジック(app/routers/ev.py)はまだ使用していない(比較専用)。
+    2026-09-01: 比較の結果、この方式の方が明らかに実績に近いことが確認できたため、
+    app/routers/ev.pyの本番投票ロジックからも使用するようになった。
+    ただし確定済みレース全件・オッズ全件を毎回スキャンする重い処理のため、
+    日次パイプラインで1レースごとに呼ばれても再計算しすぎないよう、
+    プロセス内メモリに15分キャッシュする(use_cache=Falseで強制再計算可能。
+    比較エンドポイントは常に最新を見せたいのでキャッシュを使わない)。
     """
+    now = _time.time()
+    if use_cache:
+        cached = _retroactive_calibration_cache["value"]
+        if cached is not None and (now - _retroactive_calibration_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
+            return cached
+
     races = (
         db.query(models.Race)
         .filter(models.Race.actual_result.isnot(None))
@@ -137,7 +154,10 @@ def get_calibration_factors_retroactive(db: Session) -> dict:
             won = calc.judge_purchase_result(o.bet_type, o.combination, parsed_result)
             records.append((prob_raw, won, "retroactive", o.bet_type))
 
-    return _compute_calibration_factors_from_records(records)
+    result = _compute_calibration_factors_from_records(records)
+    _retroactive_calibration_cache["value"] = result
+    _retroactive_calibration_cache["computed_at"] = now
+    return result
 
 
 def _compute_calibration_factors_from_records(records: list) -> dict:
@@ -1173,7 +1193,7 @@ def calibration_factors_compare(db: Session = Depends(get_db)):
     実際に使う係数を切り替える。
     """
     current = get_calibration_factors(db)
-    retroactive = get_calibration_factors_retroactive(db)
+    retroactive = get_calibration_factors_retroactive(db, use_cache=False)
 
     bucket_names = [name for _lo, _hi, name, _mid in calc.PROB_BUCKETS]
 
