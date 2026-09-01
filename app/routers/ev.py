@@ -537,13 +537,40 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 他に買い示唆があるレースでは、そもそも候補に入らなかった大穴帯等の組み合わせが
     # 記録から漏れていた。投票プラン自体の絞り込み(表示・購入対象)は変更せず、
     # 検証用データの収集だけを目的とした追加。
+    #
+    # 【重要な追加(のんの指摘により修正)】
+    # 従来は期待値(ev_pct)がマイナスの組み合わせを一律で検証対象から除外していた。
+    # しかしこれにより、「的中したがAIの計算では期待値マイナスだった買い目」が
+    # SkippedBetに一切記録されず、bet-type-diagnosticsの捕捉率診断で
+    # 「候補生成漏れ」として誤って計上される原因になっていた(実際にはAIが評価は
+    # していたのに、期待値マイナスという理由で記録だけ捨てていた)。
+    # かといって全件記録するとNeonの容量制限に再度当たるリスクが高いため、
+    # 券種ごとに推定確率(win_prob)が高い順の上位N件だけは、期待値がマイナスでも
+    # 検証用に残す。実際に勝つ組み合わせの大半は確率上位に来るはずなので、
+    # DB容量を抑えつつ検証の見落としを大きく減らせる。
+    NEGATIVE_EV_VERIFICATION_TOP_N = 10
+    negative_ev_by_type = {}
+    for e in all_evaluated:
+        if e["ev_pct"] <= 0:
+            negative_ev_by_type.setdefault(e["bet_type"], []).append(e)
+    negative_ev_keep_keys = set()
+    for bt, items in negative_ev_by_type.items():
+        top_items = sorted(items, key=lambda x: x["win_prob"], reverse=True)[:NEGATIVE_EV_VERIFICATION_TOP_N]
+        for item in top_items:
+            negative_ev_keep_keys.add((item["bet_type"], item["combination"]))
+
     recommended_keys = {(c["bet_type"], c["combination"]) for c in candidates}
     skipped_for_verification = []  # (candidate, reason) 後でSkippedBetとして記録する
     for e in all_evaluated:
-        if e["ev_pct"] <= 0:
-            continue  # 期待値マイナスは見送って当然のため検証対象にしない
+        if e["ev_pct"] <= 0 and (e["bet_type"], e["combination"]) not in negative_ev_keep_keys:
+            continue  # 期待値マイナス、かつ券種内の確率上位N件にも入らないものは検証対象にしない
         if (e["bet_type"], e["combination"]) not in recommended_keys:
-            if (e["bet_type"], e["combination"]) in stage_gated_keys:
+            if e["ev_pct"] <= 0:
+                skipped_for_verification.append((
+                    e,
+                    f"期待値マイナス(確率上位{NEGATIVE_EV_VERIFICATION_TOP_N}件のため検証用に記録)",
+                ))
+            elif (e["bet_type"], e["combination"]) in stage_gated_keys:
                 skipped_for_verification.append((
                     e,
                     f"このステージの検証データ不足({stage_sample_n}/{MIN_STAGE_SAMPLE_FOR_ORDER_BETS}件)のため着順指定の券種を見送り",
