@@ -119,7 +119,6 @@ def _is_failover_worthy(exc: BaseException) -> bool:
         "temporarily unavailable",
         "cannot acquire",
         "upgrade your plan",
-        "neon",
     )
     if any(k in msg for k in keywords):
         return True
@@ -161,13 +160,18 @@ def _ping(session_factory) -> None:
         db.close()
 
 
-def ensure_active_connection() -> None:
-    global engine, SessionLocal, _active_name
-    order = []
+
+def _preferred_order():
+    """DATABASE_PREFER に従った接続試行順。"""
     if PREFER == "fallback":
-        order = [n for n in ("fallback", "primary") if n in _engines]
-    else:
-        order = [n for n in ("primary", "fallback") if n in _engines]
+        return [n for n in ("fallback", "primary") if n in _engines]
+    return [n for n in ("primary", "fallback") if n in _engines]
+
+
+def ensure_active_connection() -> None:
+    """prefer 順で生きているDBを選び _active_name を更新する。"""
+    global engine, SessionLocal, _active_name
+    order = _preferred_order()
     if not order:
         return
 
@@ -187,45 +191,47 @@ def ensure_active_connection() -> None:
 
 
 def get_db():
+    """
+    リクエストごとに prefer 順で接続を試す。
+    以前は一度 fallback に落ちるとプロセス終了まで primary に戻らなかった。
+    Neon が一時停止→復帰したあとも prefer=primary なら primary を再試行する。
+    """
     if not _sessions:
         raise RuntimeError(
             "DATABASE_URL が未設定です。Render に DATABASE_URL "
             "(と必要なら DATABASE_URL_FALLBACK) を設定してください。"
         )
 
-    with _lock:
-        name = _active_name
-        factory = _sessions.get(name)
+    order = _preferred_order()
+    if not order:
+        raise RuntimeError("利用可能な DATABASE_URL がありません")
 
     db = None
-    try:
-        db = factory()
-        db.execute(text("SELECT 1"))
-    except Exception as e:
-        if db is not None:
-            try:
-                db.close()
-            except Exception:
-                pass
-            db = None
-        other = _other_name(name)
-        if other and _is_failover_worthy(e):
-            logger.warning("database error on %s (%s); trying %s", name, e, other)
-            if _switch_to(other):
+    last_err = None
+    for name in order:
+        try:
+            factory = _sessions[name]
+            candidate = factory()
+            candidate.execute(text("SELECT 1"))
+            _switch_to(name)
+            db = candidate
+            break
+        except Exception as e:
+            last_err = e
+            if db is not None:
                 try:
-                    db = _sessions[other]()
-                    db.execute(text("SELECT 1"))
+                    db.close()
                 except Exception:
-                    if db is not None:
-                        try:
-                            db.close()
-                        except Exception:
-                            pass
-                    raise
-            else:
-                raise
-        else:
-            raise
+                    pass
+                db = None
+            # prefer 先頭が失敗した場合のみ次へ。ログは警告に留める
+            logger.warning("database probe failed (%s): %s", name, e)
+            continue
+
+    if db is None:
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("database connection failed")
 
     try:
         yield db
