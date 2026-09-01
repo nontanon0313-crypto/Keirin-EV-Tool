@@ -501,7 +501,7 @@ def investment_readiness(since: Optional[str] = None, db: Session = Depends(get_
     since_dt = _parse_since_param(since)
     purchases_query = db.query(models.Purchase).filter(models.Purchase.result != "pending")
     if since_dt:
-        purchases_query = purchases_query.filter(models.Purchase.created_at >= since_dt)
+        purchases_query = purchases_query.filter(models.Purchase.purchased_at >= since_dt)
     purchases = purchases_query.all()
     if not purchases:
         return {"ready": False, "message": "まだ確定した購入履歴がありません。", "since": since, "since_resolved": since_dt.isoformat() if since_dt else None}
@@ -1324,7 +1324,7 @@ def bet_type_diagnostics(since: Optional[str] = None, db: Session = Depends(get_
         .filter(models.SkippedBet.bet_type.in_(TARGET_BET_TYPES))
     )
     if since_dt:
-        purchases_q = purchases_q.filter(models.Purchase.created_at >= since_dt)
+        purchases_q = purchases_q.filter(models.Purchase.purchased_at >= since_dt)
         skipped_q = skipped_q.filter(models.SkippedBet.created_at >= since_dt)
 
     purchases = purchases_q.all()
