@@ -43,7 +43,26 @@ $PY -u auto_fetch.py
 
 echo ""
 echo "--- 3/4 DB登録→予想→投票記録→結果確定 (${DATE} のJSONのみ) ---"
+set +e
 $PY run_full_pipeline.py --dir "$KEIRIN_DATA_DIR" --date "${DATE}" --concurrency 3
+PIPELINE_EXIT=$?
+set -e
+
+if [ "$PIPELINE_EXIT" -eq 2 ]; then
+  echo ""
+  echo "########################################################"
+  echo "# ⚠️  Gemini利用枠切れで ${DATE} の一部レースが未予想です"
+  echo "#  枠が回復してから、以下のコマンドで同じ日付を"
+  echo "#  もう一度実行してください(完了済み分は自動でスキップされます):"
+  echo "#"
+  echo "#  bash ~/Keirin-EV-Tool/scraper/run_day.sh ${DATE}"
+  echo "########################################################"
+  echo ""
+  exit 2
+elif [ "$PIPELINE_EXIT" -ne 0 ]; then
+  echo "run_full_pipeline.pyが異常終了しました(終了コード: ${PIPELINE_EXIT})" >&2
+  exit "$PIPELINE_EXIT"
+fi
 
 echo ""
 echo "--- 4/4 壊れた着順の修復(車番以外が入った結果) ---"
