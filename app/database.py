@@ -22,9 +22,19 @@ _sessions = {}
 
 
 def _normalize_url(url: str) -> str:
+    """接続URLを正規化する。channel_binding=require は psycopg2 で失敗しやすいため外す。"""
     url = (url or "").strip()
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
+    # SQLAlchemy+psycopg2 では channel_binding が原因で primary に繋がらない事例がある
+    if "channel_binding=" in url:
+        from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+        try:
+            parts = urlparse(url)
+            q = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() != "channel_binding"]
+            url = urlunparse(parts._replace(query=urlencode(q)))
+        except Exception:
+            url = url.replace("&channel_binding=require", "").replace("?channel_binding=require&", "?").replace("?channel_binding=require", "")
     return url
 
 
@@ -72,22 +82,45 @@ engine = _engines.get(_active_name)
 SessionLocal = _sessions.get(_active_name)
 
 
+def _host_of(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        return url.split("@", 1)[1].split("/", 1)[0]
+    except Exception:
+        return "(unknown)"
+
+
 def get_active_db_info() -> dict:
+    """稼働中DBの情報。primary が失敗している場合は primary_error に理由を入れる。"""
     with _lock:
-        url = PRIMARY_URL if _active_name == "primary" else FALLBACK_URL
-        host = ""
-        if url:
-            try:
-                host = url.split("@", 1)[1].split("/", 1)[0]
-            except Exception:
-                host = "(unknown)"
-        return {
-            "active": _active_name,
-            "host": host,
-            "has_primary": "primary" in _engines,
-            "has_fallback": "fallback" in _engines,
-            "prefer": PREFER,
-        }
+        active = _active_name
+        prefer = PREFER
+    primary_error = None
+    fallback_error = None
+    if "primary" in _sessions:
+        try:
+            _ping(_sessions["primary"])
+        except Exception as e:
+            primary_error = str(e)[:500]
+    if "fallback" in _sessions:
+        try:
+            _ping(_sessions["fallback"])
+        except Exception as e:
+            fallback_error = str(e)[:500]
+    return {
+        "active": active,
+        "host": _host_of(PRIMARY_URL if active == "primary" else FALLBACK_URL),
+        "primary_host": _host_of(PRIMARY_URL),
+        "fallback_host": _host_of(FALLBACK_URL),
+        "has_primary": "primary" in _engines,
+        "has_fallback": "fallback" in _engines,
+        "prefer": prefer,
+        "primary_ok": primary_error is None and "primary" in _sessions,
+        "fallback_ok": fallback_error is None and "fallback" in _sessions,
+        "primary_error": primary_error,
+        "fallback_error": fallback_error,
+    }
 
 
 def _is_failover_worthy(exc: BaseException) -> bool:
