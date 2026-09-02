@@ -134,6 +134,69 @@ def _select_portfolio(
     remaining = list(prepared)
     rejected_garami = 0
 
+    # ガラミ制約が無効の場合は、各候補の投票額を100円単位の重みとして扱い、
+    # 予算内・件数上限内で期待利益合計を最大化する。
+    if not avoid_garami:
+        unit = 100
+        cap_units = int(race_cap // unit)
+
+        # key=(使用予算単位, 件数)
+        # value=(期待利益合計, 選択indexタプル)
+        dp = {(0, 0): (0.0, ())}
+
+        for i, c in enumerate(prepared):
+            weight = int(c["_stake"] // unit)
+
+            if weight <= 0 or weight > cap_units:
+                continue
+
+            updates = dict(dp)
+
+            for (used, count), (profit, indexes) in dp.items():
+                if count >= limit:
+                    continue
+
+                new_used = used + weight
+                if new_used > cap_units:
+                    continue
+
+                key = (new_used, count + 1)
+                candidate_value = (
+                    profit + c["_value"],
+                    indexes + (i,),
+                )
+
+                current = updates.get(key)
+
+                if current is None or candidate_value[0] > current[0]:
+                    updates[key] = candidate_value
+
+            dp = updates
+
+        if dp:
+            _, selected_indexes = max(
+                dp.values(),
+                key=lambda x: x[0],
+            )
+            selected = [
+                prepared[i]
+                for i in selected_indexes
+            ]
+
+        total_stake = sum(
+            c["_stake"]
+            for c in selected
+        )
+
+        for c in selected:
+            for outcome in c["_winning"]:
+                payout[outcome] += (
+                    c["_stake"]
+                    * c["odds_value"]
+                )
+
+        return selected, payout, 0, len(prepared)
+
     def can_add(candidate):
         if not avoid_garami:
             return True
