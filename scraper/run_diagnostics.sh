@@ -120,6 +120,32 @@ if code == 200:
     print("meanings:", d.get("policy_meanings"))
 else:
     print(code, r.text[:500])
+
+print("=== 10. ワイド中心・的中率寄り戦略（仮想100円） ===")
+code, r = get("/purchases/diagnostics/stable-wide-strategies")
+if code == 200:
+    d = r.json()
+    aw = d.get("actual_wide_purchases") or {}
+    print(f"実購入ワイド: n={aw.get('bet_count')} ROI={aw.get('actual_roi_pct')} hit={aw.get('actual_hit_rate_pct')}")
+    print(f"tested={d.get('strategies_tested')} breakeven={d.get('strategies_meeting_breakeven')} top_k={d.get('top_k_per_race')}")
+    print("--- best ---")
+    for s in (d.get("best_strategies") or [])[:10]:
+        print(
+            f"  p[{s.get('min_prob')}-{s.get('max_prob')}) odds[{s.get('min_odds')}-{s.get('max_odds')}] "
+            f"minEV={s.get('min_ev_pct')} rank={s.get('rank')}: "
+            f"n={s.get('bet_count')} ROI={s.get('actual_roi_pct')} hit={s.get('actual_hit_rate_pct')} "
+            f"avg_o={s.get('avg_odds')} BE={s.get('meets_breakeven')}"
+        )
+    print("--- profitable only ---")
+    for s in (d.get("profitable_strategies") or [])[:10]:
+        print(
+            f"  p[{s.get('min_prob')}-{s.get('max_prob')}) odds≤{s.get('max_odds')} "
+            f"minEV={s.get('min_ev_pct')} rank={s.get('rank')}: "
+            f"ROI={s.get('actual_roi_pct')} hit={s.get('actual_hit_rate_pct')} n={s.get('bet_count')}"
+        )
+else:
+    print(code, r.text[:500])
 print("\n=== 完了 ===")
+
 
 PY

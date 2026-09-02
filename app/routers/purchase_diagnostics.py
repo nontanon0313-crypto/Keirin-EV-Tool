@@ -1366,6 +1366,186 @@ def diagnostics_race_plan_rank_compare(
 
 
 
+
+@router.get("/stable-wide-strategies")
+def diagnostics_stable_wide_strategies(
+    since: Optional[str] = Query("calibration_switch"),
+    top_k: int = Query(3, ge=1, le=10, description="1レースあたりの最大点数"),
+    db: Session = Depends(get_db),
+):
+    """
+    ワイド中心・的中率寄りの選び方で仮想ROIが100%を超えるかを測る。
+    各レースで条件を満たす候補だけを並べ、上位top_kを仮想100円。
+    本番閾値は変更しない（読み取り専用）。
+    """
+    since_dt = _since_dt(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    skips = _load_settled_skips(db, since_dt)
+
+    race_ids = {p.race_id for p in purchases} | {s.race_id for s in skips}
+    odds_map: Dict[Tuple[int, str, str], float] = {}
+    if race_ids:
+        for o in db.query(models.Odds).filter(models.Odds.race_id.in_(list(race_ids))).all():
+            if o.odds_value and o.odds_value > 0:
+                odds_map[(o.race_id, o.bet_type, o.combination)] = float(o.odds_value)
+
+    by_race: Dict[int, List[dict]] = defaultdict(list)
+    seen = set()
+
+    def add(race_id, bet_type, combination, prob, odds, won):
+        key = (race_id, bet_type, combination)
+        if key in seen or prob is None or odds is None or odds <= 0:
+            return
+        if bet_type != "ワイド":
+            return
+        seen.add(key)
+        ev = calc.calc_ev_pct(float(prob), float(odds), 0.0)
+        by_race[race_id].append({
+            "race_id": race_id,
+            "bet_type": bet_type,
+            "combination": combination,
+            "prob": float(prob),
+            "odds": float(odds),
+            "ev_pct": float(ev),
+            "won": bool(won),
+        })
+
+    for p in purchases:
+        odds = p.odds_at_purchase or odds_map.get((p.race_id, p.bet_type, p.combination))
+        add(p.race_id, p.bet_type, p.combination, p.win_prob_at_purchase, odds, p.result == "win")
+    for s in skips:
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        add(s.race_id, s.bet_type, s.combination, s.win_prob_estimated, odds, s.actual_result == "win")
+
+    # 戦略定義: (id, min_prob, max_prob, min_odds, max_odds, min_ev, rank_key)
+    import math
+    strategies = []
+
+    def rank_prob(c):
+        return (-c["prob"], c["odds"])
+
+    def rank_odds_asc(c):
+        return (c["odds"], -c["prob"])
+
+    def rank_ev(c):
+        return (-c["ev_pct"], -c["prob"])
+
+    def rank_prob_log_odds(c):
+        lo = math.log(c["odds"]) if c["odds"] > 1 else 0.0
+        return (-(c["prob"] * lo), -c["prob"])
+
+    # 本命寄りグリッド
+    for min_p, max_p, min_o, max_o, min_ev, rank_name, rank_fn in [
+        (0.15, 1.01, 1.0, 15.0, -100.0, "prob_desc", rank_prob),  # 高確率・低〜中オッズ（EV条件なし）
+        (0.15, 1.01, 1.0, 15.0, 0.0, "prob_desc", rank_prob),
+        (0.15, 1.01, 1.0, 15.0, 5.0, "prob_desc", rank_prob),
+        (0.10, 0.40, 1.0, 20.0, 0.0, "prob_desc", rank_prob),
+        (0.10, 0.40, 1.0, 20.0, 5.0, "prob_desc", rank_prob),
+        (0.15, 1.01, 1.0, 10.0, 0.0, "odds_asc", rank_odds_asc),
+        (0.15, 1.01, 1.0, 10.0, 5.0, "odds_asc", rank_odds_asc),
+        (0.20, 1.01, 1.0, 8.0, 0.0, "prob_desc", rank_prob),
+        (0.20, 1.01, 1.0, 8.0, 5.0, "prob_desc", rank_prob),
+        (0.15, 1.01, 1.0, 15.0, 5.0, "ev_desc", rank_ev),
+        (0.10, 1.01, 1.0, 25.0, 5.0, "prob_log_odds", rank_prob_log_odds),
+        # 参考: 現行に近い（ワイドのみ・EV順・緩い）
+        (0.0, 1.01, 1.0, 9999.0, 5.0, "ev_desc", rank_ev),
+        (0.05, 1.01, 1.0, 9999.0, 5.0, "ev_desc", rank_ev),
+    ]:
+        strategies.append({
+            "min_prob": min_p,
+            "max_prob": max_p,
+            "min_odds": min_o,
+            "max_odds": max_o,
+            "min_ev_pct": min_ev,
+            "rank": rank_name,
+            "rank_fn": rank_fn,
+        })
+
+    def run(st):
+        picked = []
+        races_used = 0
+        for rid, cands in by_race.items():
+            pool = []
+            for c in cands:
+                if not (st["min_prob"] <= c["prob"] < st["max_prob"]):
+                    continue
+                if not (st["min_odds"] <= c["odds"] <= st["max_odds"]):
+                    continue
+                if c["ev_pct"] < st["min_ev_pct"]:
+                    continue
+                pool.append(c)
+            if not pool:
+                continue
+            races_used += 1
+            ranked = sorted(pool, key=st["rank_fn"])
+            for c in ranked[:top_k]:
+                picked.append({
+                    **c,
+                    "stake": 100.0,
+                    "payout": 100.0 * c["odds"] if c["won"] else 0.0,
+                })
+        if not picked:
+            return None
+        stake = sum(x["stake"] for x in picked)
+        payout = sum(x["payout"] for x in picked)
+        hits = sum(1 for x in picked if x["won"])
+        roi = 100.0 * payout / stake if stake > 0 else None
+        return {
+            "min_prob": st["min_prob"],
+            "max_prob": st["max_prob"],
+            "min_odds": st["min_odds"],
+            "max_odds": st["max_odds"],
+            "min_ev_pct": st["min_ev_pct"],
+            "rank": st["rank"],
+            "bet_count": len(picked),
+            "race_count": races_used,
+            "hit_count": hits,
+            "actual_hit_rate_pct": round(100.0 * hits / len(picked), 4),
+            "actual_roi_pct": round(roi, 4) if roi is not None else None,
+            "avg_odds": round(sum(x["odds"] for x in picked) / len(picked), 4),
+            "avg_prob": round(sum(x["prob"] for x in picked) / len(picked), 4),
+            "avg_ev_pct": round(sum(x["ev_pct"] for x in picked) / len(picked), 4),
+            "meets_breakeven": bool(roi is not None and roi >= 100.0),
+        }
+
+    results = []
+    for st in strategies:
+        r = run(st)
+        if r:
+            results.append(r)
+
+    results_sorted = sorted(
+        results,
+        key=lambda x: (x.get("meets_breakeven") is True, x.get("actual_roi_pct") or 0),
+        reverse=True,
+    )
+    profitable = [r for r in results_sorted if r.get("meets_breakeven")]
+
+    # 実購入ワイドの参考
+    wide_purchases = [_purchase_row(p) for p in purchases if p.bet_type == "ワイド"]
+    actual_wide = _agg_rows(wide_purchases) if wide_purchases else None
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "top_k_per_race": top_k,
+        "bet_type": "ワイド",
+        "actual_wide_purchases": actual_wide,
+        "strategies_tested": len(results_sorted),
+        "strategies_meeting_breakeven": len(profitable),
+        "best_strategies": results_sorted[:12],
+        "profitable_strategies": profitable[:12],
+        "note": (
+            "ワイドのみ・仮想100円・1レースtop_k点。"
+            "meets_breakeven=ROI>=100%。"
+            "1期間の結果なので、黒字戦略があっても別期間再確認が必要。"
+            "本番閾値は変更していない。"
+        ),
+    }
+
+
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
