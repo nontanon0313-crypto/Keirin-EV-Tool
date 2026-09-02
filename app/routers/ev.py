@@ -49,15 +49,13 @@ def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict =
     return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost)
 
 
-def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list) -> None:
+def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list) -> int:
     """
-    見送った買い目を「見送り」として記録する(のんの指摘により追加)。
-    以前はSkippedBetテーブル・APIが存在するのに一度も自動記録されておらず、
-    「除外して正解だったか、本当は当たっていたのに逃したのか」を検証できていなかった。
-    同一の(race_id, bet_type, combination)を二重記録しないようにする。
+    見送った買い目を「見送り」として記録する。
+    戻り値: 新規に保存した件数。
     """
     if not skipped_for_verification:
-        return
+        return 0
     existing_skipped_keys = {
         (s.bet_type, s.combination)
         for s in db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race_id).all()
@@ -69,18 +67,23 @@ def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list
         if key in existing_skipped_keys or key in seen_in_this_call:
             continue
         seen_in_this_call.add(key)
+        # all_evaluated 由来は win_prob、candidates 由来も win_prob
+        wp = c.get("win_prob")
+        if wp is None and c.get("estimated_win_prob_pct") is not None:
+            wp = float(c["estimated_win_prob_pct"]) / 100.0
         new_skipped_objs.append(models.SkippedBet(
             race_id=race_id,
             bet_type=c["bet_type"],
             combination=c["combination"],
-            win_prob_estimated=c["win_prob"],
+            win_prob_estimated=wp,
             win_prob_raw=c.get("win_prob_raw"),
-            ev_pct_estimated=c["ev_pct"],
+            ev_pct_estimated=c.get("ev_pct"),
             reason=reason,
         ))
     if new_skipped_objs:
         db.add_all(new_skipped_objs)
         db.commit()
+    return len(new_skipped_objs)
 
 
 def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str = None) -> tuple:
@@ -548,7 +551,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 券種ごとに推定確率(win_prob)が高い順の上位N件だけは、期待値がマイナスでも
     # 検証用に残す。実際に勝つ組み合わせの大半は確率上位に来るはずなので、
     # DB容量を抑えつつ検証の見落としを大きく減らせる。
-    NEGATIVE_EV_VERIFICATION_TOP_N = 10
+    NEGATIVE_EV_VERIFICATION_TOP_N = 30  # 除外群ROI検証のため枠を拡大(のんの診断要望)
     negative_ev_by_type = {}
     for e in all_evaluated:
         if e["ev_pct"] <= 0:
@@ -601,12 +604,14 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         excluded_low_prob_count = before_count - len(candidates)
 
     if not candidates:
-        _save_skipped_bets(db, race_id, skipped_for_verification)
+        n_skip = _save_skipped_bets(db, race_id, skipped_for_verification)
         return {
             "race_id": race_id,
             "message": "安全マージンを満たす買い示唆がありませんでした(見送り推奨)",
             "items": [],
             "total_stake": 0,
+            "skipped_saved_count": n_skip,
+            "skipped_candidate_count": len(skipped_for_verification),
         }
 
     race_cap = bankroll * req.max_race_pct
@@ -732,12 +737,14 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     else:
         race_hit_prob_pct = 0
 
-    _save_skipped_bets(db, race_id, skipped_for_verification)
+    n_skip = _save_skipped_bets(db, race_id, skipped_for_verification)
 
     return {
         "race_id": race_id,
         "num_bets": len(items),
         "total_stake": round(total_stake, 0),
+        "skipped_saved_count": n_skip,
+        "skipped_candidate_count": len(skipped_for_verification),
         "race_budget_cap": round(race_cap, 0),
         "excluded_by_budget_count": excluded_by_budget_count,
         "excluded_by_garami_count": excluded_by_garami_count,

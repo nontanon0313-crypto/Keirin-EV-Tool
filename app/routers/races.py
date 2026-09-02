@@ -494,6 +494,33 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
 
 
 
+@router.get("/skipped-bet-counts")
+def skipped_bet_counts(db: Session = Depends(get_db)):
+    """見送りテーブルの件数確認用。"""
+    total = db.query(models.SkippedBet).count()
+    with_result = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.actual_result.in_(("win", "lose")))
+        .count()
+    )
+    without = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.actual_result.is_(None))
+        .count()
+    )
+    by_reason = {}
+    for s in db.query(models.SkippedBet.reason).limit(5000).all():
+        r = (s[0] or "なし")[:40]
+        by_reason[r] = by_reason.get(r, 0) + 1
+    top_reasons = sorted(by_reason.items(), key=lambda x: -x[1])[:15]
+    return {
+        "total": total,
+        "with_result": with_result,
+        "without_result": without,
+        "top_reasons": top_reasons,
+    }
+
+
 @router.post("/backfill-skip-results")
 def backfill_skip_results(payload: dict = None, db: Session = Depends(get_db)):
     """
@@ -660,6 +687,7 @@ def replay_settled_one(
         return {"race_id": race_id, "stage": "skipped_no_odds"}
 
     items = plan.get("items") or []
+    skipped_saved = plan.get("skipped_saved_count", 0)
     recorded = 0
     if items:
         objs = []
@@ -691,6 +719,8 @@ def replay_settled_one(
         "stage": "done",
         "plan_items": len(items),
         "purchases_recorded": recorded,
+        "skipped_saved_count": skipped_saved,
+        "skipped_candidate_count": plan.get("skipped_candidate_count"),
         "confirm": {
             "updated_count": conf.get("updated_count"),
             "skipped_updated_count": conf.get("skipped_updated_count"),

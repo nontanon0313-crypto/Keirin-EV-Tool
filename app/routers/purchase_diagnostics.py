@@ -55,48 +55,44 @@ def _load_settled_purchases(db: Session, since_dt: Optional[datetime]) -> List[m
     return q.all()
 
 
+def _race_ids_for_since(db: Session, since_dt: Optional[datetime]) -> Optional[set]:
+    """since 以降の診断対象 race_id。None なら全件。"""
+    if since_dt is None:
+        return None
+    ids = set()
+    for r in db.query(models.Race.id).filter(
+        (models.Race.race_date >= since_dt) | (models.Race.race_date.is_(None))
+    ).all():
+        ids.add(r[0])
+    for r in db.query(models.Purchase.race_id).filter(
+        models.Purchase.purchased_at >= since_dt
+    ).distinct().all():
+        ids.add(r[0])
+    return ids
+
+
 def _load_settled_skips(db: Session, since_dt: Optional[datetime]) -> List[models.SkippedBet]:
-    """結果が埋まった見送りのみ（ROI計算用）。"""
+    """結果が埋まった見送りのみ（ROI計算用）。購入と同じ race 集合で絞る。"""
     q = (
         db.query(models.SkippedBet)
         .filter(models.SkippedBet.actual_result.in_(("win", "lose")))
     )
-    if since_dt is not None:
-        q = (
-            q.join(models.Race, models.Race.id == models.SkippedBet.race_id)
-            .filter(
-                (models.Race.race_date >= since_dt)
-                | (models.Race.race_date.is_(None))
-            )
-        )
+    ids = _race_ids_for_since(db, since_dt)
+    if ids is not None:
+        if not ids:
+            return []
+        q = q.filter(models.SkippedBet.race_id.in_(list(ids)))
     return q.all()
 
 
 def _load_all_skips(db: Session, since_dt: Optional[datetime]) -> List[models.SkippedBet]:
-    """結果の有無を問わず見送り全件（件数把握用）。レースは購入側race_id経由でも可。"""
+    """結果の有無を問わず見送り全件。"""
     q = db.query(models.SkippedBet)
-    if since_dt is not None:
-        # race_date または、同一raceに since 以降の購入があるもの
-        race_ids_from_date = {
-            r[0]
-            for r in db.query(models.Race.id)
-            .filter(
-                (models.Race.race_date >= since_dt) | (models.Race.race_date.is_(None))
-            )
-            .all()
-        }
-        race_ids_from_purchases = {
-            r[0]
-            for r in db.query(models.Purchase.race_id)
-            .filter(models.Purchase.purchased_at >= since_dt)
-            .distinct()
-            .all()
-        }
-        ids = race_ids_from_date | race_ids_from_purchases
-        if ids:
-            q = q.filter(models.SkippedBet.race_id.in_(list(ids)))
-        else:
+    ids = _race_ids_for_since(db, since_dt)
+    if ids is not None:
+        if not ids:
             return []
+        q = q.filter(models.SkippedBet.race_id.in_(list(ids)))
     return q.all()
 
 
