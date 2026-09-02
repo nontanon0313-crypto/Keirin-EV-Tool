@@ -1,5 +1,4 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# 全確定レース 再投票→再結果検証（進捗つき）
 set -e
 API_BASE="${API_BASE:-https://keirin-ev-tool.onrender.com}"
 export API_BASE
