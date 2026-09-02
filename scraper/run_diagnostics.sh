@@ -95,5 +95,31 @@ if code == 200:
     print("reasons", (d.get("top_reasons") or [])[:5])
 else:
     print(code, r.text[:300])
+
+print("=== 8. race-plan が最大化しているもの ===")
+code, r = get("/purchases/diagnostics/race-plan-design")
+if code == 200:
+    d = r.json()
+    print("primary_rank:", d.get("objective", {}).get("primary_rank"))
+    print("in_practice:", d.get("what_it_maximizes_in_practice"))
+    print("not_optimizing:", d.get("what_it_does_not_optimize"))
+else:
+    print(code, r.text[:300])
+print()
+
+print("=== 9. 順位付けルール仮想比較（同一プール・仮想100円） ===")
+code, r = get("/purchases/diagnostics/race-plan-rank-compare")
+if code == 200:
+    d = r.json()
+    print(f"top_k={d.get('top_k')} min_ev={d.get('min_ev_pct')} races={d.get('race_count_with_pool')}")
+    for pol in d.get("policies") or []:
+        print(
+            f"  {pol.get('policy')}: n={pol.get('bet_count')} ROI={pol.get('actual_roi_pct')} "
+            f"hit={pol.get('actual_hit_rate_pct')} avg_odds={pol.get('avg_odds')} avg_ev={pol.get('avg_ev_pct')}"
+        )
+    print("meanings:", d.get("policy_meanings"))
+else:
+    print(code, r.text[:500])
 print("\n=== 完了 ===")
+
 PY

@@ -1176,6 +1176,196 @@ def diagnostics_ev_negative_recheck(
 
 
 
+
+@router.get("/race-plan-design")
+def diagnostics_race_plan_design():
+    """
+    投票プランが何を最大化しているかの設計メモ（読み取り専用）。
+    コード上の既定値に基づく。
+    """
+    return {
+        "objective": {
+            "primary_rank": "候補を ev_pct 降順で走査し、制約を満たすものから採用",
+            "stake": "Kelly分数 × fractional_coefficient(既定0.25) × bankroll を1点上限でクリップし100円単位",
+            "filter_in": [
+                "min_win_prob（既定0.05）",
+                "min_ev_pct（既定5.0）",
+                "実績ゲート（不調ステージ・不調券種）適用時",
+            ],
+            "filter_out_or_cap": [
+                "max_items（既定20）",
+                "max_race_pct（既定10% of bankroll）",
+                "avoid_garami（的中しても合計stakeを下回らない安全オッズ判定）",
+                "ステージサンプル不足時は3連単・2車単を除外",
+            ],
+        },
+        "what_it_maximizes_in_practice": [
+            "予測EVの高い順に枠と予算を埋める",
+            "高オッズ×（補正後）確率がKellyとEVの両方を押し上げやすい",
+            "結果として購入が超高EV帯に偏りやすい",
+        ],
+        "what_it_does_not_optimize": [
+            "実績ROI",
+            "的中率",
+            "予測確率の校正誤差を直接罰する指標",
+            "オッズ帯の分散（高オッズ集中の抑制）",
+        ],
+        "note": (
+            "これは閾値変更の提案ではなく、現行race-planの目的関数の明示。"
+            "代替順位付けの仮想比較は /race-plan-rank-compare を参照。"
+        ),
+    }
+
+
+@router.get("/race-plan-rank-compare")
+def diagnostics_race_plan_rank_compare(
+    since: Optional[str] = Query("calibration_switch"),
+    top_k: int = Query(5, ge=1, le=20),
+    min_ev_pct: float = Query(5.0, description="候補に残す最低EV%（現行デフォルトに合わせる）"),
+    db: Session = Depends(get_db),
+):
+    """
+    同一レース内で「順位付けルールだけ」を変えた仮想比較。
+    各レースで条件を満たす候補を並べ、上位top_kを仮想100円で購入した場合のROI。
+    ガミり・予算・Kellyは入れない（順位付けの差だけを見る）。
+    """
+    since_dt = _since_dt(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    skips = _load_settled_skips(db, since_dt)
+
+    # 候補プール: 購入＋見送り（結果付き）
+    # oddsは購入はodds_at_purchase、見送りはOdds表
+    race_ids = {p.race_id for p in purchases} | {s.race_id for s in skips}
+    odds_map: Dict[Tuple[int, str, str], float] = {}
+    if race_ids:
+        for o in db.query(models.Odds).filter(models.Odds.race_id.in_(list(race_ids))).all():
+            if o.odds_value and o.odds_value > 0:
+                odds_map[(o.race_id, o.bet_type, o.combination)] = float(o.odds_value)
+
+    # race_id -> list of candidate dicts
+    by_race: Dict[int, List[dict]] = defaultdict(list)
+    seen = set()
+
+    def add_cand(race_id, bet_type, combination, prob, odds, won, source, stored_ev=None):
+        key = (race_id, bet_type, combination)
+        if key in seen or prob is None or odds is None or odds <= 0:
+            return
+        seen.add(key)
+        ev = calc.calc_ev_pct(float(prob), float(odds), 0.0)
+        by_race[race_id].append({
+            "race_id": race_id,
+            "bet_type": bet_type,
+            "combination": combination,
+            "prob": float(prob),
+            "odds": float(odds),
+            "ev_pct": float(ev),
+            "stored_ev": stored_ev,
+            "won": bool(won),
+            "source": source,
+        })
+
+    for p in purchases:
+        odds = p.odds_at_purchase or odds_map.get((p.race_id, p.bet_type, p.combination))
+        add_cand(
+            p.race_id, p.bet_type, p.combination,
+            p.win_prob_at_purchase, odds,
+            p.result == "win", "purchase", p.ev_pct_at_purchase,
+        )
+    for s in skips:
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        add_cand(
+            s.race_id, s.bet_type, s.combination,
+            s.win_prob_estimated, odds,
+            s.actual_result == "win", "skip", s.ev_pct_estimated,
+        )
+
+    policies = {
+        "ev_desc": lambda c: (-c["ev_pct"], -c["prob"]),
+        "prob_desc": lambda c: (-c["prob"], -c["ev_pct"]),
+        "odds_asc_among_plus_ev": lambda c: (c["odds"], -c["prob"]),
+        "ev_desc_cap50": lambda c: (-min(c["ev_pct"], 50.0), -c["prob"]),
+        "prob_times_log_odds": lambda c: (
+            -(c["prob"] * (0.0 if c["odds"] <= 1 else __import__("math").log(c["odds"]))),
+            -c["prob"],
+        ),
+    }
+
+    def run_policy(name, key_fn):
+        picked = []
+        races_used = 0
+        for rid, cands in by_race.items():
+            pool = [c for c in cands if c["ev_pct"] >= min_ev_pct]
+            if name == "odds_asc_among_plus_ev":
+                pool = [c for c in pool if c["ev_pct"] >= min_ev_pct]
+            if not pool:
+                continue
+            races_used += 1
+            ranked = sorted(pool, key=key_fn)
+            for c in ranked[:top_k]:
+                picked.append({
+                    **c,
+                    "stake": 100.0,
+                    "payout": 100.0 * c["odds"] if c["won"] else 0.0,
+                })
+        if not picked:
+            return {
+                "policy": name,
+                "bet_count": 0,
+                "race_count": 0,
+                "hit_count": 0,
+                "actual_roi_pct": None,
+                "actual_hit_rate_pct": None,
+                "avg_odds": None,
+                "avg_ev_pct": None,
+                "avg_prob": None,
+            }
+        stake = sum(x["stake"] for x in picked)
+        payout = sum(x["payout"] for x in picked)
+        hits = sum(1 for x in picked if x["won"])
+        return {
+            "policy": name,
+            "bet_count": len(picked),
+            "race_count": races_used,
+            "hit_count": hits,
+            "actual_roi_pct": round(100.0 * payout / stake, 4) if stake > 0 else None,
+            "actual_hit_rate_pct": round(100.0 * hits / len(picked), 4),
+            "avg_odds": round(sum(x["odds"] for x in picked) / len(picked), 4),
+            "avg_ev_pct": round(sum(x["ev_pct"] for x in picked) / len(picked), 4),
+            "avg_prob": round(sum(x["prob"] for x in picked) / len(picked), 4),
+        }
+
+    results = [run_policy(n, fn) for n, fn in policies.items()]
+    results_sorted = sorted(
+        results,
+        key=lambda x: (x["actual_roi_pct"] is not None, x["actual_roi_pct"] or 0),
+        reverse=True,
+    )
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "top_k": top_k,
+        "min_ev_pct": min_ev_pct,
+        "race_count_with_pool": sum(1 for cs in by_race.values() if any(c["ev_pct"] >= min_ev_pct for c in cs)),
+        "policies": results_sorted,
+        "policy_meanings": {
+            "ev_desc": "現行に近い: 予測EV高い順",
+            "prob_desc": "的中確率高い順（本命寄り）",
+            "odds_asc_among_plus_ev": "EV条件を満たす中で低オッズ優先",
+            "ev_desc_cap50": "EVを50%で頭打ちしてから高い順（超高EVの優先を弱める）",
+            "prob_times_log_odds": "確率×log(オッズ)（極端オッズの影響を抑えた折衷）",
+        },
+        "note": (
+            "同一レース・同一候補プール・仮想100円・上位top_kのみ。"
+            "ガミり・予算・Kellyは除外（順位付けの差だけ）。"
+            "ROIが高くても本番採用前に別期間で再確認すること。"
+            "これは閾値の本番変更ではない。"
+        ),
+    }
+
+
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -1195,6 +1385,8 @@ def diagnostics_summary(
         "mid_vs_high_ev": diagnostics_mid_vs_high_ev(since=since, db=db),
         "stage_gate_off_virtual": diagnostics_stage_gate_off_virtual(since=since, db=db),
         "ev_negative_recheck": diagnostics_ev_negative_recheck(since=since, db=db),
+        "race_plan_design": diagnostics_race_plan_design(),
+        "race_plan_rank_compare": diagnostics_race_plan_rank_compare(since=since, db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"
