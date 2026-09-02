@@ -86,66 +86,135 @@ def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list
     return len(new_skipped_objs)
 
 
-def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str = None) -> tuple:
-    """
-    予想確率を実績的中率に寄せる補正(足切りではない)。
 
-    優先順:
-    1. 券種×勝率帯の交差係数(サンプル30件以上ならこれを最優先。券種・帯両方の
-       ズレを同時に反映した最も精密な補正。のんの分析結果=「勝率帯が上がるほど
-       ワイド・2車・3連複の想定と実績の乖離が大きい」への対応として追加)
-    2. なければ勝率帯の係数が十分なサンプルならそれを使う
-    3. なければ全体係数(overall)を使う
-    4. 1で交差係数を使わなかった場合のみ、券種係数がある場合は全体に対する
-       残差を弱く掛けて微調整(交差係数を使った場合は二重補正になるため行わない)
+def _select_portfolio(
+    candidates,
+    race_cap,
+    max_items,
+    avoid_garami,
+    outcomes,
+    odds_safety_margins,
+):
+    """固定ケリー額を使い、ガラミ制約を満たす期待利益最大のポートフォリオを構成する。"""
+    prepared = []
 
-    これにより「想定的中率 >> 実績的中率」の系統ズレを確率値で修正する。
-    """
-    bucket_name, _ = calc.get_prob_bucket(est_prob)
-    info = calibration_factors.get(bucket_name)
-    overall = calibration_factors.get("overall")
-    is_reliable = bool(info and info.get("is_reliable"))
-    low_prob_warning = (bucket_name == "0-5%(大穴)") and not is_reliable
-    data_sufficiency_pct = 0.0
-    if info and info.get("required_sample_count", 0) > 0:
-        data_sufficiency_pct = round(
-            min(1.0, info["sample_count"] / info["required_sample_count"]) * 100, 1
+    # 候補ごとの払戻対象結果を事前計算する。
+    # 選択ループ内で judge_purchase_result を繰り返さない。
+    winning_cache = {}
+
+    for c in candidates:
+        stake = calc.round_to_bet_unit(c["raw_stake"])
+        if stake <= 0:
+            continue
+
+        key = (c["bet_type"], c["combination"])
+        if key not in winning_cache:
+            winning_cache[key] = [
+                o
+                for o in outcomes
+                if calc.judge_purchase_result(
+                    c["bet_type"],
+                    c["combination"],
+                    list(o),
+                )
+            ]
+
+        prepared.append({
+            **c,
+            "_stake": stake,
+            "_value": stake * (c["win_prob"] * c["odds_value"] - 1.0),
+            "_winning": winning_cache[key],
+        })
+
+    limit = max_items if max_items and max_items > 0 else len(prepared)
+
+    selected = []
+    payout = {o: 0.0 for o in outcomes}
+    total_stake = 0.0
+    remaining = list(prepared)
+    rejected_garami = 0
+
+    def can_add(candidate):
+        if not avoid_garami:
+            return True
+
+        new_total_stake = total_stake + candidate["_stake"]
+        margin_pct = odds_safety_margins.get(
+            candidate["bet_type"],
+            purchases_router.DEFAULT_ODDS_SAFETY_MARGIN_PCT,
         )
-    accuracy_pct = info.get("prediction_accuracy_pct") if info else None
-    if accuracy_pct is None and overall:
-        accuracy_pct = overall.get("prediction_accuracy_pct")
+        payout_gain = (
+            candidate["_stake"]
+            * candidate["odds_value"]
+            * (1 - margin_pct / 100)
+        )
 
-    MIN_CROSS_SAMPLE = 30
-    cross_map = calibration_factors.get("by_bet_type_bucket") or {}
-    cross_info = (cross_map.get(bet_type) or {}).get(bucket_name) if bet_type else None
-    cross_used = False
+        winning = candidate["_winning"]
 
-    factor = 1.0
-    if cross_info and cross_info.get("sample_count", 0) >= MIN_CROSS_SAMPLE and cross_info.get("calibration_factor") is not None:
-        factor = cross_info["calibration_factor"]
-        cross_used = True
-    elif info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
-        factor = info["calibration_factor"]
-    elif overall and overall.get("calibration_factor") is not None:
-        factor = overall["calibration_factor"]
+        # 新候補が的中する結果について、追加後もガラミにならないか確認。
+        for outcome in winning:
+            if payout[outcome] + payout_gain < new_total_stake:
+                return False
 
-    if not cross_used:
-        by_bt = calibration_factors.get("by_bet_type") or {}
-        if bet_type and bet_type in by_bt and overall and overall.get("calibration_factor"):
-            bt_f = by_bt[bet_type]["calibration_factor"]
-            ov_f = overall["calibration_factor"]
-            if ov_f > 1e-9:
-                residual = bt_f / ov_f
-                # 残差は半分だけ反映(二重補正を避ける)
-                residual = 1.0 + 0.5 * (residual - 1.0)
-                factor *= residual
+        # 既存の払戻対象結果についても、追加投資によって
+        # 払戻額 < 総投資額にならないことを確認。
+        for outcome, current_payout in payout.items():
+            if current_payout > 0 and outcome not in winning:
+                if current_payout < new_total_stake:
+                    return False
 
-    factor = max(0.25, min(2.0, factor))
-    if abs(factor - 1.0) < 1e-9:
-        return est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct
-    calibrated = est_prob * factor
-    return max(0.0, min(1.0, calibrated)), low_prob_warning, data_sufficiency_pct, accuracy_pct
+        return True
 
+    while remaining and len(selected) < limit:
+        best = None
+        best_value = float("-inf")
+
+        for c in remaining:
+            if total_stake + c["_stake"] > race_cap:
+                continue
+            if not can_add(c):
+                continue
+
+            if c["_value"] > best_value:
+                best = c
+                best_value = c["_value"]
+
+        if best is None:
+            break
+
+        selected.append(best)
+        remaining.remove(best)
+
+        margin_pct = odds_safety_margins.get(
+            best["bet_type"],
+            purchases_router.DEFAULT_ODDS_SAFETY_MARGIN_PCT,
+        )
+        payout_gain = (
+            best["_stake"]
+            * best["odds_value"]
+            * (1 - margin_pct / 100)
+        )
+
+        for outcome in best["_winning"]:
+            payout[outcome] += payout_gain
+
+        total_stake += best["_stake"]
+
+    if avoid_garami:
+        selected_keys = {
+            (c["bet_type"], c["combination"])
+            for c in selected
+        }
+
+        for c in prepared:
+            if (c["bet_type"], c["combination"]) in selected_keys:
+                continue
+            if total_stake + c["_stake"] > race_cap:
+                continue
+            if not can_add(c):
+                rejected_garami += 1
+
+    return selected, payout, rejected_garami, len(prepared)
 
 @router.post("/calculate/{race_id}")
 def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends(get_db)):
@@ -638,79 +707,32 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         combination_str = "-".join(str(c) for c in cars)
         return [o for o in outcomes if calc.judge_purchase_result(bet_type, combination_str, list(o))]
 
-    # 期待値が高い順に、ガミりが起きない範囲で・100円単位で予算内に収まる分だけ採用する。
+    selected, payout_by_outcome, excluded_by_garami_count, prepared_count = _select_portfolio(
+        candidates=candidates,
+        race_cap=race_cap,
+        max_items=req.max_items,
+        avoid_garami=req.avoid_garami,
+        outcomes=outcomes,
+        odds_safety_margins=odds_safety_margins,
+    )
+
     items = []
     total_stake = 0.0
     total_expected_profit = 0.0
-    remaining_budget = race_cap
-    payout_by_outcome = {o: 0.0 for o in outcomes}
-    excluded_by_garami_count = 0
-    excluded_by_budget_count = 0
-    excluded_by_min_stake_count = 0
+    selected_keys = set()
 
-    for c in sorted(candidates, key=lambda x: -x["ev_pct"]):
-        if req.max_items and len(items) >= req.max_items:
-            skipped_for_verification.append((c, "最大件数の都合で除外"))
-            continue
-        stake = calc.round_to_bet_unit(c["raw_stake"])
-        if stake <= 0:
-            # 理論上の賭け金が最低単位(100円)に満たない(切り捨てで0円になった)
-            excluded_by_min_stake_count += 1
-            skipped_for_verification.append((c, "理論上の賭け金が最低単位未満"))
-            continue
-        if stake > remaining_budget:
-            if remaining_budget < 100:
-                # もう1点(最低100円)も買う余地が無いので、以降は全て予算オーバー
-                skipped_for_verification.append((c, "予算超過"))
-                break
-            stake = calc.round_to_bet_unit(remaining_budget)
-            if stake <= 0 or stake > remaining_budget:
-                excluded_by_budget_count += 1
-                skipped_for_verification.append((c, "予算超過"))
-                continue
-
-        cars = tuple(int(x) for x in c["combination"].split("-"))
-        winning = _winning_outcomes(c["bet_type"], cars) if req.avoid_garami else []
-
-        if req.avoid_garami:
-            if not winning:
-                # 起こりうる結果と1つも一致しない(データ不整合)場合は安全側でスキップ
-                excluded_by_garami_count += 1
-                skipped_for_verification.append((c, "データ不整合のため除外"))
-                continue
-            new_total_stake = total_stake + stake
-            margin_pct = odds_safety_margins.get(c["bet_type"], purchases_router.DEFAULT_ODDS_SAFETY_MARGIN_PCT)
-            safety_odds = c["odds_value"] * (1 - margin_pct / 100)
-            payout_gain = stake * safety_odds
-            ok = True
-            # このベットが的中する結果それぞれで、payoutが新しい合計投票額を下回らないか確認
-            for o in winning:
-                if payout_by_outcome[o] + payout_gain < new_total_stake:
-                    ok = False
-                    break
-            # 既存の的中結果(このベットでは的中しないもの)も、合計投票額が増える分だけ
-            # 再チェックが必要
-            if ok:
-                for o, payout in payout_by_outcome.items():
-                    if payout > 0 and o not in winning and payout < new_total_stake:
-                        ok = False
-                        break
-            if not ok:
-                excluded_by_garami_count += 1
-                skipped_for_verification.append((c, "ガミり回避のため除外"))
-                continue
-            for o in winning:
-                payout_by_outcome[o] += payout_gain
-
+    for c in selected:
+        stake = c["_stake"]
+        selected_keys.add((c["bet_type"], c["combination"]))
         expected_profit = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         total_stake += stake
         total_expected_profit += expected_profit
-        remaining_budget -= stake
+
         total_vote = c["total_vote_amount"]
-        if total_vote is not None and total_vote > 0:
-            self_impact_pct = round(stake / (total_vote + stake) * 100, 2)
-        else:
-            self_impact_pct = None
+        self_impact_pct = (
+            round(stake / (total_vote + stake) * 100, 2)
+            if total_vote is not None and total_vote > 0 else None
+        )
         items.append({
             "bet_type": c["bet_type"],
             "combination": c["combination"],
@@ -727,6 +749,15 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "data_sufficiency_pct": c["data_sufficiency_pct"],
             "prediction_accuracy_pct": c["prediction_accuracy_pct"],
         })
+
+    # ポートフォリオ選択で採用されなかった買い示唆は、検証用に見送りとして残す。
+    for c in candidates:
+        key = (c["bet_type"], c["combination"])
+        if key not in selected_keys:
+            skipped_for_verification.append((c, "ポートフォリオ最適化で選外"))
+
+    excluded_by_budget_count = max(0, prepared_count - len(selected) - excluded_by_garami_count)
+    excluded_by_min_stake_count = len(candidates) - prepared_count
 
     race_ev_pct = round((total_expected_profit / total_stake * 100), 2) if total_stake > 0 else 0
 
