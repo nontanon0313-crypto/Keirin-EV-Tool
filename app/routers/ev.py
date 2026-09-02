@@ -140,15 +140,26 @@ def _select_portfolio(
         unit = 100
         cap_units = int(race_cap // unit)
 
+        # 同じ投票額の候補は、期待利益が最大の1件だけ残せばよい。
+        # avoid_garami=False では目的関数が期待利益の単純合計なので、
+        # 同一重量で期待利益が低い候補は他の候補との組み合わせでも常に劣後する。
+        best_by_weight = {}
+        for c in prepared:
+            weight = int(c["_stake"] // unit)
+            if weight <= 0 or weight > cap_units:
+                continue
+            current = best_by_weight.get(weight)
+            if current is None or c["_value"] > current["_value"]:
+                best_by_weight[weight] = c
+
+        compressed = list(best_by_weight.values())
+
         # key=(使用予算単位, 件数)
         # value=(期待利益合計, 選択indexタプル)
         dp = {(0, 0): (0.0, ())}
 
-        for i, c in enumerate(prepared):
+        for i, c in enumerate(compressed):
             weight = int(c["_stake"] // unit)
-
-            if weight <= 0 or weight > cap_units:
-                continue
 
             updates = dict(dp)
 
@@ -179,7 +190,7 @@ def _select_portfolio(
                 key=lambda x: x[0],
             )
             selected = [
-                prepared[i]
+                compressed[i]
                 for i in selected_indexes
             ]
 
