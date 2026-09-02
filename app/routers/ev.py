@@ -132,17 +132,13 @@ def _select_portfolio(
     payout = {o: 0.0 for o in outcomes}
     total_stake = 0.0
     remaining = list(prepared)
-    rejected_garami = 0
-
-    # ガラミ制約が無効の場合は、各候補の投票額を100円単位の重みとして扱い、
+    # ガラミ制約が無効の場合は、投票額を100円単位の重みとして、
     # 予算内・件数上限内で期待利益合計を最大化する。
     if not avoid_garami:
         unit = 100
         cap_units = int(race_cap // unit)
 
-        # 同じ投票額の候補は、期待利益が最大の1件だけ残せばよい。
-        # avoid_garami=False では目的関数が期待利益の単純合計なので、
-        # 同一重量で期待利益が低い候補は他の候補との組み合わせでも常に劣後する。
+        # 同一投票額では期待利益が最大の候補だけ残す。
         best_by_weight = {}
         for c in prepared:
             weight = int(c["_stake"] // unit)
@@ -154,45 +150,50 @@ def _select_portfolio(
 
         compressed = list(best_by_weight.values())
 
-        # key=(使用予算単位, 件数)
-        # value=(期待利益合計, 選択indexタプル)
-        dp = {(0, 0): (0.0, ())}
+        # 0/1ナップサックDP。
+        # dp[count][used] = (最大期待利益, 選択候補index)
+        neg_inf = float("-inf")
+        dp = [
+            [(neg_inf, ()) for _ in range(cap_units + 1)]
+            for _ in range(limit + 1)
+        ]
+        dp[0][0] = (0.0, ())
 
         for i, c in enumerate(compressed):
             weight = int(c["_stake"] // unit)
+            value = c["_value"]
+            max_count = min(limit, i + 1)
 
-            updates = dict(dp)
+            # 降順更新により同一候補の重複選択を防止。
+            for count in range(max_count, 0, -1):
+                prev = dp[count - 1]
+                current = dp[count]
 
-            for (used, count), (profit, indexes) in dp.items():
-                if count >= limit:
-                    continue
+                for used in range(cap_units, weight - 1, -1):
+                    prev_profit, prev_indexes = prev[used - weight]
+                    if prev_profit == neg_inf:
+                        continue
 
-                new_used = used + weight
-                if new_used > cap_units:
-                    continue
+                    candidate_profit = prev_profit + value
+                    current_profit, _ = current[used]
 
-                key = (new_used, count + 1)
-                candidate_value = (
-                    profit + c["_value"],
-                    indexes + (i,),
-                )
+                    if candidate_profit > current_profit:
+                        current[used] = (
+                            candidate_profit,
+                            prev_indexes + (i,),
+                        )
 
-                current = updates.get(key)
+        best_profit = 0.0
+        best_indexes = ()
 
-                if current is None or candidate_value[0] > current[0]:
-                    updates[key] = candidate_value
+        for count in range(1, limit + 1):
+            for used in range(cap_units + 1):
+                profit, indexes = dp[count][used]
+                if profit > best_profit:
+                    best_profit = profit
+                    best_indexes = indexes
 
-            dp = updates
-
-        if dp:
-            _, selected_indexes = max(
-                dp.values(),
-                key=lambda x: x[0],
-            )
-            selected = [
-                compressed[i]
-                for i in selected_indexes
-            ]
+        selected = [compressed[i] for i in best_indexes]
 
         total_stake = sum(
             c["_stake"]
