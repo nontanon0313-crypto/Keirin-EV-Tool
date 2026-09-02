@@ -68,15 +68,28 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         .filter(models.SkippedBet.race_id == race_id, models.SkippedBet.actual_result.is_(None))
         .all()
     )
+    # 仮想払戻用: 同一レースのオッズ表から combination の倍率を取る
+    odds_map = {}
+    for o in db.query(models.Odds).filter(models.Odds.race_id == race_id).all():
+        if o.odds_value and o.odds_value > 0:
+            odds_map[(o.bet_type, o.combination)] = float(o.odds_value)
+
     skipped_updated = 0
     for s in skipped:
         is_win = calc.judge_purchase_result(s.bet_type, s.combination, parsed_result)
         s.actual_result = "win" if is_win else "lose"
-        # 見送り分は実際には購入していないため、購入時オッズが無い。想定EVから逆算した
-        # オッズ相当(1+EV%/100)/推定確率、が無理なら払戻推定はNoneのままにする。
-        if is_win and s.win_prob_estimated:
-            implied_odds = (1 + s.ev_pct_estimated / 100) / s.win_prob_estimated if s.ev_pct_estimated is not None else None
-            s.actual_payout = round(100 * implied_odds) if implied_odds else None
+        # 仮想投資100円前提の払戻。オッズ表があればそれを優先(診断のROIが現実に近づく)
+        if is_win:
+            ov = odds_map.get((s.bet_type, s.combination))
+            if ov:
+                s.actual_payout = round(100.0 * ov)
+            elif s.win_prob_estimated and s.ev_pct_estimated is not None and s.win_prob_estimated > 0:
+                implied_odds = (1 + s.ev_pct_estimated / 100) / s.win_prob_estimated
+                s.actual_payout = round(100 * implied_odds)
+            else:
+                s.actual_payout = None
+        else:
+            s.actual_payout = 0.0
         skipped_updated += 1
     if skipped_updated:
         db.commit()
@@ -464,6 +477,161 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
             and all(e.blended_win_prob is not None for e in race.entries)
             and len(race.odds_list) > 0
         ),
+    }
+
+
+
+
+@router.post("/{race_id}/soft-reset-bets")
+def soft_reset_bets(race_id: int, db: Session = Depends(get_db)):
+    """
+    購入・見送り記録だけ消す。出走表・オッズ・結果・AI勝率は残す。
+    「結果を忘れて再投票」の高速ルート用。
+    """
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+    n_p = db.query(models.Purchase).filter(models.Purchase.race_id == race_id).delete()
+    n_s = db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race_id).delete()
+    db.commit()
+    return {
+        "race_id": race_id,
+        "purchases_deleted": n_p,
+        "skipped_deleted": n_s,
+        "actual_result_kept": race.actual_result,
+    }
+
+
+@router.post("/{race_id}/replay-settled")
+def replay_settled_one(
+    race_id: int,
+    bankroll: float = 1_000_000,
+    db: Session = Depends(get_db),
+):
+    """
+    1レース: 購入/見送りを消す → 現行race-planで再投票 → 保存済み着順で再確定。
+    Gemini再実行はしない(既存の選手勝率を使う)。高速にサンプルを作り直す用。
+    """
+    from .. import schemas
+    from . import ev as ev_router
+
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+    if not race.actual_result:
+        raise HTTPException(400, "actual_resultが無いレースはreplayできない")
+
+    odds_n = db.query(models.Odds).filter(models.Odds.race_id == race_id).count()
+    if odds_n <= 0:
+        return {"race_id": race_id, "stage": "skipped_no_odds"}
+
+    entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
+    if not entries or not any(
+        (e.blended_win_prob is not None) or (e.ai_win_prob is not None) for e in entries
+    ):
+        return {
+            "race_id": race_id,
+            "stage": "skipped_no_win_probs",
+            "message": "選手勝率が無い。先に /analyze/estimate か full reset+再予想が必要",
+        }
+
+    soft_reset_bets(race_id, db)
+
+    req = schemas.RacePlanRequest(race_id=race_id, bankroll=bankroll)
+    plan = ev_router.race_plan(race_id, req, db)
+    if plan.get("skipped_no_odds"):
+        return {"race_id": race_id, "stage": "skipped_no_odds"}
+
+    items = plan.get("items") or []
+    recorded = 0
+    if items:
+        objs = []
+        for it in items:
+            win_prob = it.get("win_prob")
+            if win_prob is None and it.get("estimated_win_prob_pct") is not None:
+                win_prob = float(it["estimated_win_prob_pct"]) / 100.0
+            objs.append(
+                models.Purchase(
+                    race_id=race_id,
+                    bet_type=it["bet_type"],
+                    combination=it["combination"],
+                    stake_amount=float(it.get("stake") or it.get("stake_amount") or 100),
+                    odds_at_purchase=it.get("odds_value"),
+                    win_prob_at_purchase=win_prob,
+                    win_prob_raw=it.get("win_prob_raw"),
+                    ev_pct_at_purchase=it.get("ev_pct"),
+                    result="pending",
+                    payout_amount=0,
+                )
+            )
+        db.add_all(objs)
+        db.commit()
+        recorded = len(objs)
+
+    conf = confirm_race_result(race_id, race.actual_result, db)
+    return {
+        "race_id": race_id,
+        "stage": "done",
+        "plan_items": len(items),
+        "purchases_recorded": recorded,
+        "confirm": {
+            "updated_count": conf.get("updated_count"),
+            "skipped_updated_count": conf.get("skipped_updated_count"),
+            "actual_result": conf.get("actual_result"),
+        },
+    }
+
+
+@router.post("/replay-settled/batch")
+def replay_settled_batch(payload: dict, db: Session = Depends(get_db)):
+    """
+    確定済みレースをまとめて再投票→再結果検証。
+
+    payload例:
+    {
+      "since": "calibration_switch",  # または ISO
+      "race_ids": [1,2,3],           # 指定時はsinceより優先
+      "limit": 80,
+      "bankroll": 1000000
+    }
+    """
+    from . import purchases as purchases_router
+    from datetime import datetime as dt
+
+    bankroll = float(payload.get("bankroll") or 1_000_000)
+    limit = int(payload.get("limit") or 100)
+    race_ids = payload.get("race_ids")
+    since = payload.get("since") or "calibration_switch"
+    since_dt = purchases_router._parse_since_param(since)
+
+    if race_ids:
+        ids = list(race_ids)[:limit]
+    else:
+        q = (
+            db.query(models.Race.id)
+            .filter(models.Race.actual_result.isnot(None))
+            .order_by(models.Race.id.asc())
+        )
+        if since_dt is not None:
+            q = q.filter(models.Race.race_date >= since_dt)
+        ids = [r[0] for r in q.limit(limit).all()]
+
+    results = []
+    for rid in ids:
+        try:
+            results.append(replay_settled_one(rid, bankroll=bankroll, db=db))
+        except HTTPException as e:
+            results.append({"race_id": rid, "stage": "error", "error": e.detail})
+        except Exception as e:
+            results.append({"race_id": rid, "stage": "error", "error": str(e)})
+
+    done = sum(1 for r in results if r.get("stage") == "done")
+    return {
+        "total": len(ids),
+        "done": done,
+        "failed_or_skipped": len(ids) - done,
+        "since": since,
+        "results": results,
     }
 
 
