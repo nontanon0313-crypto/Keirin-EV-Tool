@@ -228,6 +228,111 @@ if code == 200:
 else:
     print(code, r.text[:700])
 
+
+print()
+print("=== 12. 購入群限定の確率校正・選別バイアス ===")
+code, r = get("/purchases/diagnostics/purchase-selection-calibration")
+
+if code == 200:
+    d = r.json()
+
+    o = d.get("overall") or {}
+
+    print(
+        f"overall n={o.get('n')} "
+        f"wins={o.get('wins')} "
+        f"pred={o.get('predicted_avg_pct')}% "
+        f"act={o.get('actual_hit_rate_pct')}% "
+        f"gap={o.get('gap_pt')}pt "
+        f"expected_hits={o.get('expected_hits')} "
+        f"actual_hits={o.get('actual_hits')} "
+        f"p_lower={o.get('p_value_lower_tail_pct')}%"
+    )
+
+    print("--- 購入群: 確率帯別 ---")
+
+    for band, s in (d.get("by_probability_band") or {}).items():
+        if not s or s.get("n", 0) == 0:
+            continue
+
+        print(
+            f"  {band}: "
+            f"n={s.get('n')} "
+            f"pred={s.get('predicted_avg_pct')} "
+            f"act={s.get('actual_hit_rate_pct')} "
+            f"gap={s.get('gap_pt')} "
+            f"expHits={s.get('expected_hits')} "
+            f"wins={s.get('wins')} "
+            f"ROI_pred={s.get('predicted_roi_pct')} "
+            f"ROI_act={s.get('actual_roi_pct')} "
+            f"p={s.get('p_value_lower_tail_pct')}%"
+        )
+
+    print("--- 購入群: 確率帯 × オッズ帯 ---")
+
+    for key, s in (d.get("by_probability_x_odds") or {}).items():
+        if s.get("n", 0) < 5:
+            continue
+
+        print(
+            f"  {key}: "
+            f"n={s.get('n')} "
+            f"pred={s.get('predicted_avg_pct')} "
+            f"act={s.get('actual_hit_rate_pct')} "
+            f"gap={s.get('gap_pt')} "
+            f"wins={s.get('wins')} "
+            f"avgOdds={s.get('avg_odds')} "
+            f"ROI_pred={s.get('predicted_roi_pct')} "
+            f"ROI_act={s.get('actual_roi_pct')}"
+        )
+
+    print("--- 購入群: EV帯 × オッズ帯 ---")
+
+    for key, s in (d.get("by_ev_x_odds") or {}).items():
+        if s.get("n", 0) < 5:
+            continue
+
+        print(
+            f"  {key}: "
+            f"n={s.get('n')} "
+            f"pred={s.get('predicted_avg_pct')} "
+            f"act={s.get('actual_hit_rate_pct')} "
+            f"gap={s.get('gap_pt')} "
+            f"wins={s.get('wins')} "
+            f"avgOdds={s.get('avg_odds')} "
+            f"ROI_pred={s.get('predicted_roi_pct')} "
+            f"ROI_act={s.get('actual_roi_pct')}"
+        )
+
+    print("--- 過大評価が大きいセル n>=10 ---")
+
+    for s in (d.get("most_overpredicted_cells") or [])[:20]:
+        print(
+            f"  {s.get('cell')}: "
+            f"n={s.get('n')} "
+            f"pred={s.get('predicted_avg_pct')} "
+            f"act={s.get('actual_hit_rate_pct')} "
+            f"gap={s.get('gap_pt')} "
+            f"expHits={s.get('expected_hits')} "
+            f"wins={s.get('wins')} "
+            f"p={s.get('p_value_lower_tail_pct')}%"
+        )
+
+    print("--- レース単位参考 ---")
+
+    rr = d.get("race_level_reference") or {}
+
+    print(
+        f"races={rr.get('race_count')} "
+        f"hitRaces={rr.get('races_with_at_least_one_hit')} "
+        f"raceHitRate={rr.get('race_hit_rate_pct')}% "
+        f"probSum={rr.get('sum_of_purchase_probabilities')}"
+    )
+
+else:
+    print(code, r.text[:1000])
+
+
 print("\n=== 完了 ===")
 
 

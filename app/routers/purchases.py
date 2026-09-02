@@ -3364,6 +3364,306 @@ def _odds_drift_stats(purchases):
     }
 
 
+
+@router.get("/diagnostics/purchase-selection-calibration")
+def purchase_selection_calibration(
+    since: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    実際に購入した買い目だけを対象に、
+    確率帯・オッズ帯・EV帯ごとの校正誤差を確認する。
+
+    全体の確率格子が正しくても、EV上位抽出後の購入群だけで
+    確率が過大評価されている可能性を検証する。
+    """
+
+    since_dt = _parse_since_param(since)
+
+    q = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result != "pending")
+        .filter(models.Purchase.stake_amount > 0)
+        .filter(models.Purchase.win_prob_at_purchase.isnot(None))
+    )
+
+    if since_dt:
+        q = q.filter(models.Purchase.purchased_at >= since_dt)
+
+    purchases = q.all()
+
+    def prob_band(p):
+        name, _ = calc.get_prob_bucket(float(p.win_prob_at_purchase))
+        return name
+
+    def odds_band(p):
+        o = p.odds_at_purchase
+        if o is None or o <= 0:
+            return "不明"
+        o = float(o)
+        if o < 5:
+            return "1-5倍"
+        if o < 10:
+            return "5-10倍"
+        if o < 30:
+            return "10-30倍"
+        if o < 100:
+            return "30-100倍"
+        if o < 300:
+            return "100-300倍"
+        return "300倍以上"
+
+    def ev_band(p):
+        ev = p.ev_pct_at_purchase
+        if ev is None:
+            return "不明"
+        ev = float(ev)
+        if ev < 0:
+            return "EVマイナス"
+        if ev < 20:
+            return "0-20%"
+        if ev < 50:
+            return "20-50%"
+        if ev < 100:
+            return "50-100%"
+        if ev < 300:
+            return "100-300%"
+        return "300%以上"
+
+    def stats(rows):
+        if not rows:
+            return {
+                "n": 0,
+                "wins": 0,
+                "predicted_avg_pct": None,
+                "actual_hit_rate_pct": None,
+                "gap_pt": None,
+                "expected_hits": 0.0,
+                "actual_hits": 0,
+                "hit_gap": None,
+                "avg_odds": None,
+                "avg_ev_pct": None,
+                "predicted_roi_pct": None,
+                "actual_roi_pct": None,
+                "p_value_lower_tail_pct": None,
+            }
+
+        probs = [float(p.win_prob_at_purchase) for p in rows]
+        wins = sum(1 for p in rows if p.result == "win")
+        n = len(rows)
+
+        pred_avg = sum(probs) / n
+        actual = wins / n
+
+        odds_rows = [
+            p for p in rows
+            if p.odds_at_purchase is not None and p.odds_at_purchase > 0
+        ]
+
+        avg_odds = (
+            sum(float(p.odds_at_purchase) for p in odds_rows) / len(odds_rows)
+            if odds_rows else None
+        )
+
+        ev_rows = [
+            p for p in rows
+            if p.ev_pct_at_purchase is not None
+        ]
+
+        avg_ev = (
+            sum(float(p.ev_pct_at_purchase) for p in ev_rows) / len(ev_rows)
+            if ev_rows else None
+        )
+
+        stake = sum(float(p.stake_amount or 0) for p in rows)
+
+        predicted_return = sum(
+            float(p.stake_amount or 0)
+            * float(p.win_prob_at_purchase)
+            * float(p.odds_at_purchase)
+            for p in odds_rows
+        )
+
+        actual_return = sum(
+            float(p.payout_amount or 0)
+            for p in rows
+        )
+
+        p_value = calc.binomial_lower_tail_p(
+            wins,
+            n,
+            pred_avg,
+        )
+
+        return {
+            "n": n,
+            "wins": wins,
+            "predicted_avg_pct": round(pred_avg * 100, 4),
+            "actual_hit_rate_pct": round(actual * 100, 4),
+            "gap_pt": round((actual - pred_avg) * 100, 4),
+            "expected_hits": round(sum(probs), 4),
+            "actual_hits": wins,
+            "hit_gap": round(wins - sum(probs), 4),
+            "avg_odds": round(avg_odds, 4) if avg_odds is not None else None,
+            "avg_ev_pct": round(avg_ev, 4) if avg_ev is not None else None,
+            "predicted_roi_pct": (
+                round(predicted_return / stake * 100, 4)
+                if stake > 0 and odds_rows else None
+            ),
+            "actual_roi_pct": (
+                round(actual_return / stake * 100, 4)
+                if stake > 0 else None
+            ),
+            "p_value_lower_tail_pct": round(p_value * 100, 8),
+        }
+
+    prob_order = [
+        "0-5%(大穴)",
+        "5-15%",
+        "15-30%",
+        "30%以上(本命)",
+    ]
+
+    odds_order = [
+        "1-5倍",
+        "5-10倍",
+        "10-30倍",
+        "30-100倍",
+        "100-300倍",
+        "300倍以上",
+        "不明",
+    ]
+
+    ev_order = [
+        "EVマイナス",
+        "0-20%",
+        "20-50%",
+        "50-100%",
+        "100-300%",
+        "300%以上",
+        "不明",
+    ]
+
+    by_prob = {
+        band: stats([p for p in purchases if prob_band(p) == band])
+        for band in prob_order
+    }
+
+    by_prob_odds = {}
+    for pb in prob_order:
+        for ob in odds_order:
+            rows = [
+                p for p in purchases
+                if prob_band(p) == pb and odds_band(p) == ob
+            ]
+            if rows:
+                by_prob_odds[f"{pb} × {ob}"] = stats(rows)
+
+    by_ev_odds = {}
+    for eb in ev_order:
+        for ob in odds_order:
+            rows = [
+                p for p in purchases
+                if ev_band(p) == eb and odds_band(p) == ob
+            ]
+            if rows:
+                by_ev_odds[f"{eb} × {ob}"] = stats(rows)
+
+    # レース単位診断
+    #
+    # 同一レース内の複数買い目は独立ではないため、
+    # 「各買い目の確率を合計した期待的中数」と
+    # 「実際に1つ以上的中したか」を別途確認する。
+    by_race = {}
+    for p in purchases:
+        by_race.setdefault(p.race_id, []).append(p)
+
+    race_rows = []
+
+    for race_id, rows in by_race.items():
+        prob_sum = sum(
+            float(p.win_prob_at_purchase)
+            for p in rows
+        )
+
+        hit = any(p.result == "win" for p in rows)
+
+        # 同一レース内の買い目確率合計が1を超える場合、
+        # 「少なくとも1つ当たる確率」とは一致しないため、
+        # 合計値は参考情報として別表示する。
+        race_rows.append({
+            "race_id": race_id,
+            "prob_sum": prob_sum,
+            "hit": hit,
+            "bet_count": len(rows),
+        })
+
+    race_count = len(race_rows)
+    race_hits = sum(1 for r in race_rows if r["hit"])
+    race_prob_sum_total = sum(r["prob_sum"] for r in race_rows)
+
+    # 確率和は「期待的中買い目数」であり、
+    # race_hit_rateの直接予測値ではないことを明示する。
+    race_summary = {
+        "race_count": race_count,
+        "races_with_at_least_one_hit": race_hits,
+        "race_hit_rate_pct": (
+            round(race_hits / race_count * 100, 4)
+            if race_count else None
+        ),
+        "sum_of_purchase_probabilities": round(race_prob_sum_total, 4),
+        "actual_hit_race_count": race_hits,
+        "note": (
+            "同一レース内の買い目は相関するため、確率合計は"
+            "『期待的中買い目数』であり、"
+            "『1つ以上当たるレース確率』と直接比較していません。"
+        ),
+    }
+
+    overall = stats(purchases)
+
+    suspicious_cells = []
+
+    for key, value in by_prob_odds.items():
+        if value["n"] >= 10:
+            suspicious_cells.append({
+                "cell": key,
+                **value,
+            })
+
+    suspicious_cells.sort(
+        key=lambda x: (
+            x["gap_pt"] is None,
+            x["gap_pt"] if x["gap_pt"] is not None else 0,
+        )
+    )
+
+    return {
+        "purpose": (
+            "実購入群だけを対象に、確率校正がEV選別後も維持されているか確認する"
+        ),
+        "since": since,
+        "overall": overall,
+        "by_probability_band": by_prob,
+        "by_probability_x_odds": by_prob_odds,
+        "by_ev_x_odds": by_ev_odds,
+        "most_overpredicted_cells": suspicious_cells[:20],
+        "race_level_reference": race_summary,
+        "interpretation": {
+            "gap_pt_negative": (
+                "実績的中率が予測確率を下回り、確率が過大評価されている方向"
+            ),
+            "p_value_lower_tail_pct": (
+                "予測確率が正しい場合に、今回以下の的中数になる片側確率。"
+                "小さいほど偶然だけでは説明しにくい"
+            ),
+            "important": (
+                "全体の確率格子が一致していても、"
+                "EV上位選別後の購入群で一致するとは限らない"
+            ),
+        },
+    }
+
 @router.post("/skipped")
 def record_skipped(
     race_id: int,
