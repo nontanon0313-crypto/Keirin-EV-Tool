@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session
 
 from ..database import get_db
 from .. import models
@@ -48,21 +48,24 @@ def _filter_by_created(q, model, since_dt: Optional[datetime]):
 
 
 def _load_settled_purchases(db: Session, since_dt: Optional[datetime]) -> List[models.Purchase]:
-    q = (
-        db.query(models.Purchase)
-        .filter(models.Purchase.result.in_(("win", "lose")))
-        .options(joinedload(models.Purchase.race))
-    )
-    q = _filter_by_created(q, models.Purchase, since_dt)
+    # Purchaseにrace relationshipは無い。日付はpurchased_atを使う。
+    q = db.query(models.Purchase).filter(models.Purchase.result.in_(("win", "lose")))
+    if since_dt is not None:
+        q = q.filter(models.Purchase.purchased_at >= since_dt)
     return q.all()
 
 
 def _load_settled_skips(db: Session, since_dt: Optional[datetime]) -> List[models.SkippedBet]:
+    # SkippedBetにcreated_atが無いため、レース開催日で絞る。
     q = (
         db.query(models.SkippedBet)
         .filter(models.SkippedBet.actual_result.in_(("win", "lose")))
     )
-    q = _filter_by_created(q, models.SkippedBet, since_dt)
+    if since_dt is not None:
+        q = (
+            q.join(models.Race, models.Race.id == models.SkippedBet.race_id)
+            .filter(models.Race.race_date >= since_dt)
+        )
     return q.all()
 
 
