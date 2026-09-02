@@ -572,6 +572,8 @@ def soft_reset_bets(race_id: int, db: Session = Depends(get_db)):
 def replay_settled_one(
     race_id: int,
     bankroll: float = 1_000_000,
+    apply_performance_gates: bool = False,
+    apply_odds_safety_margin: bool = False,
     db: Session = Depends(get_db),
 ):
     """
@@ -603,7 +605,12 @@ def replay_settled_one(
 
     soft_reset_bets(race_id, db)
 
-    req = schemas.RacePlanRequest(race_id=race_id, bankroll=bankroll)
+    req = schemas.RacePlanRequest(
+        race_id=race_id,
+        bankroll=bankroll,
+        apply_performance_gates=apply_performance_gates,
+        apply_odds_safety_margin=apply_odds_safety_margin,
+    )
     plan = ev_router.race_plan(race_id, req, db)
     if plan.get("skipped_no_odds"):
         return {"race_id": race_id, "stage": "skipped_no_odds"}
@@ -696,24 +703,26 @@ def replay_settled_targets(
 @router.post("/replay-settled/batch")
 def replay_settled_batch(payload: dict, db: Session = Depends(get_db)):
     """
-    確定済みレースをまとめて再投票→再結果検証。
+    確定済みレースをまとめて「旧投票記録を完全置換」して再投票→再結果検証。
 
-    payload例:
-    {
-      "since": "calibration_switch",  # または ISO
-      "race_ids": [1,2,3],           # 指定時はsinceより優先
-      "limit": 80,
-      "bankroll": 1000000
-    }
+    重要:
+    - 対象レースの Purchase / SkippedBet は再投票開始前に一括削除する。
+    - Race / Entry / Odds / actual_result / AI勝率は削除しない。
+    - Gemini等のAI再実行はしない。既存の勝率を使用する。
+    - race_ids指定時はsinceより優先する。
+    - 再投票に失敗したレースについても旧Purchase/SkippedBetは復元しない。
+      「再賭け対象期間のデータを現行ロジックへ置換する」ことを保証する。
     """
     from . import purchases as purchases_router
-    from datetime import datetime as dt
+    from sqlalchemy import func
 
+    payload = payload or {}
     bankroll = float(payload.get("bankroll") or 1_000_000)
     limit = int(payload.get("limit") or 5000)
     race_ids = payload.get("race_ids")
     since_raw = payload.get("since")
-    # None / 空 / "all" → 全確定レース（開催日・購入日で絞らない）
+
+    # None / 空 / all / * は全確定レース
     if since_raw in (None, "", "all", "*"):
         since = None
         since_dt = None
@@ -721,8 +730,9 @@ def replay_settled_batch(payload: dict, db: Session = Depends(get_db)):
         since = since_raw
         since_dt = purchases_router._parse_since_param(since)
 
+    # 対象race_idを確定
     if race_ids:
-        ids = list(race_ids)[:limit]
+        ids = list(dict.fromkeys(int(rid) for rid in race_ids))[:limit]
     else:
         q = (
             db.query(models.Race.id)
@@ -733,24 +743,84 @@ def replay_settled_batch(payload: dict, db: Session = Depends(get_db)):
             q = q.filter(models.Race.race_date >= since_dt)
         ids = [r[0] for r in q.limit(limit).all()]
 
+    if not ids:
+        return {
+            "replace_mode": True,
+            "total": 0,
+            "old_purchases_deleted": 0,
+            "old_skipped_bets_deleted": 0,
+            "done": 0,
+            "failed_or_skipped": 0,
+            "since": since,
+            "results": [],
+        }
+
+    # 実在する対象レースだけを置換対象にする
+    existing_ids = [
+        r[0]
+        for r in (
+            db.query(models.Race.id)
+            .filter(models.Race.id.in_(ids))
+            .all()
+        )
+    ]
+
+    # 再投票前に対象期間の旧Purchase/SkippedBetを一括削除。
+    # Race/Entry/Odds/actual_result/AI勝率は一切触らない。
+    old_purchases_deleted = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.race_id.in_(existing_ids))
+        .delete(synchronize_session=False)
+        if existing_ids else 0
+    )
+    old_skipped_deleted = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.race_id.in_(existing_ids))
+        .delete(synchronize_session=False)
+        if existing_ids else 0
+    )
+    db.commit()
+
     results = []
+
     for rid in ids:
         try:
-            results.append(replay_settled_one(rid, bankroll=bankroll, db=db))
+            results.append(
+                replay_settled_one(
+                    rid,
+                    bankroll=bankroll,
+                    db=db,
+                )
+            )
         except HTTPException as e:
-            results.append({"race_id": rid, "stage": "error", "error": e.detail})
+            results.append({
+                "race_id": rid,
+                "stage": "error",
+                "error": e.detail,
+            })
         except Exception as e:
-            results.append({"race_id": rid, "stage": "error", "error": str(e)})
+            # 1レースの失敗で他レースの再投票を止めない
+            db.rollback()
+            results.append({
+                "race_id": rid,
+                "stage": "error",
+                "error": str(e),
+            })
 
     done = sum(1 for r in results if r.get("stage") == "done")
+    failed_or_skipped = len(ids) - done
+
     return {
+        "replace_mode": True,
         "total": len(ids),
+        "existing_races": len(existing_ids),
+        "old_purchases_deleted": old_purchases_deleted,
+        "old_skipped_bets_deleted": old_skipped_deleted,
         "done": done,
-        "failed_or_skipped": len(ids) - done,
+        "failed_or_skipped": failed_or_skipped,
         "since": since,
         "results": results,
     }
-
 
 
 

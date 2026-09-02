@@ -1,101 +1,207 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""確定レースを1件ずつ再投票→結果再検証（進捗表示）。
-
-  python3 scraper/replay_settled.py
-  python3 scraper/replay_settled.py --since all --limit 5000
-"""
-from __future__ import annotations
-
 import argparse
-import json
 import os
 import sys
 import time
-from datetime import datetime
 
 import requests
 
-API = os.environ.get("API_BASE", "https://keirin-ev-tool.onrender.com").rstrip("/")
+
+API_BASE = os.environ.get(
+    "API_BASE",
+    "https://keirin-ev-tool.onrender.com",
+).rstrip("/")
 
 
-def log(msg: str) -> None:
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+def now():
+    return time.strftime("%H:%M:%S")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--since", default="all", help="all=全確定レース / calibration_switch / ISO")
-    ap.add_argument("--limit", type=int, default=5000)
-    ap.add_argument("--bankroll", type=float, default=1_000_000)
-    ap.add_argument("--race-ids", default="", help="カンマ区切り。指定時は一覧APIを使わない")
-    ap.add_argument("--sleep", type=float, default=0.3, help="1件ごとの間隔秒")
-    args = ap.parse_args()
+def fmt_seconds(sec):
+    if sec is None or sec < 0:
+        return "--:--"
+    sec = int(sec)
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    return f"{m:02d}m{s:02d}s"
 
-    if args.race_ids.strip():
-        ids = [int(x) for x in args.race_ids.split(",") if x.strip()]
-    else:
-        params = {"limit": args.limit}
-        if args.since and args.since != "all":
-            params["since"] = args.since
-        else:
-            params["since"] = "all"
-        log(f"対象一覧取得 {API}/races/replay-settled/targets ...")
-        r = requests.get(f"{API}/races/replay-settled/targets", params=params, timeout=120)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--since", default="all")
+    parser.add_argument("--limit", type=int, default=5000)
+    parser.add_argument("--bankroll", type=float, default=1000000)
+    args = parser.parse_args()
+
+    session = requests.Session()
+
+    # ここで取得するのは「対象レースID一覧」のみ。
+    # 外部サイトからレース情報を取得する処理ではない。
+    target_url = f"{API_BASE}/races/replay-settled/targets"
+
+    print(f"[{now()}] 対象レースID一覧取得: {target_url}", flush=True)
+
+    try:
+        r = session.get(
+            target_url,
+            params={
+                "since": args.since,
+                "limit": args.limit,
+            },
+            timeout=60,
+        )
         r.raise_for_status()
         data = r.json()
-        ids = data.get("race_ids") or []
-        log(f"対象 {len(ids)} 件 (since={data.get('since')})")
+    except Exception as e:
+        print(f"[{now()}] 対象ID取得エラー: {type(e).__name__}: {e}", flush=True)
+        if "r" in locals():
+            print(f"HTTP {r.status_code}", flush=True)
+            print((r.text or "")[:2000], flush=True)
+        sys.exit(1)
 
-    if not ids:
-        log("対象0件。終了")
-        return 0
+    race_ids = data.get("race_ids", [])
 
-    done = fail = skip = 0
-    t0 = time.time()
-    for i, rid in enumerate(ids, 1):
+    print(
+        f"[{now()}] 対象 {len(race_ids)} 件 "
+        f"(since={args.since})",
+        flush=True,
+    )
+
+    if not race_ids:
+        print(f"[{now()}] 対象レースなし", flush=True)
+        return
+
+    total = len(race_ids)
+    done = 0
+    failed = 0
+    skipped = 0
+    started = time.time()
+
+    for index, race_id in enumerate(race_ids, start=1):
+        t0 = time.time()
+        url = f"{API_BASE}/races/{race_id}/replay-settled"
+
+        print(
+            f"[{now()}] [{index}/{total} "
+            f"{index / total * 100:6.2f}%] "
+            f"race_id={race_id} 処理開始",
+            flush=True,
+        )
+
         try:
-            rr = requests.post(
-                f"{API}/races/{rid}/replay-settled",
+            r = session.post(
+                url,
                 params={"bankroll": args.bankroll},
                 timeout=180,
             )
-            if rr.status_code >= 400:
-                fail += 1
-                stage = f"http_{rr.status_code}"
-                detail = (rr.text or "")[:120]
+
+            elapsed_one = time.time() - t0
+
+            if 200 <= r.status_code < 300:
+                done += 1
+
+                try:
+                    result = r.json()
+                except Exception:
+                    result = {}
+
+                print(
+                    f"[{now()}] [{index}/{total}] "
+                    f"完了 "
+                    f"({elapsed_one:.1f}s) "
+                    f"done={done} failed={failed} skipped={skipped}",
+                    flush=True,
+                )
+
+                if result:
+                    print(
+                        f"    result={result}",
+                        flush=True,
+                    )
+
             else:
-                body = rr.json()
-                stage = body.get("stage", "?")
-                detail = ""
-                if stage == "done":
-                    done += 1
-                    detail = f"items={body.get('plan_items')} buy={body.get('purchases_recorded')}"
-                elif stage and stage.startswith("skipped"):
-                    skip += 1
-                    detail = body.get("message") or stage
-                else:
-                    fail += 1
-                    detail = str(body.get("error") or body)[:120]
+                failed += 1
+
+                print(
+                    f"[{now()}] [{index}/{total}] "
+                    f"HTTP ERROR "
+                    f"status={r.status_code} "
+                    f"({elapsed_one:.1f}s)",
+                    flush=True,
+                )
+
+                print(
+                    "    response:",
+                    flush=True,
+                )
+                print(
+                    (r.text or "")[:2000],
+                    flush=True,
+                )
+
+        except requests.RequestException as e:
+            failed += 1
+
+            print(
+                f"[{now()}] [{index}/{total}] "
+                f"REQUEST ERROR: {type(e).__name__}: {e}",
+                flush=True,
+            )
+
+            response = getattr(e, "response", None)
+            if response is not None:
+                print(
+                    f"    HTTP status={response.status_code}",
+                    flush=True,
+                )
+                print(
+                    (response.text or "")[:2000],
+                    flush=True,
+                )
+
         except Exception as e:
-            fail += 1
-            stage = "exception"
-            detail = str(e)[:120]
+            failed += 1
 
-        elapsed = time.time() - t0
-        rate = i / elapsed if elapsed > 0 else 0
-        remain = (len(ids) - i) / rate if rate > 0 else 0
-        log(
-            f"{i}/{len(ids)} race_id={rid} {stage} {detail} | "
-            f"done={done} skip={skip} fail={fail} | "
-            f"{elapsed:.0f}s経過 残約{remain:.0f}s"
+            print(
+                f"[{now()}] [{index}/{total}] "
+                f"UNEXPECTED ERROR: {type(e).__name__}: {e}",
+                flush=True,
+            )
+
+        elapsed = time.time() - started
+        processed = done + failed + skipped
+
+        if processed > 0:
+            avg = elapsed / processed
+            remain = total - processed
+            eta = avg * remain
+        else:
+            eta = None
+
+        print(
+            f"[{now()}] 進捗 "
+            f"{processed}/{total} "
+            f"({processed / total * 100:6.2f}%) "
+            f"done={done} "
+            f"failed={failed} "
+            f"skipped={skipped} "
+            f"elapsed={fmt_seconds(elapsed)} "
+            f"ETA={fmt_seconds(eta)}",
+            flush=True,
         )
-        if args.sleep > 0:
-            time.sleep(args.sleep)
 
-    log(f"完了 total={len(ids)} done={done} skip={skip} fail={fail} {time.time()-t0:.0f}s")
-    return 0 if fail == 0 else 1
+    elapsed = time.time() - started
+
+    print("", flush=True)
+    print(f"[{now()}] ===== replay 完了 =====", flush=True)
+    print(f"total   = {total}", flush=True)
+    print(f"done    = {done}", flush=True)
+    print(f"failed  = {failed}", flush=True)
+    print(f"skipped = {skipped}", flush=True)
+    print(f"elapsed = {fmt_seconds(elapsed)}", flush=True)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

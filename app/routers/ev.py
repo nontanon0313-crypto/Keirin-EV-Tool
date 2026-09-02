@@ -490,7 +490,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                     )
 
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
-        stage_order_gate = stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
+        stage_order_gate = apply_gates and stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
         if stage_order_gate:
             is_recommended = False
             stage_gated_keys.add((o.bet_type, o.combination))
@@ -628,7 +628,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 投票時オッズは締切までにズレる(券種によってズレ幅が大きく異なり、実測でワイドは
     # 3連単の4倍近くズレることが分かっている)。ガミり判定はこのズレを見込んで、
     # 実際のオッズより保守的な値で計算し、多少ズレても崩れない安全マージンを持たせる。
-    odds_safety_margins = purchases_router.get_odds_safety_margins(db)
+    odds_safety_margins = (
+        purchases_router.get_odds_safety_margins(db)
+        if getattr(req, "apply_odds_safety_margin", True)
+        else {}
+    )
 
     def _winning_outcomes(bet_type: str, cars: tuple) -> list:
         combination_str = "-".join(str(c) for c in cars)
