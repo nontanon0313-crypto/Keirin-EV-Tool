@@ -582,6 +582,48 @@ def replay_settled_one(
     }
 
 
+
+@router.get("/replay-settled/targets")
+def replay_settled_targets(
+    since: str = None,
+    limit: int = 5000,
+    db: Session = Depends(get_db),
+):
+    """再投票対象のrace_id一覧（進捗付きクライアント用）。"""
+    from . import purchases as purchases_router
+    from sqlalchemy import or_
+
+    if since in (None, "", "all", "*"):
+        since_dt = None
+        since_out = "all"
+    else:
+        since_dt = purchases_router._parse_since_param(since)
+        since_out = since
+
+    id_set = set()
+    q1 = (
+        db.query(models.Race.id)
+        .filter(models.Race.actual_result.isnot(None))
+        .order_by(models.Race.id.asc())
+    )
+    if since_dt is not None:
+        q1 = q1.filter(or_(models.Race.race_date >= since_dt, models.Race.race_date.is_(None)))
+    for row in q1.limit(limit * 3).all():
+        id_set.add(row[0])
+    if since_dt is not None:
+        q2 = (
+            db.query(models.Purchase.race_id)
+            .join(models.Race, models.Race.id == models.Purchase.race_id)
+            .filter(models.Race.actual_result.isnot(None))
+            .filter(models.Purchase.purchased_at >= since_dt)
+            .distinct()
+        )
+        for row in q2.all():
+            id_set.add(row[0])
+    ids = sorted(id_set)[:limit]
+    return {"since": since_out, "total": len(ids), "race_ids": ids}
+
+
 @router.post("/replay-settled/batch")
 def replay_settled_batch(payload: dict, db: Session = Depends(get_db)):
     """
