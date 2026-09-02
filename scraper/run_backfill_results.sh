@@ -1,0 +1,31 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -e
+API="${API_BASE:-https://keirin-ev-tool.onrender.com}"
+echo "== backfill skip results =="
+python3 -c "
+import requests, json
+r=requests.post('$API/races/backfill-skip-results', json={}, timeout=600)
+print(r.status_code)
+print(json.dumps(r.json(), ensure_ascii=False, indent=2)[:2000])
+"
+echo "== backfill final_odds =="
+python3 -c "
+import requests, json
+r=requests.post('$API/races/backfill-final-odds', json={}, timeout=600)
+print(r.status_code)
+print(json.dumps(r.json(), ensure_ascii=False, indent=2)[:2000])
+"
+echo "== filter-effectiveness =="
+python3 -c "
+import requests
+r=requests.get('$API/purchases/diagnostics/filter-effectiveness', params={'since':'calibration_switch'}, timeout=180)
+print(r.status_code)
+print(r.text[:2500])
+"
+echo "== odds-drift =="
+python3 -c "
+import requests
+r=requests.get('$API/purchases/diagnostics/odds-drift', params={'since':'calibration_switch'}, timeout=180)
+print(r.status_code)
+print(r.text[:1500])
+"

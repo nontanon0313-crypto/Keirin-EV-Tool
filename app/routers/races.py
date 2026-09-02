@@ -41,8 +41,19 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         .all()
     )
 
+    # 確定時に final_odds が空なら、DB上のオッズ表を締切オッズの代理として埋める
+    # （過去データでは最終オッズスクショが無いため。変動診断の欠損を減らす）
+    odds_map = {}
+    for o in db.query(models.Odds).filter(models.Odds.race_id == race_id).all():
+        if o.odds_value and o.odds_value > 0:
+            odds_map[(o.bet_type, o.combination)] = float(o.odds_value)
+
     updated = []
     for p in pending:
+        if p.final_odds is None:
+            ov = odds_map.get((p.bet_type, p.combination))
+            if ov:
+                p.final_odds = ov
         is_win = calc.judge_purchase_result(p.bet_type, p.combination, parsed_result)
         settlement_odds = p.final_odds if p.final_odds is not None else p.odds_at_purchase
         payout = round(p.stake_amount * settlement_odds) if (is_win and settlement_odds) else 0
@@ -480,6 +491,112 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
     }
 
 
+
+
+
+@router.post("/backfill-skip-results")
+def backfill_skip_results(payload: dict = None, db: Session = Depends(get_db)):
+    """
+    確定済みレースの SkippedBet で actual_result が空のものを一括で埋める。
+    payload: {"race_ids": [...]} 省略時は全確定レース。
+    """
+    from .. import ev_calculator as calc
+
+    payload = payload or {}
+    race_ids = payload.get("race_ids")
+    if race_ids:
+        races = db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()
+    else:
+        races = db.query(models.Race).filter(models.Race.actual_result.isnot(None)).all()
+
+    total_updated = 0
+    races_touched = 0
+    errors = []
+    for race in races:
+        if not race.actual_result:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception as e:
+            errors.append({"race_id": race.id, "error": f"parse: {e}"})
+            continue
+
+        odds_map = {
+            (o.bet_type, o.combination): float(o.odds_value)
+            for o in db.query(models.Odds).filter(models.Odds.race_id == race.id).all()
+            if o.odds_value and o.odds_value > 0
+        }
+        skips = (
+            db.query(models.SkippedBet)
+            .filter(
+                models.SkippedBet.race_id == race.id,
+                models.SkippedBet.actual_result.is_(None),
+            )
+            .all()
+        )
+        if not skips:
+            continue
+        n = 0
+        for s in skips:
+            is_win = calc.judge_purchase_result(s.bet_type, s.combination, parsed)
+            s.actual_result = "win" if is_win else "lose"
+            if is_win:
+                ov = odds_map.get((s.bet_type, s.combination))
+                if ov:
+                    s.actual_payout = round(100.0 * ov)
+                elif s.win_prob_estimated and s.ev_pct_estimated is not None and s.win_prob_estimated > 0:
+                    implied = (1 + s.ev_pct_estimated / 100) / s.win_prob_estimated
+                    s.actual_payout = round(100 * implied)
+                else:
+                    s.actual_payout = None
+            else:
+                s.actual_payout = 0.0
+            n += 1
+        total_updated += n
+        races_touched += 1
+        db.commit()
+
+    return {
+        "races_touched": races_touched,
+        "skipped_bets_updated": total_updated,
+        "errors": errors[:20],
+    }
+
+
+@router.post("/backfill-final-odds")
+def backfill_final_odds(payload: dict = None, db: Session = Depends(get_db)):
+    """
+    Purchase.final_odds が空の行を、同一レースの Odds 表から埋める。
+    過去データで最終オッズスクショが無い場合の代理。
+    """
+    payload = payload or {}
+    race_ids = payload.get("race_ids")
+    q = db.query(models.Purchase).filter(models.Purchase.final_odds.is_(None))
+    if race_ids:
+        q = q.filter(models.Purchase.race_id.in_(race_ids))
+    purchases = q.all()
+    if not purchases:
+        return {"updated": 0, "examined": 0}
+
+    by_race = {}
+    for p in purchases:
+        by_race.setdefault(p.race_id, []).append(p)
+
+    updated = 0
+    for rid, plist in by_race.items():
+        odds_map = {
+            (o.bet_type, o.combination): float(o.odds_value)
+            for o in db.query(models.Odds).filter(models.Odds.race_id == rid).all()
+            if o.odds_value and o.odds_value > 0
+        }
+        for p in plist:
+            ov = odds_map.get((p.bet_type, p.combination))
+            if ov:
+                p.final_odds = ov
+                updated += 1
+        db.commit()
+
+    return {"examined": len(purchases), "updated": updated}
 
 
 @router.post("/{race_id}/soft-reset-bets")

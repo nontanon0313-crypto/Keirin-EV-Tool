@@ -56,7 +56,7 @@ def _load_settled_purchases(db: Session, since_dt: Optional[datetime]) -> List[m
 
 
 def _load_settled_skips(db: Session, since_dt: Optional[datetime]) -> List[models.SkippedBet]:
-    # SkippedBetにcreated_atが無いため、レース開催日で絞る。
+    """結果が埋まった見送りのみ（ROI計算用）。"""
     q = (
         db.query(models.SkippedBet)
         .filter(models.SkippedBet.actual_result.in_(("win", "lose")))
@@ -64,8 +64,39 @@ def _load_settled_skips(db: Session, since_dt: Optional[datetime]) -> List[model
     if since_dt is not None:
         q = (
             q.join(models.Race, models.Race.id == models.SkippedBet.race_id)
-            .filter(models.Race.race_date >= since_dt)
+            .filter(
+                (models.Race.race_date >= since_dt)
+                | (models.Race.race_date.is_(None))
+            )
         )
+    return q.all()
+
+
+def _load_all_skips(db: Session, since_dt: Optional[datetime]) -> List[models.SkippedBet]:
+    """結果の有無を問わず見送り全件（件数把握用）。レースは購入側race_id経由でも可。"""
+    q = db.query(models.SkippedBet)
+    if since_dt is not None:
+        # race_date または、同一raceに since 以降の購入があるもの
+        race_ids_from_date = {
+            r[0]
+            for r in db.query(models.Race.id)
+            .filter(
+                (models.Race.race_date >= since_dt) | (models.Race.race_date.is_(None))
+            )
+            .all()
+        }
+        race_ids_from_purchases = {
+            r[0]
+            for r in db.query(models.Purchase.race_id)
+            .filter(models.Purchase.purchased_at >= since_dt)
+            .distinct()
+            .all()
+        }
+        ids = race_ids_from_date | race_ids_from_purchases
+        if ids:
+            q = q.filter(models.SkippedBet.race_id.in_(list(ids)))
+        else:
+            return []
     return q.all()
 
 
@@ -639,16 +670,18 @@ def diagnostics_bet_type_funnel(
     """課題12: 購入不足 vs 収益性不足の分離。"""
     since_dt = _since_dt(since)
     purchases = _load_settled_purchases(db, since_dt)
-    skips = _load_settled_skips(db, since_dt)
+    skips_settled = _load_settled_skips(db, since_dt)
+    skips_all = _load_all_skips(db, since_dt)
     stake_map = _default_stakes_by_type(purchases)
 
     by_type: Dict[str, dict] = {}
-    all_types = sorted(set([p.bet_type for p in purchases] + [s.bet_type for s in skips]))
+    all_types = sorted(set([p.bet_type for p in purchases] + [s.bet_type for s in skips_all]))
     for bt in all_types:
         ps = [p for p in purchases if p.bet_type == bt]
-        ss = [s for s in skips if s.bet_type == bt]
+        ss = [s for s in skips_all if s.bet_type == bt]
+        ss_settled = [s for s in skips_settled if s.bet_type == bt]
         rows_p = [_purchase_row(p) for p in ps]
-        hit_skips = [s for s in ss if s.actual_result == "win"]
+        hit_skips = [s for s in ss_settled if s.actual_result == "win"]
         filter_hits = len(hit_skips)
         agg = _agg_rows(rows_p)
         n_purchase = len(ps)
