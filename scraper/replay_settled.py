@@ -19,17 +19,18 @@ API = os.environ.get("API_BASE", "https://keirin-ev-tool.onrender.com").rstrip("
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--since", default="calibration_switch")
-    ap.add_argument("--limit", type=int, default=100)
+    ap.add_argument("--since", default="all", help="all=全確定レース")
+    ap.add_argument("--limit", type=int, default=5000)
     ap.add_argument("--bankroll", type=float, default=1_000_000)
     ap.add_argument("--race-ids", default="", help="カンマ区切り。指定時はsinceより優先")
     args = ap.parse_args()
 
     body = {
-        "since": args.since,
         "limit": args.limit,
         "bankroll": args.bankroll,
     }
+    if args.since and args.since != "all":
+        body["since"] = args.since
     if args.race_ids.strip():
         body["race_ids"] = [int(x) for x in args.race_ids.split(",") if x.strip()]
 

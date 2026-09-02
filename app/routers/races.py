@@ -599,10 +599,16 @@ def replay_settled_batch(payload: dict, db: Session = Depends(get_db)):
     from datetime import datetime as dt
 
     bankroll = float(payload.get("bankroll") or 1_000_000)
-    limit = int(payload.get("limit") or 100)
+    limit = int(payload.get("limit") or 5000)
     race_ids = payload.get("race_ids")
-    since = payload.get("since") or "calibration_switch"
-    since_dt = purchases_router._parse_since_param(since)
+    since_raw = payload.get("since")
+    # None / 空 / "all" → 全確定レース（開催日・購入日で絞らない）
+    if since_raw in (None, "", "all", "*"):
+        since = None
+        since_dt = None
+    else:
+        since = since_raw
+        since_dt = purchases_router._parse_since_param(since)
 
     if race_ids:
         ids = list(race_ids)[:limit]
