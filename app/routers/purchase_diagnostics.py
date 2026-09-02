@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
@@ -720,6 +721,269 @@ def diagnostics_bet_type_funnel(
     }
 
 
+
+@router.get("/prob-calibration-grid")
+def diagnostics_prob_calibration_grid(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    券種×勝率帯で「予測確率 vs 実績的中率」を並べる。
+    購入＋結果付き見送りの両方を使う（除外的中の見落としを含む）。
+    """
+    since_dt = _resolve_since(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    skips = _load_settled_skips(db, since_dt)
+
+    bands = [
+        ("0-5%", 0.0, 0.05),
+        ("5-15%", 0.05, 0.15),
+        ("15-30%", 0.15, 0.30),
+        ("30%以上", 0.30, 1.01),
+    ]
+
+    def band_of(prob: Optional[float]) -> Optional[str]:
+        if prob is None:
+            return None
+        for name, lo, hi in bands:
+            if lo <= prob < hi:
+                return name
+        return None
+
+    # rows: (bet_type, band, prob, hit)
+    rows = []
+    for p in purchases:
+        prob = p.win_prob_at_purchase
+        if prob is None:
+            continue
+        b = band_of(float(prob))
+        if not b:
+            continue
+        rows.append((p.bet_type, b, float(prob), 1 if p.result == "win" else 0, "purchase"))
+    for s in skips:
+        prob = s.win_prob_estimated
+        if prob is None:
+            continue
+        b = band_of(float(prob))
+        if not b:
+            continue
+        rows.append((s.bet_type, b, float(prob), 1 if s.actual_result == "win" else 0, "skip"))
+
+    def agg(items):
+        n = len(items)
+        if n == 0:
+            return {
+                "n": 0,
+                "hits": 0,
+                "actual_hit_rate_pct": None,
+                "predicted_avg_pct": None,
+                "gap_pt": None,
+            }
+        hits = sum(x[3] for x in items)
+        pred = sum(x[2] for x in items) / n * 100
+        actual = hits / n * 100
+        return {
+            "n": n,
+            "hits": hits,
+            "actual_hit_rate_pct": round(actual, 4),
+            "predicted_avg_pct": round(pred, 4),
+            "gap_pt": round(actual - pred, 4),  # 負=予測が楽観
+        }
+
+    overall = []
+    for name, _, _ in bands:
+        items = [r for r in rows if r[1] == name]
+        overall.append({"band": name, **agg(items)})
+
+    by_bt = {}
+    for bt in sorted({r[0] for r in rows}):
+        by_bt[bt] = []
+        for name, _, _ in bands:
+            items = [r for r in rows if r[0] == bt and r[1] == name]
+            by_bt[bt].append({"band": name, **agg(items)})
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "total_rows": len(rows),
+        "overall": overall,
+        "by_bet_type": by_bt,
+        "note": (
+            "gap_pt = 実績的中率% - 予測平均%。負なら予測が楽観的。"
+            "購入＋結果付き見送りを合算。"
+        ),
+    }
+
+
+@router.get("/ev-band-detail")
+def diagnostics_ev_band_detail(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    購入のEV帯比較に加え、見送りを仮想100円で同じ帯に載せたときのROIも出す。
+    中EV(120-150) vs 超高EV(150+) の差を見る。
+    """
+    since_dt = _resolve_since(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    skips = _load_settled_skips(db, since_dt)
+
+    def band_name(ev: Optional[float]) -> str:
+        if ev is None:
+            return "unknown"
+        if ev < 0:
+            return "EVマイナス"
+        if ev < 5:
+            return "0-5%(回収100-105)"
+        if ev < 10:
+            return "5-10%"
+        if ev < 20:
+            return "10-20%"
+        if ev < 50:
+            return "20-50%(帯120-150相当)"
+        return "50%以上(帯150+相当)"
+
+    # purchases: real stake
+    p_rows = []
+    for p in purchases:
+        r = _purchase_row(p)
+        r["band"] = band_name(r.get("ev_pct"))
+        p_rows.append(r)
+
+    # skips: virtual 100
+    s_rows = []
+    for s in skips:
+        r = _skip_row(s, 100.0)
+        r["band"] = band_name(r.get("ev_pct"))
+        s_rows.append(r)
+
+    band_order = [
+        "EVマイナス",
+        "0-5%(回収100-105)",
+        "5-10%",
+        "10-20%",
+        "20-50%(帯120-150相当)",
+        "50%以上(帯150+相当)",
+        "unknown",
+    ]
+
+    def summarize(rows, stake_mode: str):
+        out = []
+        for b in band_order:
+            sub = [x for x in rows if x.get("band") == b]
+            if not sub:
+                continue
+            st = _stats(sub)
+            st["band"] = b
+            st["stake_mode"] = stake_mode
+            out.append(st)
+        return out
+
+    # focus: mid vs high among purchases only (same as before but clearer labels)
+    mid = [r for r in p_rows if r.get("band") == "20-50%(帯120-150相当)"]
+    high = [r for r in p_rows if r.get("band") == "50%以上(帯150+相当)"]
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "purchases_by_band": summarize(p_rows, "real_stake"),
+        "skips_by_band": summarize(s_rows, "virtual_100"),
+        "focus": {
+            "purchase_mid_ev_120_150_equiv": _stats(mid) if mid else None,
+            "purchase_high_ev_150_plus_equiv": _stats(high) if high else None,
+            "note": (
+                "ev_pct 20-50 ≒ 予測回収120-150%、ev_pct>=50 ≒ 150%以上。"
+                "購入は実stake、見送りは仮想100円。"
+            ),
+        },
+    }
+
+
+@router.get("/discarded-hits")
+def diagnostics_discarded_hits(
+    since: Optional[str] = Query("calibration_switch"),
+    limit: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """
+    見送りのうち的中したもの（捨てた当たり）の分布。
+    EV・勝率・理由を見て「何を落としているか」を確認する。
+    """
+    since_dt = _resolve_since(since)
+    skips = _load_settled_skips(db, since_dt)
+    hits = [s for s in skips if s.actual_result == "win"]
+
+    def ev_bucket(ev: Optional[float]) -> str:
+        if ev is None:
+            return "unknown"
+        if ev < 0:
+            return "EVマイナス"
+        if ev < 20:
+            return "EV0-20"
+        if ev < 50:
+            return "EV20-50"
+        return "EV50+"
+
+    def prob_bucket(p: Optional[float]) -> str:
+        if p is None:
+            return "unknown"
+        if p < 0.05:
+            return "0-5%"
+        if p < 0.15:
+            return "5-15%"
+        if p < 0.30:
+            return "15-30%"
+        return "30%+"
+
+    by_ev = Counter()
+    by_prob = Counter()
+    by_reason = Counter()
+    by_bt = Counter()
+    payout_sum = 0.0
+    for s in hits:
+        by_ev[ev_bucket(s.ev_pct_estimated)] += 1
+        by_prob[prob_bucket(s.win_prob_estimated)] += 1
+        by_reason[(s.reason or "なし")[:50]] += 1
+        by_bt[s.bet_type] += 1
+        if s.actual_payout:
+            payout_sum += float(s.actual_payout)
+
+    # top hits by payout
+    ranked = sorted(
+        hits,
+        key=lambda s: float(s.actual_payout or 0),
+        reverse=True,
+    )[:limit]
+    samples = []
+    for s in ranked:
+        samples.append({
+            "race_id": s.race_id,
+            "bet_type": s.bet_type,
+            "combination": s.combination,
+            "ev_pct": s.ev_pct_estimated,
+            "win_prob": s.win_prob_estimated,
+            "actual_payout_per_100": s.actual_payout,
+            "reason": (s.reason or "")[:80],
+        })
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "discarded_hit_count": len(hits),
+        "virtual_return_total_per_100yen": round(payout_sum, 2),
+        "by_bet_type": dict(by_bt),
+        "by_ev_bucket": dict(by_ev),
+        "by_prob_bucket": dict(by_prob),
+        "top_reasons": by_reason.most_common(15),
+        "top_hits_by_payout": samples,
+        "note": (
+            "見送りで的中した買い目。仮想投資100円あたりの払戻合計は"
+            "virtual_return_total_per_100yen。"
+        ),
+    }
+
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -733,6 +997,9 @@ def diagnostics_summary(
         "odds_drift": diagnostics_odds_drift(since=since, db=db),
         "stage_gate": diagnostics_stage_gate(since=since, db=db),
         "bet_type_funnel": diagnostics_bet_type_funnel(since=since, db=db),
+        "prob_calibration_grid": diagnostics_prob_calibration_grid(since=since, db=db),
+        "ev_band_detail": diagnostics_ev_band_detail(since=since, db=db),
+        "discarded_hits": diagnostics_discarded_hits(since=since, db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"
