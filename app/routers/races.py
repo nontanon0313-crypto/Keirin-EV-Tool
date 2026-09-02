@@ -643,6 +643,71 @@ def replay_settled_one(
         recorded = len(objs)
 
     conf = confirm_race_result(race_id, race.actual_result, db)
+
+    # 実際の的中買い目がReplay後にどこへ入ったかを確認する。
+    # 「候補生成漏れ」と「候補には存在したがフィルターで見送り」を区別するための
+    # 小規模バックテスト用診断。DBスキーマは変更しない。
+    from .. import ev_calculator as calc
+
+    winning_diagnostics = []
+    try:
+        actual = calc.parse_actual_result(race.actual_result)
+        target_bet_types = {"2車単", "2車複", "3連単", "3連複", "ワイド"}
+
+        purchases_by_key = {
+            (p.bet_type, p.combination): p
+            for p in db.query(models.Purchase)
+            .filter(models.Purchase.race_id == race_id)
+            .all()
+        }
+        skipped_by_key = {
+            (s.bet_type, s.combination): s
+            for s in db.query(models.SkippedBet)
+            .filter(models.SkippedBet.race_id == race_id)
+            .all()
+        }
+
+        for o in db.query(models.Odds).filter(models.Odds.race_id == race_id).all():
+            if o.bet_type not in target_bet_types:
+                continue
+            if not calc.judge_purchase_result(o.bet_type, o.combination, actual):
+                continue
+
+            key = (o.bet_type, o.combination)
+            purchase = purchases_by_key.get(key)
+            skipped = skipped_by_key.get(key)
+
+            if purchase is not None:
+                status = "purchase"
+                reason = None
+                prob = purchase.win_prob_at_purchase
+                ev = purchase.ev_pct_at_purchase
+            elif skipped is not None:
+                status = "skipped"
+                reason = skipped.reason
+                prob = skipped.win_prob_estimated
+                ev = skipped.ev_pct_estimated
+            else:
+                status = "not_recorded"
+                reason = "Purchase/SkippedBetのどちらにも記録されていない"
+                prob = None
+                ev = None
+
+            winning_diagnostics.append({
+                "bet_type": o.bet_type,
+                "combination": o.combination,
+                "odds": o.odds_value,
+                "status": status,
+                "reason": reason,
+                "win_prob_pct": round(prob * 100, 3) if prob is not None else None,
+                "ev_pct": round(ev, 2) if ev is not None else None,
+            })
+    except Exception as e:
+        winning_diagnostics = [{
+            "status": "diagnostic_error",
+            "reason": str(e),
+        }]
+
     return {
         "race_id": race_id,
         "stage": "done",
@@ -650,6 +715,7 @@ def replay_settled_one(
         "purchases_recorded": recorded,
         "skipped_saved_count": skipped_saved,
         "skipped_candidate_count": plan.get("skipped_candidate_count"),
+        "winning_diagnostics": winning_diagnostics,
         "confirm": {
             "updated_count": conf.get("updated_count"),
             "skipped_updated_count": conf.get("skipped_updated_count"),
