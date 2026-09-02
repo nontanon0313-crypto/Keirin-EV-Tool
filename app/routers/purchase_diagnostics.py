@@ -984,6 +984,198 @@ def diagnostics_discarded_hits(
 
 
 
+
+@router.get("/mid-vs-high-ev")
+def diagnostics_mid_vs_high_ev(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    ① 購入を中EV帯だけに限定した場合 vs 高EV帯だけの実績ROI。
+    実stakeのまま比較（仮想ではない）。
+    """
+    since_dt = _since_dt(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    rows = [_purchase_row(p) for p in purchases]
+
+    def is_mid(ev):
+        return ev is not None and 20.0 <= ev < 50.0
+
+    def is_high(ev):
+        return ev is not None and ev >= 50.0
+
+    mid = [r for r in rows if is_mid(r.get("ev_pct"))]
+    high = [r for r in rows if is_high(r.get("ev_pct"))]
+    other = [r for r in rows if r.get("ev_pct") is not None and not is_mid(r.get("ev_pct")) and not is_high(r.get("ev_pct"))]
+    all_pos = [r for r in rows if r.get("ev_pct") is not None and r.get("ev_pct") >= 0]
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "all_purchases": _agg_rows(rows),
+        "mid_ev_only_20_to_50": _agg_rows(mid),
+        "high_ev_only_50_plus": _agg_rows(high),
+        "other_ev": _agg_rows(other),
+        "all_nonneg_ev": _agg_rows(all_pos),
+        "note": (
+            "mid=ev_pct 20〜50（予測回収120〜150%相当）、"
+            "high=ev_pct≥50（150%以上相当）。実stake。"
+            "midのROIが高より良ければ、高EV優先が逆効果。"
+        ),
+    }
+
+
+@router.get("/stage-gate-off-virtual")
+def diagnostics_stage_gate_off_virtual(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    ② ステージ不足で落とした着順券（3連単・2車単）を仮想100円で戻した場合のROI。
+    look-ahead注意: ステージ判定自体に未来実績が混ざる可能性あり（既存stage-gate監査参照）。
+    """
+    since_dt = _since_dt(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    skips = _load_settled_skips(db, since_dt)
+
+    def is_stage_skip(s: models.SkippedBet) -> bool:
+        r = s.reason or ""
+        return "ステージ" in r and ("不足" in r or "検証データ" in r)
+
+    stage_skips = [s for s in skips if is_stage_skip(s)]
+    stage_rows = [_skip_row(s, 100.0) for s in stage_skips]
+
+    by_bt: Dict[str, list] = defaultdict(list)
+    for r in stage_rows:
+        by_bt[r.get("bet_type") or "?"].append(r)
+
+    # 購入実績 + ステージ落としを足した「ゲート無し仮想」
+    # 購入は実stakeのまま、ステージ落としだけ仮想100円 → 混在するので
+    # 比較用に「ステージ落としのみ」と「購入のみ」を分けて返す
+    purchase_rows = [_purchase_row(p) for p in purchases]
+    order_purchases = [r for r in purchase_rows if r.get("bet_type") in ("3連単", "2車単")]
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "stage_gated_skips_virtual_100": _agg_rows(stage_rows),
+        "by_bet_type": {bt: _agg_rows(rs) for bt, rs in sorted(by_bt.items())},
+        "order_sensitive_purchases_actual": _agg_rows(order_purchases),
+        "discarded_hit_count": sum(1 for s in stage_skips if s.actual_result == "win"),
+        "stage_skip_count": len(stage_skips),
+        "note": (
+            "ステージ不足理由の見送りを仮想100円で評価。"
+            "的中が多く払戻が乗れば、ゲートが大穴的中を落としている。"
+            "ステージ判定のlook-aheadバイアスは /stage-gate の監査を併読。"
+        ),
+    }
+
+
+@router.get("/ev-negative-recheck")
+def diagnostics_ev_negative_recheck(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    ③ 「期待値マイナス」で見送った的中について、保存オッズ×保存確率でEVを再計算。
+    本当に負EVだったか、記録・計算の不整合かを見る。
+    """
+    since_dt = _since_dt(since)
+    skips = _load_settled_skips(db, since_dt)
+
+    def is_ev_neg_reason(s: models.SkippedBet) -> bool:
+        r = s.reason or ""
+        return "期待値マイナス" in r
+
+    targets = [s for s in skips if is_ev_neg_reason(s)]
+    hits = [s for s in targets if s.actual_result == "win"]
+
+    # Odds表から倍率を取る
+    race_ids = {s.race_id for s in targets}
+    odds_map: Dict[Tuple[int, str, str], float] = {}
+    if race_ids:
+        for o in (
+            db.query(models.Odds)
+            .filter(models.Odds.race_id.in_(list(race_ids)))
+            .all()
+        ):
+            if o.odds_value and o.odds_value > 0:
+                odds_map[(o.race_id, o.bet_type, o.combination)] = float(o.odds_value)
+
+    recheck = []
+    buckets = Counter()
+    for s in hits:
+        prob = s.win_prob_estimated
+        stored_ev = s.ev_pct_estimated
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        recomputed = None
+        if prob is not None and odds is not None and odds > 0:
+            recomputed = calc.calc_ev_pct(float(prob), float(odds), 0.0)
+        if recomputed is None:
+            buckets["recompute_failed"] += 1
+            label = "再計算不能"
+        elif recomputed < 0:
+            buckets["still_negative"] += 1
+            label = "再計算でも負"
+        elif recomputed < 20:
+            buckets["recomputed_low_positive"] += 1
+            label = "再計算で弱い正"
+        else:
+            buckets["recomputed_high_positive"] += 1
+            label = "再計算で強い正"
+        recheck.append({
+            "race_id": s.race_id,
+            "bet_type": s.bet_type,
+            "combination": s.combination,
+            "stored_ev_pct": stored_ev,
+            "recomputed_ev_pct": round(recomputed, 4) if recomputed is not None else None,
+            "prob": prob,
+            "odds": odds,
+            "actual_payout_per_100": s.actual_payout,
+            "label": label,
+        })
+
+    # 払戻上位
+    recheck_sorted = sorted(
+        recheck,
+        key=lambda x: float(x.get("actual_payout_per_100") or 0),
+        reverse=True,
+    )
+
+    # 全体（的中以外も含む）の再計算分布
+    all_labels = Counter()
+    for s in targets:
+        prob = s.win_prob_estimated
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        if prob is None or odds is None or odds <= 0:
+            all_labels["recompute_failed"] += 1
+            continue
+        rev = calc.calc_ev_pct(float(prob), float(odds), 0.0)
+        if rev < 0:
+            all_labels["still_negative"] += 1
+        elif rev < 20:
+            all_labels["recomputed_low_positive"] += 1
+        else:
+            all_labels["recomputed_high_positive"] += 1
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "ev_neg_skip_count": len(targets),
+        "ev_neg_hit_count": len(hits),
+        "hit_recheck_buckets": dict(buckets),
+        "all_ev_neg_recheck_buckets": dict(all_labels),
+        "top_hits": recheck_sorted[:25],
+        "note": (
+            "stored_ev は記録時の値。recomputed は Odds表×win_prob_estimated で再計算。"
+            "再計算でも負が多いなら「負EVでも当たる」世界。"
+            "再計算で正が多いなら記録時のEV計算・確率に不整合の疑い。"
+        ),
+    }
+
+
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -1000,6 +1192,9 @@ def diagnostics_summary(
         "prob_calibration_grid": diagnostics_prob_calibration_grid(since=since, db=db),
         "ev_band_detail": diagnostics_ev_band_detail(since=since, db=db),
         "discarded_hits": diagnostics_discarded_hits(since=since, db=db),
+        "mid_vs_high_ev": diagnostics_mid_vs_high_ev(since=since, db=db),
+        "stage_gate_off_virtual": diagnostics_stage_gate_off_virtual(since=since, db=db),
+        "ev_negative_recheck": diagnostics_ev_negative_recheck(since=since, db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"
