@@ -731,7 +731,7 @@ def diagnostics_prob_calibration_grid(
     券種×勝率帯で「予測確率 vs 実績的中率」を並べる。
     購入＋結果付き見送りの両方を使う（除外的中の見落としを含む）。
     """
-    since_dt = _resolve_since(since)
+    since_dt = _since_dt(since)
     purchases = _load_settled_purchases(db, since_dt)
     skips = _load_settled_skips(db, since_dt)
 
@@ -824,7 +824,7 @@ def diagnostics_ev_band_detail(
     購入のEV帯比較に加え、見送りを仮想100円で同じ帯に載せたときのROIも出す。
     中EV(120-150) vs 超高EV(150+) の差を見る。
     """
-    since_dt = _resolve_since(since)
+    since_dt = _since_dt(since)
     purchases = _load_settled_purchases(db, since_dt)
     skips = _load_settled_skips(db, since_dt)
 
@@ -873,7 +873,7 @@ def diagnostics_ev_band_detail(
             sub = [x for x in rows if x.get("band") == b]
             if not sub:
                 continue
-            st = _stats(sub)
+            st = _agg_rows(sub)
             st["band"] = b
             st["stake_mode"] = stake_mode
             out.append(st)
@@ -889,8 +889,8 @@ def diagnostics_ev_band_detail(
         "purchases_by_band": summarize(p_rows, "real_stake"),
         "skips_by_band": summarize(s_rows, "virtual_100"),
         "focus": {
-            "purchase_mid_ev_120_150_equiv": _stats(mid) if mid else None,
-            "purchase_high_ev_150_plus_equiv": _stats(high) if high else None,
+            "purchase_mid_ev_120_150_equiv": _agg_rows(mid) if mid else None,
+            "purchase_high_ev_150_plus_equiv": _agg_rows(high) if high else None,
             "note": (
                 "ev_pct 20-50 ≒ 予測回収120-150%、ev_pct>=50 ≒ 150%以上。"
                 "購入は実stake、見送りは仮想100円。"
@@ -909,7 +909,7 @@ def diagnostics_discarded_hits(
     見送りのうち的中したもの（捨てた当たり）の分布。
     EV・勝率・理由を見て「何を落としているか」を確認する。
     """
-    since_dt = _resolve_since(since)
+    since_dt = _since_dt(since)
     skips = _load_settled_skips(db, since_dt)
     hits = [s for s in skips if s.actual_result == "win"]
 
