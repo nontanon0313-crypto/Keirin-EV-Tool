@@ -151,17 +151,19 @@ def _select_portfolio(
         compressed = list(best_by_weight.values())
 
         # 0/1ナップサックDP。
-        # dp[count][used] = (最大期待利益, 選択候補index)
+        # 選択候補の履歴をtupleではなくPython整数のビットマスクで保持する。
+        # 目的関数・予算制約・件数制約・降順更新は従来と同一。
         neg_inf = float("-inf")
         dp = [
-            [(neg_inf, ()) for _ in range(cap_units + 1)]
+            [(neg_inf, 0) for _ in range(cap_units + 1)]
             for _ in range(limit + 1)
         ]
-        dp[0][0] = (0.0, ())
+        dp[0][0] = (0.0, 0)
 
         for i, c in enumerate(compressed):
             weight = int(c["_stake"] // unit)
             value = c["_value"]
+            bit = 1 << i
             max_count = min(limit, i + 1)
 
             # 降順更新により同一候補の重複選択を防止。
@@ -170,7 +172,7 @@ def _select_portfolio(
                 current = dp[count]
 
                 for used in range(cap_units, weight - 1, -1):
-                    prev_profit, prev_indexes = prev[used - weight]
+                    prev_profit, prev_mask = prev[used - weight]
                     if prev_profit == neg_inf:
                         continue
 
@@ -180,20 +182,24 @@ def _select_portfolio(
                     if candidate_profit > current_profit:
                         current[used] = (
                             candidate_profit,
-                            prev_indexes + (i,),
+                            prev_mask | bit,
                         )
 
         best_profit = 0.0
-        best_indexes = ()
+        best_mask = 0
 
         for count in range(1, limit + 1):
             for used in range(cap_units + 1):
-                profit, indexes = dp[count][used]
+                profit, mask = dp[count][used]
                 if profit > best_profit:
                     best_profit = profit
-                    best_indexes = indexes
+                    best_mask = mask
 
-        selected = [compressed[i] for i in best_indexes]
+        selected = [
+            c
+            for i, c in enumerate(compressed)
+            if best_mask & (1 << i)
+        ]
 
         total_stake = sum(
             c["_stake"]
