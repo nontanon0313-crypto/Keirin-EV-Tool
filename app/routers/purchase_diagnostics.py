@@ -180,21 +180,21 @@ def _purchase_row(p: models.Purchase) -> dict:
     }
 
 
-def _skip_row(s: models.SkippedBet, default_stake: float) -> dict:
+def _skip_row(s: models.SkippedBet, default_stake: float = 100.0) -> dict:
+    """見送りの仮想ROI用。
+
+    confirm-result / backfill は的中時 actual_payout = 100円 × オッズ で保存している。
+    そのため仮想stakeは常に100円に固定しないとROIが崩壊する。
+    default_stake引数は互換のため残すが使用しない。
+    """
     won = s.actual_result == "win"
-    # 見送りは当時stakeが無い → 同一券種の平均stake、無ければ100円
-    stake = default_stake if default_stake > 0 else 100.0
-    payout = float(s.actual_payout) if s.actual_payout is not None else (stake if won and False else 0.0)
-    # actual_payout が倍率で入っている場合と金額の場合があるため:
-    # 金額として保存されていればそのまま、nullで的中なら odds 不明で0扱い(過小評価を明示)
+    stake = 100.0
     if s.actual_payout is not None:
         payout = float(s.actual_payout)
-        # もし払戻が「倍率」っぽく小さい値で stake が100なら stake*倍率の可能性は呼び出し側で調整しない
-        # 既存実装では actual_payout は金額想定
     else:
         payout = 0.0
     odds = None
-    if won and stake > 0 and payout > 0:
+    if won and payout > 0:
         odds = payout / stake
     prob = s.win_prob_estimated if s.win_prob_estimated is not None else s.win_prob_raw
     return {
@@ -536,7 +536,7 @@ def diagnostics_filter_effectiveness(
         "by_bet_type": by_type_compare(purchased_rows, ev_neg),
         "stages_approximate": stage_table,
         "note": (
-            "見送りの仮想投資額は同一券種の購入平均stake(無ければ100円)。"
+            "見送りの仮想投資額は常に100円(actual_payoutが100×オッズ前提)。"
             "actual_payoutがnullの的中は払戻0扱い(ROIは控えめ)。"
             "段階はreasonカテゴリ近似(v1)。race-plan完全再実行は /filter-stages-replay を参照。"
         ),

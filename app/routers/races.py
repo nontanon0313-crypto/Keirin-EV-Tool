@@ -416,84 +416,6 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
     result.sort(key=lambda x: -x["win_prob_pct"])
     return result
 
-@router.get("/{race_id}")
-def get_race(race_id: int, db: Session = Depends(get_db)):
-    race = db.query(models.Race).get(race_id)
-    if not race:
-        raise HTTPException(404, "レースが見つかりません")
-
-    odds_by_type = {}
-    for o in race.odds_list:
-        odds_by_type[o.bet_type] = odds_by_type.get(o.bet_type, 0) + 1
-
-    return {
-        "id": race.id,
-        "actual_result": race.actual_result,
-        "venue_name": race.venue_name,
-        "race_number": race.race_number,
-        "race_date": race.race_date.strftime("%Y-%m-%d") if race.race_date else None,
-        "external_ref": race.external_ref,
-        "grade": race.grade,
-        "race_stage": race.race_stage,
-        "weather": race.weather,
-        "temperature_c": race.temperature_c,
-        "season": race.season,
-        "development_simulation": race.development_simulation,
-        "event_title": race.event_title,
-        "lines_data": race.lines_data,
-        "bank_info": (
-            {
-                "lap_length_m": race.bank.lap_length_m,
-                "home_stretch_length_m": race.bank.home_stretch_length_m,
-                "lead_advantage_score": race.bank.lead_advantage_score,
-            }
-            if race.bank else None
-        ),
-        "entries": [
-            {
-                "car_number": e.car_number,
-                "player_name": e.player_name,
-                "region": e.region,
-                "is_local": e.is_local,
-                "leg_style": e.leg_style,
-                "race_score": e.race_score,
-                "s_count": e.s_count,
-                "h_count": e.h_count,
-                "b_count": e.b_count,
-                "kimarite_nige": e.kimarite_nige,
-                "kimarite_makuri": e.kimarite_makuri,
-                "kimarite_sashi": e.kimarite_sashi,
-                "kimarite_mark": e.kimarite_mark,
-                "finish_1st": e.finish_1st,
-                "finish_2nd": e.finish_2nd,
-                "finish_3rd": e.finish_3rd,
-                "line_group": e.line_group,
-                "app_win_rate": e.app_win_rate,
-                # OCRでは「欠場」を直接判定できないため、アプリ勝率がちょうど0%かつ
-                # 他の基本データ(競走得点)も無い場合のみ、目視確認を促す。
-                # race_scoreなど他のデータがあれば実際に出走している証拠なので、
-                # 単に勝率が低いだけと判断できる(のんの指摘により条件を絞った)。
-                "zero_app_win_rate_warning": e.app_win_rate == 0 and e.race_score is None,
-                "ai_win_prob": round(e.ai_win_prob * 100, 2) if e.ai_win_prob is not None else None,
-                "blended_win_prob": round(e.blended_win_prob * 100, 2) if e.blended_win_prob is not None else None,
-                "ready_for_ev": e.blended_win_prob is not None,
-                "pre_race_comment": e.pre_race_comment,
-            }
-            for e in race.entries
-        ],
-        "odds_count": len(race.odds_list),
-        "odds_by_type": odds_by_type,
-        "ready_for_ev_calc": (
-            len(race.entries) > 0
-            and all(e.blended_win_prob is not None for e in race.entries)
-            and len(race.odds_list) > 0
-        ),
-    }
-
-
-
-
-
 @router.get("/skipped-bet-counts")
 def skipped_bet_counts(db: Session = Depends(get_db)):
     """見送りテーブルの件数確認用。"""
@@ -828,6 +750,86 @@ def replay_settled_batch(payload: dict, db: Session = Depends(get_db)):
         "since": since,
         "results": results,
     }
+
+
+
+
+@router.get("/{race_id}")
+def get_race(race_id: int, db: Session = Depends(get_db)):
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+
+    odds_by_type = {}
+    for o in race.odds_list:
+        odds_by_type[o.bet_type] = odds_by_type.get(o.bet_type, 0) + 1
+
+    return {
+        "id": race.id,
+        "actual_result": race.actual_result,
+        "venue_name": race.venue_name,
+        "race_number": race.race_number,
+        "race_date": race.race_date.strftime("%Y-%m-%d") if race.race_date else None,
+        "external_ref": race.external_ref,
+        "grade": race.grade,
+        "race_stage": race.race_stage,
+        "weather": race.weather,
+        "temperature_c": race.temperature_c,
+        "season": race.season,
+        "development_simulation": race.development_simulation,
+        "event_title": race.event_title,
+        "lines_data": race.lines_data,
+        "bank_info": (
+            {
+                "lap_length_m": race.bank.lap_length_m,
+                "home_stretch_length_m": race.bank.home_stretch_length_m,
+                "lead_advantage_score": race.bank.lead_advantage_score,
+            }
+            if race.bank else None
+        ),
+        "entries": [
+            {
+                "car_number": e.car_number,
+                "player_name": e.player_name,
+                "region": e.region,
+                "is_local": e.is_local,
+                "leg_style": e.leg_style,
+                "race_score": e.race_score,
+                "s_count": e.s_count,
+                "h_count": e.h_count,
+                "b_count": e.b_count,
+                "kimarite_nige": e.kimarite_nige,
+                "kimarite_makuri": e.kimarite_makuri,
+                "kimarite_sashi": e.kimarite_sashi,
+                "kimarite_mark": e.kimarite_mark,
+                "finish_1st": e.finish_1st,
+                "finish_2nd": e.finish_2nd,
+                "finish_3rd": e.finish_3rd,
+                "line_group": e.line_group,
+                "app_win_rate": e.app_win_rate,
+                # OCRでは「欠場」を直接判定できないため、アプリ勝率がちょうど0%かつ
+                # 他の基本データ(競走得点)も無い場合のみ、目視確認を促す。
+                # race_scoreなど他のデータがあれば実際に出走している証拠なので、
+                # 単に勝率が低いだけと判断できる(のんの指摘により条件を絞った)。
+                "zero_app_win_rate_warning": e.app_win_rate == 0 and e.race_score is None,
+                "ai_win_prob": round(e.ai_win_prob * 100, 2) if e.ai_win_prob is not None else None,
+                "blended_win_prob": round(e.blended_win_prob * 100, 2) if e.blended_win_prob is not None else None,
+                "ready_for_ev": e.blended_win_prob is not None,
+                "pre_race_comment": e.pre_race_comment,
+            }
+            for e in race.entries
+        ],
+        "odds_count": len(race.odds_list),
+        "odds_by_type": odds_by_type,
+        "ready_for_ev_calc": (
+            len(race.entries) > 0
+            and all(e.blended_win_prob is not None for e in race.entries)
+            and len(race.odds_list) > 0
+        ),
+    }
+
+
+
 
 
 @router.delete("/{race_id}")
