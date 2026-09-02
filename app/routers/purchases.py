@@ -1958,6 +1958,321 @@ def bet_type_diagnostics(since: Optional[str] = None, db: Session = Depends(get_
     }
 
 
+
+@router.get("/diagnostics/predicted-vs-actual-return")
+def diagnostics_predicted_vs_actual_return(
+    since: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    同一の確定済みPurchase集合について、
+    1. 保存EVから逆算した予測払戻
+    2. 購入時確率 × 購入時オッズから再計算した予測払戻
+    3. 実際払戻
+    を直接比較する。
+
+    目的:
+    「全体の的中率は校正されているのにEV/ROIが大きく乖離する」
+    問題について、確率・EV・払戻・集計のどこで乖離しているかを
+    同一母集団で確認する。
+    """
+
+    query = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result != "pending")
+    )
+
+    since_dt = None
+    since_resolved = None
+
+    if since:
+        if since == "calibration_switch":
+            # 既存の診断と同じ基準日を使うため、
+            # Purchaseに作成日時が存在する場合のみ安全に絞る。
+            # 基準日の解決ができない場合は全件対象とし、
+            # レスポンスで明示する。
+            pass
+        else:
+            try:
+                since_dt = datetime.fromisoformat(
+                    since.replace("Z", "+00:00")
+                )
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="sinceはISO日時またはcalibration_switchを指定してください"
+                )
+
+    if since_dt is not None and hasattr(models.Purchase, "created_at"):
+        query = query.filter(models.Purchase.created_at >= since_dt)
+        since_resolved = since_dt.isoformat()
+
+    purchases = query.all()
+
+    def empty_stats():
+        return {
+            "bet_count": 0,
+            "hit_count": 0,
+            "stake_total": 0.0,
+            "predicted_return_from_stored_ev": 0.0,
+            "predicted_return_from_prob_odds": 0.0,
+            "actual_return": 0.0,
+            "stored_ev_predicted_roi_pct": None,
+            "prob_odds_predicted_roi_pct": None,
+            "actual_roi_pct": None,
+            "predicted_avg_prob_pct": None,
+            "actual_hit_rate_pct": None,
+            "avg_odds": None,
+            "probability_sum_expected_hits": 0.0,
+            "probability_sum_actual_hits": 0,
+            "probability_gap_hits": None,
+            "odds_available_count": 0,
+            "stored_ev_available_count": 0,
+        }
+
+    def finalize(rows):
+        s = empty_stats()
+
+        if not rows:
+            return s
+
+        stake_total = sum(r["stake"] for r in rows)
+        hit_count = sum(1 for r in rows if r["won"])
+        actual_return = sum(r["actual_return"] for r in rows)
+
+        stored_ev_return = sum(
+            r["stake"] * (1.0 + r["ev_pct"] / 100.0)
+            for r in rows
+            if r["ev_pct"] is not None
+        )
+
+        prob_odds_return = sum(
+            r["stake"] * r["prob"] * r["odds"]
+            for r in rows
+            if r["prob"] is not None and r["odds"] is not None and r["odds"] > 0
+        )
+
+        probs = [r["prob"] for r in rows if r["prob"] is not None]
+        odds = [r["odds"] for r in rows if r["odds"] is not None and r["odds"] > 0]
+
+        s.update({
+            "bet_count": len(rows),
+            "hit_count": hit_count,
+            "stake_total": round(stake_total, 2),
+            "predicted_return_from_stored_ev": round(stored_ev_return, 2),
+            "predicted_return_from_prob_odds": round(prob_odds_return, 2),
+            "actual_return": round(actual_return, 2),
+
+            "stored_ev_predicted_roi_pct": (
+                round(stored_ev_return / stake_total * 100.0, 4)
+                if stake_total > 0 else None
+            ),
+
+            "prob_odds_predicted_roi_pct": (
+                round(prob_odds_return / stake_total * 100.0, 4)
+                if stake_total > 0 else None
+            ),
+
+            "actual_roi_pct": (
+                round(actual_return / stake_total * 100.0, 4)
+                if stake_total > 0 else None
+            ),
+
+            "predicted_avg_prob_pct": (
+                round(sum(probs) / len(probs) * 100.0, 4)
+                if probs else None
+            ),
+
+            "actual_hit_rate_pct": (
+                round(hit_count / len(rows) * 100.0, 4)
+                if rows else None
+            ),
+
+            "avg_odds": (
+                round(sum(odds) / len(odds), 4)
+                if odds else None
+            ),
+
+            "probability_sum_expected_hits": (
+                round(sum(probs), 4)
+                if probs else 0.0
+            ),
+
+            "probability_sum_actual_hits": hit_count,
+
+            "probability_gap_hits": (
+                round(hit_count - sum(probs), 4)
+                if probs else None
+            ),
+
+            "odds_available_count": len(odds),
+
+            "stored_ev_available_count": sum(
+                1 for r in rows if r["ev_pct"] is not None
+            ),
+        })
+
+        return s
+
+    def odds_band(odds):
+        if odds is None or odds <= 0:
+            return "不明"
+        if odds < 5:
+            return "1-5倍"
+        if odds < 10:
+            return "5-10倍"
+        if odds < 30:
+            return "10-30倍"
+        if odds < 100:
+            return "30-100倍"
+        if odds < 300:
+            return "100-300倍"
+        return "300倍以上"
+
+    def ev_band(ev):
+        if ev is None:
+            return "不明"
+        if ev < 0:
+            return "EVマイナス"
+        if ev < 20:
+            return "0-20%"
+        if ev < 50:
+            return "20-50%"
+        if ev < 100:
+            return "50-100%"
+        if ev < 300:
+            return "100-300%"
+        return "300%以上"
+
+    rows = []
+
+    for p in purchases:
+        stake = float(p.stake_amount or 0.0)
+
+        prob = getattr(p, "win_prob_at_purchase", None)
+        if prob is not None:
+            try:
+                prob = float(prob)
+            except (TypeError, ValueError):
+                prob = None
+
+        odds = getattr(p, "odds_at_purchase", None)
+        if odds is not None:
+            try:
+                odds = float(odds)
+            except (TypeError, ValueError):
+                odds = None
+
+        ev_pct = getattr(p, "ev_pct_at_purchase", None)
+        if ev_pct is not None:
+            try:
+                ev_pct = float(ev_pct)
+            except (TypeError, ValueError):
+                ev_pct = None
+
+        payout = getattr(p, "payout_amount", None)
+        try:
+            actual_return = float(payout or 0.0)
+        except (TypeError, ValueError):
+            actual_return = 0.0
+
+        won = p.result == "win"
+
+        rows.append({
+            "purchase_id": p.id,
+            "race_id": p.race_id,
+            "bet_type": p.bet_type,
+            "stake": stake,
+            "prob": prob,
+            "odds": odds,
+            "ev_pct": ev_pct,
+            "actual_return": actual_return,
+            "won": won,
+        })
+
+    by_odds = {}
+    for band in [
+        "1-5倍",
+        "5-10倍",
+        "10-30倍",
+        "30-100倍",
+        "100-300倍",
+        "300倍以上",
+        "不明",
+    ]:
+        group = [r for r in rows if odds_band(r["odds"]) == band]
+        by_odds[band] = finalize(group)
+
+    by_ev = {}
+    for band in [
+        "EVマイナス",
+        "0-20%",
+        "20-50%",
+        "50-100%",
+        "100-300%",
+        "300%以上",
+        "不明",
+    ]:
+        group = [r for r in rows if ev_band(r["ev_pct"]) == band]
+        by_ev[band] = finalize(group)
+
+    by_bet_type = {}
+    for bet_type in sorted({r["bet_type"] for r in rows if r["bet_type"]}):
+        group = [r for r in rows if r["bet_type"] == bet_type]
+        by_bet_type[bet_type] = finalize(group)
+
+    overall = finalize(rows)
+
+    consistency = {
+        "stored_ev_vs_prob_odds_return_gap": (
+            round(
+                overall["predicted_return_from_stored_ev"]
+                - overall["predicted_return_from_prob_odds"],
+                2
+            )
+        ),
+
+        "prob_odds_vs_actual_return_gap": (
+            round(
+                overall["predicted_return_from_prob_odds"]
+                - overall["actual_return"],
+                2
+            )
+        ),
+
+        "stored_ev_vs_actual_return_gap": (
+            round(
+                overall["predicted_return_from_stored_ev"]
+                - overall["actual_return"],
+                2
+            )
+        ),
+    }
+
+    return {
+        "purpose": (
+            "同一Purchase集合で予測払戻と実際払戻を直接比較する診断"
+        ),
+        "since": since,
+        "since_resolved": since_resolved,
+        "overall": overall,
+        "by_odds_band": by_odds,
+        "by_ev_band": by_ev,
+        "by_bet_type": by_bet_type,
+        "consistency": consistency,
+        "interpretation": {
+            "stored_ev": (
+                "保存済みev_pct_at_purchaseから逆算した予測払戻"
+            ),
+            "prob_times_odds": (
+                "win_prob_at_purchase × odds_at_purchase × stakeの合計"
+            ),
+            "actual": (
+                "確定済みpayout_amountの合計"
+            ),
+        },
+    }
+
 @router.delete("/{purchase_id}")
 def delete_purchase(purchase_id: int, db: Session = Depends(get_db)):
     """

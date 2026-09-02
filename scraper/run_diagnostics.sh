@@ -145,6 +145,89 @@ if code == 200:
         )
 else:
     print(code, r.text[:500])
+
+print()
+print("=== 11. 予測払戻 vs 実際払戻（同一購入集合） ===")
+code, r = get("/purchases/diagnostics/predicted-vs-actual-return")
+if code == 200:
+    d = r.json()
+    o = d.get("overall") or {}
+    c = d.get("consistency") or {}
+
+    print(
+        f"n={o.get('bet_count')} "
+        f"hit={o.get('hit_count')} "
+        f"stake={o.get('stake_total')}"
+    )
+
+    print(
+        f"prob_expected_hits={o.get('probability_sum_expected_hits')} "
+        f"actual_hits={o.get('probability_sum_actual_hits')} "
+        f"gap_hits={o.get('probability_gap_hits')}"
+    )
+
+    print(
+        f"storedEV_pred_return={o.get('predicted_return_from_stored_ev')} "
+        f"ROI={o.get('stored_ev_predicted_roi_pct')}"
+    )
+
+    print(
+        f"prob×odds_pred_return={o.get('predicted_return_from_prob_odds')} "
+        f"ROI={o.get('prob_odds_predicted_roi_pct')}"
+    )
+
+    print(
+        f"actual_return={o.get('actual_return')} "
+        f"ROI={o.get('actual_roi_pct')}"
+    )
+
+    print(
+        f"gap storedEV-vs-prob×odds={c.get('stored_ev_vs_prob_odds_return_gap')} "
+        f"prob×odds-vs-actual={c.get('prob_odds_vs_actual_return_gap')} "
+        f"storedEV-vs-actual={c.get('stored_ev_vs_actual_return_gap')}"
+    )
+
+    print("--- by odds band ---")
+    for band, s in (d.get("by_odds_band") or {}).items():
+        if (s.get("bet_count") or 0) <= 0:
+            continue
+        print(
+            f"  {band}: "
+            f"n={s.get('bet_count')} "
+            f"predROI={s.get('prob_odds_predicted_roi_pct')} "
+            f"actualROI={s.get('actual_roi_pct')} "
+            f"predP={s.get('predicted_avg_prob_pct')} "
+            f"actualHit={s.get('actual_hit_rate_pct')} "
+            f"avgOdds={s.get('avg_odds')}"
+        )
+
+    print("--- by EV band ---")
+    for band, s in (d.get("by_ev_band") or {}).items():
+        if (s.get("bet_count") or 0) <= 0:
+            continue
+        print(
+            f"  {band}: "
+            f"n={s.get('bet_count')} "
+            f"storedEVROI={s.get('stored_ev_predicted_roi_pct')} "
+            f"probOddsROI={s.get('prob_odds_predicted_roi_pct')} "
+            f"actualROI={s.get('actual_roi_pct')} "
+            f"predP={s.get('predicted_avg_prob_pct')} "
+            f"actualHit={s.get('actual_hit_rate_pct')}"
+        )
+
+    print("--- by bet type ---")
+    for bt, s in (d.get("by_bet_type") or {}).items():
+        print(
+            f"  {bt}: "
+            f"n={s.get('bet_count')} "
+            f"predROI={s.get('prob_odds_predicted_roi_pct')} "
+            f"actualROI={s.get('actual_roi_pct')} "
+            f"predP={s.get('predicted_avg_prob_pct')} "
+            f"actualHit={s.get('actual_hit_rate_pct')}"
+        )
+else:
+    print(code, r.text[:700])
+
 print("\n=== 完了 ===")
 
 
