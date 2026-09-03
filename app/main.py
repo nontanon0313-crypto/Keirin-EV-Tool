@@ -37,6 +37,17 @@ def root():
     return {"status": "ok", "service": "keirin-ev-tool"}
 
 
+# RenderのデプロイヘルスチェックがHEAD /で疎通確認してくることがある。
+# FastAPI/Starletteは通常GETルートに対してHEADも自動処理するはずだが、
+# 実機でHEAD /が405 Method Not Allowedになり、Renderがデプロイを
+# 「起動失敗」と判断して起動→シャットダウンを繰り返す事象が発生したため、
+# 明示的にHEADハンドラも登録して自動対応に依存しないようにする
+# (のんの報告「デプロイが終わらなくなった」を受けて追加)。
+@app.head("/")
+def root_head():
+    return {"status": "ok", "service": "keirin-ev-tool"}
+
+
 @app.get("/health")
 def health():
     from .database import get_active_db_info, ensure_active_connection
