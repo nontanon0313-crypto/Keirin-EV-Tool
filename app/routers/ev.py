@@ -1,4 +1,5 @@
 import itertools
+import time as _time
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
@@ -637,6 +638,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     if not race:
         raise HTTPException(404, "レースが見つかりません")
 
+    # のんの報告「race-planが1レース約45〜50秒かかる」の原因調査用の区間計測。
+    # 校正キャッシュは効いていることが確認済み(process_pid同一)のため、
+    # どのフェーズが実際に時間を食っているかをここで直接計測する。
+    _t0 = _time.time()
+
     entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
     win_probs = _build_win_probs(entries)
     if not win_probs:
@@ -644,6 +650,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
+    _t1 = _time.time()  # ここまで: レース・出走表・オッズ取得
     if not odds_rows:
         # 以前は400エラーで止めていたが、再予想バッチ処理中にオッズ無しレースが
         # 混ざっていると、そこでバッチ全体がエラー扱いになってしまっていた。
@@ -665,6 +672,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
     # 実購入集合で残る楽観バイアス用の追加係数（選別後校正）
     purchase_set_factors = purchases_router.get_purchase_set_calibration_factors(db)
+    _t2 = _time.time()  # ここまで: 校正係数(第1段+第2段)取得
 
     # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
     # (3連複・2車複・ワイド)より難しく、レースのステージ(S級決勝等)によっては
@@ -686,6 +694,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         race.race_stage is not None and stage_sample_n is not None
         and stage_sample_n < MIN_STAGE_SAMPLE_FOR_ORDER_BETS
     )
+    _t3 = _time.time()  # ここまで: stage_sample_nのcount()クエリ
 
     stage_gated_keys = set()
     performance_gated_keys = set()  # (bet_type, combination) -> reason
@@ -711,6 +720,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             bet_type_exp_map = purchases_router.get_bet_type_expectancy_map(db, min_samples=50)
         except Exception:
             bet_type_exp_map = {}
+    _t4 = _time.time()  # ここまで: ステージ/券種ゲート集計取得(キャッシュ済みのはず)
 
     # 実績ゲートは「確率を捨てる」のではなく、不調ステージのみ見送り(券種差別なし)。
     # マルチ専用の確率縮小・最低勝率・券種除外は行わない。
@@ -825,6 +835,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 検証用に残す。実際に勝つ組み合わせの大半は確率上位に来るはずなので、
     # DB容量を抑えつつ検証の見落としを大きく減らせる。
     NEGATIVE_EV_VERIFICATION_TOP_N = 30  # 除外群ROI検証のため枠を拡大(のんの診断要望)
+    _t5 = _time.time()  # ここまで: 候補評価ループ(for o in odds_rows)本体
     negative_ev_by_type = {}
     for e in all_evaluated:
         if e["ev_pct"] <= 0:
@@ -976,7 +987,23 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     else:
         race_hit_prob_pct = 0
 
+    _t6 = _time.time()  # ここまで: skipped_for_verification組み立て・ポートフォリオ選定等
     n_skip = _save_skipped_bets(db, race_id, skipped_for_verification)
+    _t7 = _time.time()  # ここまで: SkippedBet保存(db.add_all + commit)
+
+    _timings = {
+        "fetch_race_entries_odds": round(_t1 - _t0, 2),
+        "calibration_factors": round(_t2 - _t1, 2),
+        "stage_sample_count_query": round(_t3 - _t2, 2),
+        "gate_expectancy_maps": round(_t4 - _t3, 2),
+        "candidate_eval_loop": round(_t5 - _t4, 2),
+        "portfolio_and_verification_build": round(_t6 - _t5, 2),
+        "save_skipped_bets": round(_t7 - _t6, 2),
+        "total": round(_t7 - _t0, 2),
+        "odds_rows_count": len(odds_rows),
+        "all_evaluated_count": len(all_evaluated),
+        "skipped_candidate_count": len(skipped_for_verification),
+    }
 
     return {
         "race_id": race_id,
@@ -988,6 +1015,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "excluded_by_budget_count": excluded_by_budget_count,
         "excluded_by_garami_count": excluded_by_garami_count,
         "excluded_by_min_stake_count": excluded_by_min_stake_count,
+        "debug_timings": _timings,
         "excluded_low_prob_count": excluded_low_prob_count,
         # 実際にどの設定でこのプランが作られたかを明示する(除外されたはずの大穴帯が
         # 混ざっていた場合など、原因切り分けをしやすくするため。のんの報告により追加)。

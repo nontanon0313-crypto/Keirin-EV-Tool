@@ -609,7 +609,9 @@ def replay_settled_one(
             "message": "選手勝率が無い。先に /analyze/estimate か full reset+再予想が必要",
         }
 
+    _t_reset_start = _time.time()
     soft_reset_bets(race_id, db)
+    _t_reset_end = _time.time()
 
     req = schemas.RacePlanRequest(
         race_id=race_id,
@@ -618,6 +620,7 @@ def replay_settled_one(
         apply_odds_safety_margin=apply_odds_safety_margin,
         avoid_garami=False,  # replayは速度優先（ガミり厳密は任意）
     )
+    _t_plan_start = _time.time()
     try:
         plan = ev_router.race_plan(race_id, req, db)
     except HTTPException as he:
@@ -635,6 +638,8 @@ def replay_settled_one(
         }
     if plan.get("skipped_no_odds"):
         return {"race_id": race_id, "stage": "skipped_no_odds"}
+
+    _t_plan_end = _time.time()
 
     items = plan.get("items") or []
     skipped_saved = plan.get("skipped_saved_count", 0)
@@ -663,7 +668,11 @@ def replay_settled_one(
         db.commit()
         recorded = len(objs)
 
+    _t_purchase_save_end = _time.time()
+
     conf = confirm_race_result(race_id, race.actual_result, db)
+
+    _t_confirm_end = _time.time()
 
     # 実際の的中買い目がReplay後にどこへ入ったかを確認する。
     # 「候補生成漏れ」と「候補には存在したがフィルターで見送り」を区別するための
@@ -751,6 +760,16 @@ def replay_settled_one(
         "debug_process_uptime_seconds": round(
             _time.time() - purchases_router_for_debug._PROCESS_STARTED_AT, 1
         ),
+        # 1レースの内訳(秒)。race_plan内部のdebug_timingsと合わせて見ることで、
+        # 「校正/ゲート集計(キャッシュ済み)」「候補ループ」「見送り保存」
+        # 「購入保存」「確定処理」のどこで時間を使っているかを特定する。
+        "debug_outer_timings": {
+            "soft_reset_bets": round(_t_reset_end - _t_reset_start, 2),
+            "race_plan_call_total": round(_t_plan_end - _t_plan_start, 2),
+            "purchase_save": round(_t_purchase_save_end - _t_plan_end, 2),
+            "confirm_race_result": round(_t_confirm_end - _t_purchase_save_end, 2),
+        },
+        "debug_race_plan_timings": plan.get("debug_timings"),
     }
 
 
