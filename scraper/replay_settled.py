@@ -41,6 +41,19 @@ def main():
     # 外部サイトからレース情報を取得する処理ではない。
     target_url = f"{API_BASE}/races/replay-settled/targets"
 
+    # 校正キャッシュを先に温める（初回race-planの150sタイムアウト回避）
+    warm_url = f"{API_BASE}/purchases/warm-calibration"
+    print(f"[{now()}] 校正ウォームアップ: {warm_url}", flush=True)
+    try:
+        wr = session.post(warm_url, timeout=300)
+        print(f"[{now()}] warm status={wr.status_code}", flush=True)
+        print((wr.text or "")[:500], flush=True)
+        if wr.status_code >= 400:
+            print(f"[{now()}] 警告: warm失敗。続けますが初回が遅延/500になる可能性あり", flush=True)
+    except Exception as e:
+        print(f"[{now()}] warm error: {type(e).__name__}: {e}", flush=True)
+        print(f"[{now()}] 警告: warm失敗のまま続行", flush=True)
+
     print(f"[{now()}] 対象レースID一覧取得: {target_url}", flush=True)
 
     try:

@@ -101,7 +101,7 @@ import time as _time
 
 _retroactive_calibration_cache = {"computed_at": 0.0, "value": None}
 _purchase_set_calibration_cache = {"computed_at": 0.0, "value": None}
-RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS = 15 * 60  # 15分
+RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS = 60 * 60  # 60分（replay中に再計算しない）
 
 
 def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> dict:
@@ -128,22 +128,36 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
         if cached is not None and (now - _retroactive_calibration_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
             return cached
 
+    # レースとオッズを一括取得（レースごとのN+1クエリを避ける）
     races = (
         db.query(models.Race)
         .filter(models.Race.actual_result.isnot(None))
         .options(joinedload(models.Race.entries))
         .all()
     )
+    from collections import defaultdict
+    odds_by_race = defaultdict(list)
+    race_ids = [r.id for r in races]
+    if race_ids:
+        # 大きすぎるIN句を避けるためチャンク
+        CHUNK = 500
+        for i in range(0, len(race_ids), CHUNK):
+            chunk = race_ids[i:i + CHUNK]
+            for o in db.query(models.Odds).filter(models.Odds.race_id.in_(chunk)).all():
+                odds_by_race[o.race_id].append(o)
 
     records = []
     for race in races:
         win_probs = calc.build_win_probs_from_entries(race.entries)
         if not win_probs:
             continue
-        odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race.id).all()
+        odds_rows = odds_by_race.get(race.id) or []
         if not odds_rows:
             continue
-        parsed_result = calc.parse_actual_result(race.actual_result)
+        try:
+            parsed_result = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
         line_map, line_boost = calc.line_map_from_race(race)
         for o in odds_rows:
             if o.bet_type not in TARGET_BET_TYPES:
@@ -152,7 +166,12 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
                 cars = tuple(int(x) for x in o.combination.split("-"))
             except (ValueError, AttributeError):
                 continue
-            prob_raw = calc.estimate_prob_for_bet(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
+            try:
+                prob_raw = calc.estimate_prob_for_bet(
+                    win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost
+                )
+            except Exception:
+                continue
             won = calc.judge_purchase_result(o.bet_type, o.combination, parsed_result)
             records.append((prob_raw, won, "retroactive", o.bet_type))
 
@@ -586,6 +605,35 @@ def source_weights(db: Session = Depends(get_db)):
         "app_brier_score": round(app_brier, 4),
         "ai_brier_score": round(ai_brier, 4),
         "reason": f"着順確定済み{len(races)}レース分の実績から算出しました(値が低いほど精度が高いBrierスコア: tipstar={round(app_brier,4)} / AI={round(ai_brier,4)})。",
+    }
+
+
+
+
+@router.post("/warm-calibration")
+def warm_calibration(db: Session = Depends(get_db)):
+    """
+    遡及校正・購入集合校正を先に計算してキャッシュする。
+    race-plan / replay の初回が Render のタイムアウト(約150s)に当たらないようにする。
+    """
+    t0 = _time.time()
+    retro = get_calibration_factors_retroactive(db, use_cache=False)
+    t1 = _time.time()
+    purchase_set = get_purchase_set_calibration_factors(db, use_cache=False)
+    t2 = _time.time()
+    overall = (retro or {}).get("overall") or {}
+    ps = (purchase_set or {}).get("overall") or {}
+    return {
+        "ok": True,
+        "retroactive_seconds": round(t1 - t0, 2),
+        "purchase_set_seconds": round(t2 - t1, 2),
+        "total_seconds": round(t2 - t0, 2),
+        "retroactive_overall_factor": overall.get("calibration_factor"),
+        "retroactive_sample_count": overall.get("sample_count"),
+        "purchase_set_factor": ps.get("factor"),
+        "purchase_set_n": ps.get("n"),
+        "cache_ttl_seconds": RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS,
+        "message": "キャッシュ済み。続けて replay / race-plan を実行してください。",
     }
 
 
