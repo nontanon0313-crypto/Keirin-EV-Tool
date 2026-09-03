@@ -447,12 +447,27 @@ def _compute_calibration_factors_from_records(records: list) -> dict:
 
 DEFAULT_ODDS_SAFETY_MARGIN_PCT = 20.0
 
-def get_stage_expectancy_map(db: Session, min_samples: int = 50) -> dict:
+_stage_expectancy_cache = {"computed_at": 0.0, "value": None}
+_bet_type_expectancy_cache = {"computed_at": 0.0, "value": None}
+
+
+def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool = True) -> dict:
     """
     レースステージごとの実績収支率(回収率-100)を返す。
     サンプルが min_samples 未満のステージは含めない。
     戻り値: {stage_name: {"n": int, "expectancy_pct": float, "win_rate_pct": float}}
+
+    2026-09-03: race_plan/replayで1レースごとにPurchase全件を毎回フルスキャンしており、
+    校正係数と並ぶ速度低下要因になっていたため、同じTTLキャッシュ方式を追加
+    (のんの報告「race-planが1レース約50秒」を受けて調査・対応)。
+    min_samplesは常に同じ値(50)で呼ばれる前提のシンプルなキャッシュ。
     """
+    now = _time.time()
+    if use_cache:
+        cached = _stage_expectancy_cache["value"]
+        if cached is not None and (now - _stage_expectancy_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
+            return cached
+
     rows = (
         db.query(models.Purchase, models.Race.race_stage)
         .join(models.Race, models.Race.id == models.Purchase.race_id)
@@ -480,11 +495,19 @@ def get_stage_expectancy_map(db: Session, min_samples: int = 50) -> dict:
             "expectancy_pct": round(exp, 2),
             "win_rate_pct": round(b["wins"] / b["n"] * 100, 2),
         }
+    _stage_expectancy_cache["value"] = out
+    _stage_expectancy_cache["computed_at"] = now
     return out
 
 
-def get_bet_type_expectancy_map(db: Session, min_samples: int = 50) -> dict:
-    """券種ごとの実績収支率。"""
+def get_bet_type_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool = True) -> dict:
+    """券種ごとの実績収支率。get_stage_expectancy_mapと同じ理由でキャッシュを追加。"""
+    now = _time.time()
+    if use_cache:
+        cached = _bet_type_expectancy_cache["value"]
+        if cached is not None and (now - _bet_type_expectancy_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
+            return cached
+
     purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
     buckets = {}
     for p in purchases:
@@ -504,6 +527,8 @@ def get_bet_type_expectancy_map(db: Session, min_samples: int = 50) -> dict:
             "expectancy_pct": round(exp, 2),
             "win_rate_pct": round(b["wins"] / b["n"] * 100, 2),
         }
+    _bet_type_expectancy_cache["value"] = out
+    _bet_type_expectancy_cache["computed_at"] = now
     return out
 
 
@@ -613,25 +638,38 @@ def source_weights(db: Session = Depends(get_db)):
 @router.post("/warm-calibration")
 def warm_calibration(db: Session = Depends(get_db)):
     """
-    遡及校正・購入集合校正を先に計算してキャッシュする。
+    遡及校正・購入集合校正・ステージ/券種ゲート集計を先に計算してキャッシュする。
     race-plan / replay の初回が Render のタイムアウト(約150s)に当たらないようにする。
+
+    2026-09-03: race-planが1レースあたり約50秒かかる件を調査した結果、
+    ステージ/券種ゲート用の集計(get_stage_expectancy_map/get_bet_type_expectancy_map)
+    がPurchase全件を毎回フルスキャンしておりキャッシュされていなかったことが判明。
+    校正係数と同様にキャッシュを追加した上で、ここでもウォームアップする。
     """
     t0 = _time.time()
     retro = get_calibration_factors_retroactive(db, use_cache=False)
     t1 = _time.time()
     purchase_set = get_purchase_set_calibration_factors(db, use_cache=False)
     t2 = _time.time()
+    stage_exp = get_stage_expectancy_map(db, min_samples=50, use_cache=False)
+    t3 = _time.time()
+    bet_type_exp = get_bet_type_expectancy_map(db, min_samples=50, use_cache=False)
+    t4 = _time.time()
     overall = (retro or {}).get("overall") or {}
     ps = (purchase_set or {}).get("overall") or {}
     return {
         "ok": True,
         "retroactive_seconds": round(t1 - t0, 2),
         "purchase_set_seconds": round(t2 - t1, 2),
-        "total_seconds": round(t2 - t0, 2),
+        "stage_expectancy_seconds": round(t3 - t2, 2),
+        "bet_type_expectancy_seconds": round(t4 - t3, 2),
+        "total_seconds": round(t4 - t0, 2),
         "retroactive_overall_factor": overall.get("calibration_factor"),
         "retroactive_sample_count": overall.get("sample_count"),
         "purchase_set_factor": ps.get("factor"),
         "purchase_set_n": ps.get("n"),
+        "stage_expectancy_stage_count": len(stage_exp),
+        "bet_type_expectancy_count": len(bet_type_exp),
         "cache_ttl_seconds": RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS,
         "message": "キャッシュ済み。続けて replay / race-plan を実行してください。",
     }
