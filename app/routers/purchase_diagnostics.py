@@ -1546,6 +1546,103 @@ def diagnostics_stable_wide_strategies(
 
 
 
+
+@router.get("/winning-capture")
+def diagnostics_winning_capture(
+    since: Optional[str] = Query("all"),
+    limit_races: int = Query(200, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    """
+    確定レースで「実際に的中した買い目」が
+    purchase / skipped / not_recorded のどれに落ちたかを集計する。
+    replay後の winning_diagnostics と同じ判定をバッチで行う。
+    """
+    from .. import ev_calculator as calc
+
+    since_dt = _since_dt(since)
+    q = db.query(models.Race).filter(models.Race.actual_result.isnot(None))
+    if since_dt is not None:
+        # purchased_at 基準ではなく race_date（開催日）
+        q = q.filter(models.Race.race_date >= since_dt)
+    races = q.order_by(models.Race.id.desc()).limit(limit_races).all()
+
+    status_counts = Counter()
+    reason_counts = Counter()
+    by_bet_type = defaultdict(Counter)
+    samples_not_recorded = []
+    samples_skipped = []
+    races_used = 0
+
+    for race in races:
+        try:
+            actual = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+        races_used += 1
+        purchases_by_key = {
+            (p.bet_type, p.combination): p
+            for p in db.query(models.Purchase).filter(models.Purchase.race_id == race.id).all()
+        }
+        skipped_by_key = {
+            (s.bet_type, s.combination): s
+            for s in db.query(models.SkippedBet).filter(models.SkippedBet.race_id == race.id).all()
+        }
+        for o in db.query(models.Odds).filter(models.Odds.race_id == race.id).all():
+            if o.bet_type not in ("2車単", "2車複", "3連単", "3連複", "ワイド"):
+                continue
+            if not calc.judge_purchase_result(o.bet_type, o.combination, actual):
+                continue
+            key = (o.bet_type, o.combination)
+            purchase = purchases_by_key.get(key)
+            skipped = skipped_by_key.get(key)
+            if purchase is not None:
+                status = "purchase"
+                reason = None
+            elif skipped is not None:
+                status = "skipped"
+                reason = skipped.reason or ""
+            else:
+                status = "not_recorded"
+                reason = "候補に残らず記録なし"
+            status_counts[status] += 1
+            by_bet_type[o.bet_type][status] += 1
+            if reason:
+                # 理由は先頭40文字で集約
+                reason_counts[reason[:60]] += 1
+            row = {
+                "race_id": race.id,
+                "bet_type": o.bet_type,
+                "combination": o.combination,
+                "odds": o.odds_value,
+                "status": status,
+                "reason": reason,
+            }
+            if status == "not_recorded" and len(samples_not_recorded) < 15:
+                samples_not_recorded.append(row)
+            if status == "skipped" and len(samples_skipped) < 15:
+                samples_skipped.append(row)
+
+    total = sum(status_counts.values()) or 1
+    return {
+        "since": since,
+        "races_used": races_used,
+        "winning_outcomes_total": sum(status_counts.values()),
+        "status_counts": dict(status_counts),
+        "status_pct": {k: round(100.0 * v / total, 2) for k, v in status_counts.items()},
+        "by_bet_type": {bt: dict(c) for bt, c in by_bet_type.items()},
+        "top_skip_reasons": reason_counts.most_common(15),
+        "samples_not_recorded": samples_not_recorded,
+        "samples_skipped": samples_skipped,
+        "note": (
+            "的中買い目がpurchaseに乗った割合が低い場合、"
+            "校正が強すぎる・フィルタ・候補生成漏れを疑う。"
+            "not_recordedは評価自体が走っていないか、上位Nの検証記録からも外れたもの。"
+        ),
+    }
+
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -1567,6 +1664,7 @@ def diagnostics_summary(
         "ev_negative_recheck": diagnostics_ev_negative_recheck(since=since, db=db),
         "race_plan_design": diagnostics_race_plan_design(),
         "race_plan_rank_compare": diagnostics_race_plan_rank_compare(since=since, db=db),
+        "winning_capture": diagnostics_winning_capture(since=since, db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"
