@@ -100,6 +100,7 @@ def get_calibration_factors(db: Session) -> dict:
 import time as _time
 
 _retroactive_calibration_cache = {"computed_at": 0.0, "value": None}
+_purchase_set_calibration_cache = {"computed_at": 0.0, "value": None}
 RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS = 15 * 60  # 15分
 
 
@@ -159,6 +160,112 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
     _retroactive_calibration_cache["value"] = result
     _retroactive_calibration_cache["computed_at"] = now
     return result
+
+
+
+def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) -> dict:
+    """
+    「実際に購入した集合」だけでの予測確率 vs 実績的中から追加補正係数を作る。
+
+    通常の帯校正（全候補・見送り込み）後も、購入群では予測が約2倍楽観的なまま
+    残ることが診断で判明した。選別後の条件付き分布に合わせた第2段校正。
+
+    factor = actual_hit_rate / predicted_avg_prob（shrink付き）
+    """
+    global _purchase_set_calibration_cache
+    now = _time.time()
+    if use_cache:
+        cached = _purchase_set_calibration_cache.get("value")
+        if cached is not None and (now - _purchase_set_calibration_cache.get("computed_at", 0)) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
+            return cached
+
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result.in_(("win", "lose")))
+        .filter(models.Purchase.win_prob_at_purchase.isnot(None))
+        .all()
+    )
+
+    def _band(odds):
+        if odds is None or odds <= 0:
+            return "不明"
+        if odds < 5:
+            return "1-5倍"
+        if odds < 10:
+            return "5-10倍"
+        if odds < 30:
+            return "10-30倍"
+        if odds < 100:
+            return "30-100倍"
+        if odds < 300:
+            return "100-300倍"
+        return "300倍以上"
+
+    def _factor(rows):
+        n = len(rows)
+        if n == 0:
+            return None
+        wins = sum(1 for _, won in rows if won)
+        pred = sum(p for p, _ in rows) / n
+        act = wins / n
+        if pred <= 1e-12:
+            return {
+                "n": n,
+                "wins": wins,
+                "predicted_avg_pct": round(pred * 100, 4),
+                "actual_hit_rate_pct": round(act * 100, 4),
+                "factor": 1.0,
+            }
+        raw = act / pred
+        # サンプルが少ないほど1.0に寄せる
+        required = 80
+        shrink = min(1.0, n / required)
+        # p値が強い（乖離が偶然でない）ほどshrinkを強める簡易版
+        factor = 1.0 + shrink * (raw - 1.0)
+        factor = max(0.15, min(1.5, factor))
+        return {
+            "n": n,
+            "wins": wins,
+            "predicted_avg_pct": round(pred * 100, 4),
+            "actual_hit_rate_pct": round(act * 100, 4),
+            "raw_ratio": round(raw, 4),
+            "factor": round(factor, 4),
+        }
+
+    all_rows = []
+    by_bt = {}
+    by_odds = {}
+    by_bt_odds = {}
+
+    for p in purchases:
+        # 第2段は「帯校正後に保存された win_prob_at_purchase」を基準に残差を見る
+        # （rawだと二重に強くなりすぎる）
+        prob = float(p.win_prob_at_purchase)
+        won = p.result == "win"
+        odds = float(p.odds_at_purchase) if p.odds_at_purchase else None
+        all_rows.append((prob, won))
+        by_bt.setdefault(p.bet_type, []).append((prob, won))
+        band = _band(odds)
+        by_odds.setdefault(band, []).append((prob, won))
+        by_bt_odds.setdefault(p.bet_type, {}).setdefault(band, []).append((prob, won))
+
+    result = {
+        "overall": _factor(all_rows),
+        "by_bet_type": {k: _factor(v) for k, v in by_bt.items()},
+        "by_odds_band": {k: _factor(v) for k, v in by_odds.items()},
+        "by_bet_type_odds_band": {
+            bt: {band: _factor(rows) for band, rows in bands.items()}
+            for bt, bands in by_bt_odds.items()
+        },
+        "note": (
+            "実購入のみ。win_prob_at_purchase（既存校正後）に対する残差係数。"
+            "race-planでは帯校正の後にこの係数を掛ける。"
+        ),
+    }
+    _purchase_set_calibration_cache["value"] = result
+    _purchase_set_calibration_cache["computed_at"] = now
+    return result
+
 
 
 def _compute_calibration_factors_from_records(records: list) -> dict:

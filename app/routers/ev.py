@@ -49,6 +49,113 @@ def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict =
     return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost)
 
 
+
+def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str = None):
+    """
+    勝率帯・券種交差の補正係数を掛けた確率を返す。
+    戻り値: (補正後確率, low_prob_warning, data_sufficiency_pct, prediction_accuracy_pct)
+    """
+    bucket_name, _ = calc.get_prob_bucket(est_prob)
+    info = (calibration_factors or {}).get(bucket_name)
+    overall = (calibration_factors or {}).get("overall")
+
+    MIN_CROSS_SAMPLE = 30
+    cross_map = (calibration_factors or {}).get("by_bet_type_bucket") or {}
+    cross_info = (cross_map.get(bet_type) or {}).get(bucket_name) if bet_type else None
+    cross_used = False
+
+    factor = 1.0
+    data_sufficiency_pct = 0.0
+    accuracy_pct = None
+
+    if cross_info and cross_info.get("sample_count", 0) >= MIN_CROSS_SAMPLE and cross_info.get("calibration_factor") is not None:
+        factor = float(cross_info["calibration_factor"])
+        cross_used = True
+        req = max(int(cross_info.get("required_sample_count") or 1), 1)
+        data_sufficiency_pct = min(100.0, 100.0 * float(cross_info.get("sample_count") or 0) / req)
+        accuracy_pct = cross_info.get("prediction_accuracy_pct")
+    elif info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
+        factor = float(info["calibration_factor"])
+        req = max(int(info.get("required_sample_count") or 1), 1)
+        data_sufficiency_pct = min(100.0, 100.0 * float(info.get("sample_count") or 0) / req)
+        accuracy_pct = info.get("prediction_accuracy_pct")
+    elif overall and overall.get("calibration_factor") is not None:
+        factor = float(overall["calibration_factor"])
+        req = max(int(overall.get("required_sample_count") or 1), 1)
+        data_sufficiency_pct = min(100.0, 100.0 * float(overall.get("sample_count") or 0) / req)
+        accuracy_pct = overall.get("prediction_accuracy_pct")
+
+    if not cross_used:
+        by_bt = (calibration_factors or {}).get("by_bet_type") or {}
+        if bet_type and bet_type in by_bt and overall and overall.get("calibration_factor"):
+            bt_f = float(by_bt[bet_type]["calibration_factor"])
+            ov_f = float(overall["calibration_factor"])
+            if ov_f > 1e-9:
+                residual = bt_f / ov_f
+                residual = 1.0 + 0.5 * (residual - 1.0)
+                factor *= residual
+
+    # 下限0.25は帯校正用。購入集合の追加係数は別関数で掛ける
+    factor = max(0.25, min(2.0, factor))
+    calibrated = est_prob if abs(factor - 1.0) < 1e-9 else max(0.0, min(1.0, est_prob * factor))
+    low_prob_warning = calibrated < 0.05
+    return calibrated, low_prob_warning, round(data_sufficiency_pct, 1), accuracy_pct
+
+
+def _odds_band_key(odds: float) -> str:
+    if odds is None or odds <= 0:
+        return "不明"
+    if odds < 5:
+        return "1-5倍"
+    if odds < 10:
+        return "5-10倍"
+    if odds < 30:
+        return "10-30倍"
+    if odds < 100:
+        return "30-100倍"
+    if odds < 300:
+        return "100-300倍"
+    return "300倍以上"
+
+
+def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str, purchase_factors: dict) -> float:
+    """
+    実購入集合で観測された「予測p vs 実績的中」から求めた追加係数。
+    帯校正の後に掛け、選別後も残る楽観バイアスを抑える。
+    優先: 券種×オッズ帯 → オッズ帯 → 券種 → 全体
+    """
+    if not purchase_factors or est_prob is None or est_prob <= 0:
+        return est_prob
+    band = _odds_band_key(float(odds_value) if odds_value else 0)
+    factor = 1.0
+    used = None
+
+    cross = (purchase_factors.get("by_bet_type_odds_band") or {}).get(bet_type) or {}
+    info = cross.get(band)
+    if info and info.get("n", 0) >= 30 and info.get("factor") is not None:
+        factor = float(info["factor"])
+        used = f"bt_odds:{bet_type}:{band}"
+    else:
+        info = (purchase_factors.get("by_odds_band") or {}).get(band)
+        if info and info.get("n", 0) >= 50 and info.get("factor") is not None:
+            factor = float(info["factor"])
+            used = f"odds:{band}"
+        else:
+            info = (purchase_factors.get("by_bet_type") or {}).get(bet_type)
+            if info and info.get("n", 0) >= 50 and info.get("factor") is not None:
+                factor = float(info["factor"])
+                used = f"bt:{bet_type}"
+            elif purchase_factors.get("overall") and purchase_factors["overall"].get("factor") is not None:
+                factor = float(purchase_factors["overall"]["factor"])
+                used = "overall"
+
+    # 購入集合では0.15まで下げうる（30-100倍帯など）
+    factor = max(0.15, min(1.5, factor))
+    out = max(0.0, min(1.0, float(est_prob) * factor))
+    return out
+
+
+
 def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list) -> int:
     """
     見送った買い目を「見送り」として記録する。
@@ -548,6 +655,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # (下で見送り記録に使うため)。
     all_evaluated = []
     calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
+    # 実購入集合で残る楽観バイアス用の追加係数（選別後校正）
+    purchase_set_factors = purchases_router.get_purchase_set_calibration_factors(db)
 
     # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
     # (3連複・2車複・ワイド)より難しく、レースのステージ(S級決勝等)によっては
@@ -613,6 +722,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(
                 est_prob_raw, calibration_factors, bet_type=o.bet_type
             )
+            # 第2段: 購入集合で観測された券種×オッズ帯の残差を掛ける
+            if getattr(req, "apply_purchase_set_calibration", True):
+                est_prob = _apply_purchase_set_factor(
+                    est_prob, o.odds_value, o.bet_type, purchase_set_factors
+                )
+                low_prob_warning = est_prob < 0.05
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
