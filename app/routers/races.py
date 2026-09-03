@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
+import time as _time
 
 from ..database import get_db
 from .. import models
@@ -728,6 +729,8 @@ def replay_settled_one(
             "reason": str(e),
         }]
 
+    from . import purchases as purchases_router_for_debug
+
     return {
         "race_id": race_id,
         "stage": "done",
@@ -741,6 +744,13 @@ def replay_settled_one(
             "skipped_updated_count": conf.get("skipped_updated_count"),
             "actual_result": conf.get("actual_result"),
         },
+        # キャッシュが効いていない(毎回47秒前後)報告の原因調査用。
+        # process_pidがレースごとに変わっていれば、Render側でプロセスが
+        # 再起動されている(=メモリ制限等)ことが確定する。
+        "debug_process_pid": purchases_router_for_debug._PROCESS_PID,
+        "debug_process_uptime_seconds": round(
+            _time.time() - purchases_router_for_debug._PROCESS_STARTED_AT, 1
+        ),
     }
 
 

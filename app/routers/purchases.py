@@ -98,6 +98,14 @@ def get_calibration_factors(db: Session) -> dict:
 
 
 import time as _time
+import os as _os
+
+# プロセス起動時刻・PID。race_plan/warm-calibrationのたびに毎回フル再計算に
+# なっている件を調査するため、プロセスがリクエスト間で本当に同一かを確認する目印
+# (Render無料プランのメモリ上限でプロセスが再起動している可能性を検証するため、
+# のんの報告「キャッシュが効いていない(毎回47秒前後)」を受けて追加)。
+_PROCESS_STARTED_AT = _time.time()
+_PROCESS_PID = _os.getpid()
 
 _retroactive_calibration_cache = {"computed_at": 0.0, "value": None}
 _purchase_set_calibration_cache = {"computed_at": 0.0, "value": None}
@@ -671,6 +679,8 @@ def warm_calibration(db: Session = Depends(get_db)):
         "stage_expectancy_stage_count": len(stage_exp),
         "bet_type_expectancy_count": len(bet_type_exp),
         "cache_ttl_seconds": RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS,
+        "process_pid": _PROCESS_PID,
+        "process_uptime_seconds": round(_time.time() - _PROCESS_STARTED_AT, 1),
         "message": "キャッシュ済み。続けて replay / race-plan を実行してください。",
     }
 
