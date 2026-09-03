@@ -594,9 +594,14 @@ def replay_settled_one(
         return {"race_id": race_id, "stage": "skipped_no_odds"}
 
     entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()
-    if not entries or not any(
-        (e.blended_win_prob is not None) or (e.ai_win_prob is not None) for e in entries
-    ):
+
+    def _has_prob(e):
+        for attr in ("blended_win_prob", "ai_win_prob", "tipstar_win_prob"):
+            if getattr(e, attr, None) is not None:
+                return True
+        return False
+
+    if not entries or not any(_has_prob(e) for e in entries):
         return {
             "race_id": race_id,
             "stage": "skipped_no_win_probs",
@@ -610,8 +615,23 @@ def replay_settled_one(
         bankroll=bankroll,
         apply_performance_gates=apply_performance_gates,
         apply_odds_safety_margin=apply_odds_safety_margin,
+        avoid_garami=False,  # replayは速度優先（ガミり厳密は任意）
     )
-    plan = ev_router.race_plan(race_id, req, db)
+    try:
+        plan = ev_router.race_plan(race_id, req, db)
+    except HTTPException as he:
+        return {
+            "race_id": race_id,
+            "stage": "race_plan_http_error",
+            "status_code": he.status_code,
+            "detail": he.detail,
+        }
+    except Exception as e:
+        return {
+            "race_id": race_id,
+            "stage": "race_plan_error",
+            "error": f"{type(e).__name__}: {e}",
+        }
     if plan.get("skipped_no_odds"):
         return {"race_id": race_id, "stage": "skipped_no_odds"}
 
@@ -762,7 +782,25 @@ def replay_settled_targets(
         )
         for row in q2.all():
             id_set.add(row[0])
-    ids = sorted(id_set)[:limit]
+    # 勝率があるレースだけ（replayが即死しないように）
+    usable = []
+    for rid in sorted(id_set):
+        ents = db.query(models.Entry).filter(models.Entry.race_id == rid).all()
+        ok = False
+        for e in ents:
+            if (
+                e.blended_win_prob is not None
+                or getattr(e, "ai_win_prob", None) is not None
+                or getattr(e, "tipstar_win_prob", None) is not None
+            ):
+                ok = True
+                break
+        if ok:
+            usable.append(rid)
+        if len(usable) >= limit:
+            break
+    ids = usable
+
     return {"since": since_out, "total": len(ids), "race_ids": ids}
 
 

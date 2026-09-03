@@ -13,11 +13,19 @@ router = APIRouter(prefix="/ev", tags=["ev"])
 
 
 def _build_win_probs(entries: List[models.Entry]) -> dict:
+    """blended → ai → tipstar の順で勝率を拾う（replay/再プラン用）。"""
     probs = {}
     for e in entries:
-        if e.blended_win_prob is not None:
-            probs[e.car_number] = e.blended_win_prob
-    # 念のため合計1に正規化
+        v = e.blended_win_prob
+        if v is None:
+            v = getattr(e, "ai_win_prob", None)
+        if v is None:
+            v = getattr(e, "tipstar_win_prob", None)
+        if v is not None:
+            try:
+                probs[e.car_number] = float(v)
+            except (TypeError, ValueError):
+                pass
     total = sum(probs.values())
     if total > 0:
         probs = {k: v / total for k, v in probs.items()}
