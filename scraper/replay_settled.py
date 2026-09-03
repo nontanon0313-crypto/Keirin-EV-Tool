@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import sys
 import time
@@ -33,7 +34,24 @@ def main():
     parser.add_argument("--since", default="all")
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--bankroll", type=float, default=1000000)
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help=(
+            "各レースの詳細結果(winning_diagnostics・debug_timings等)をJSON Lines形式で"
+            "書き出すファイル。未指定時は scraper/data/replay_log_<時刻>.jsonl に自動作成。"
+            "画面には要点(所要時間・件数)だけを表示し、貼り付けやすくする"
+            "(のんの要望により追加: 出力が多すぎて貼れない件への対処)。"
+        ),
+    )
     args = parser.parse_args()
+
+    log_path = args.log_file
+    if not log_path:
+        os.makedirs("scraper/data", exist_ok=True)
+        log_path = f"scraper/data/replay_log_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+    log_f = open(log_path, "a", encoding="utf-8")
+    print(f"[{now()}] 詳細ログ出力先: {log_path}", flush=True)
 
     session = requests.Session()
 
@@ -129,10 +147,31 @@ def main():
                 )
 
                 if result:
-                    print(
-                        f"    result={result}",
-                        flush=True,
-                    )
+                    # 詳細(winning_diagnostics・debug_timings等)は常にログファイルへ。
+                    log_f.write(json.dumps({"race_id": race_id, "result": result}, ensure_ascii=False) + "\n")
+                    log_f.flush()
+
+                    # 画面には要点だけ: 所要時間の内訳(あれば)・件数・的中買い目の状態内訳。
+                    outer_t = result.get("debug_outer_timings") or {}
+                    plan_t = result.get("debug_race_plan_timings") or {}
+                    if outer_t or plan_t:
+                        print(
+                            "    timings: "
+                            + ", ".join(f"{k}={v}s" for k, v in {**outer_t, **plan_t}.items() if isinstance(v, (int, float))),
+                            flush=True,
+                        )
+                    wd = result.get("winning_diagnostics") or []
+                    if wd:
+                        status_counts = {}
+                        for w in wd:
+                            st = w.get("status", "?")
+                            status_counts[st] = status_counts.get(st, 0) + 1
+                        print(
+                            f"    plan_items={result.get('plan_items')} "
+                            f"skipped_saved={result.get('skipped_saved_count')} "
+                            f"winning_status内訳={status_counts}",
+                            flush=True,
+                        )
 
             else:
                 failed += 1
@@ -214,6 +253,8 @@ def main():
     print(f"failed  = {failed}", flush=True)
     print(f"skipped = {skipped}", flush=True)
     print(f"elapsed = {fmt_seconds(elapsed)}", flush=True)
+    print(f"詳細ログ: {log_path}", flush=True)
+    log_f.close()
 
 
 if __name__ == "__main__":
