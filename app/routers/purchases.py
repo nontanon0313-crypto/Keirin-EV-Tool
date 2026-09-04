@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import Optional
@@ -2169,6 +2169,7 @@ def diagnostics_predicted_vs_actual_return(
     since: Optional[str] = None,
     hours: Optional[float] = None,
     last_n_races: Optional[int] = None,
+    race_ids: Optional[list[int]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """
@@ -2211,6 +2212,10 @@ def diagnostics_predicted_vs_actual_return(
         elif hasattr(models.Purchase, "created_at"):
             query = query.filter(models.Purchase.created_at >= since_dt)
         since_resolved = since_dt.isoformat()
+
+    if race_ids:
+        query = query.filter(models.Purchase.race_id.in_(race_ids))
+        filter_note.append(f"race_ids_count={len(race_ids)}")
 
     purchases = query.all()
 
