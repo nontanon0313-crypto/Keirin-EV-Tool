@@ -3598,6 +3598,7 @@ def _odds_drift_stats(purchases):
 @router.get("/diagnostics/purchase-selection-calibration")
 def purchase_selection_calibration(
     since: Optional[str] = None,
+    race_ids: Optional[list[int]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """
@@ -3619,6 +3620,9 @@ def purchase_selection_calibration(
 
     if since_dt:
         q = q.filter(models.Purchase.purchased_at >= since_dt)
+
+    if race_ids:
+        q = q.filter(models.Purchase.race_id.in_(race_ids))
 
     purchases = q.all()
 
@@ -3852,6 +3856,108 @@ def purchase_selection_calibration(
 
     overall = stats(purchases)
 
+    # 購入時オッズと確定時オッズの乖離が、
+    # PVAの予測払戻と実払戻の差を説明できるか確認する。
+    drift_rows = [
+        p for p in purchases
+        if p.odds_at_purchase is not None
+        and float(p.odds_at_purchase) > 0
+        and p.final_odds is not None
+        and float(p.final_odds) > 0
+    ]
+
+    drift_wins = [
+        p for p in drift_rows
+        if p.result == "win"
+    ]
+
+    def drift_detail(rows):
+        if not rows:
+            return {
+                "n": 0,
+                "wins": 0,
+                "avg_purchase_odds": None,
+                "avg_final_odds": None,
+                "avg_drift_pct": None,
+                "worsened_ratio_pct": None,
+                "expected_payout_at_purchase_odds": 0.0,
+                "actual_payout_at_final_odds": 0.0,
+                "actual_vs_expected_payout_pct": None,
+            }
+
+        avg_purchase = sum(
+            float(p.odds_at_purchase) for p in rows
+        ) / len(rows)
+
+        avg_final = sum(
+            float(p.final_odds) for p in rows
+        ) / len(rows)
+
+        drifts = [
+            (
+                float(p.final_odds) - float(p.odds_at_purchase)
+            ) / float(p.odds_at_purchase) * 100
+            for p in rows
+        ]
+
+        wins = [p for p in rows if p.result == "win"]
+
+        expected_payout = sum(
+            float(p.stake_amount or 0)
+            * float(p.odds_at_purchase)
+            for p in wins
+        )
+
+        actual_payout = sum(
+            float(p.payout_amount or 0)
+            for p in wins
+        )
+
+        return {
+            "n": len(rows),
+            "wins": len(wins),
+            "avg_purchase_odds": round(avg_purchase, 4),
+            "avg_final_odds": round(avg_final, 4),
+            "avg_drift_pct": round(sum(drifts) / len(drifts), 4),
+            "worsened_ratio_pct": round(
+                sum(1 for d in drifts if d < 0) / len(drifts) * 100,
+                4,
+            ),
+            "expected_payout_at_purchase_odds": round(expected_payout, 2),
+            "actual_payout_at_final_odds": round(actual_payout, 2),
+            "actual_vs_expected_payout_pct": (
+                round(actual_payout / expected_payout * 100, 4)
+                if expected_payout > 0 else None
+            ),
+        }
+
+    def drift_odds_band(p):
+        o = float(p.odds_at_purchase)
+        if o < 100:
+            return "30-100倍"
+        if o < 300:
+            return "100-300倍"
+        return "300倍以上"
+
+    drift_by_odds = {
+        band: drift_detail([
+            p for p in drift_wins
+            if drift_odds_band(p) == band
+        ])
+        for band in ("30-100倍", "100-300倍", "300倍以上")
+    }
+
+    odds_drift_detail = {
+        "all_settled_with_final_odds": drift_detail(drift_rows),
+        "wins_only": drift_detail(drift_wins),
+        "wins_by_purchase_odds": drift_by_odds,
+        "note": (
+            "wins_onlyのactual_vs_expected_payout_pctが100%未満なら、"
+            "購入時オッズで予測した的中払戻より確定時払戻が低下している。"
+            "PVAのROI乖離の一因としてオッズ変動を直接確認するための診断値。"
+        ),
+    }
+
     suspicious_cells = []
 
     for key, value in by_prob_odds.items():
@@ -3874,6 +3980,7 @@ def purchase_selection_calibration(
         ),
         "since": since,
         "overall": overall,
+        "odds_drift_detail": odds_drift_detail,
         "by_probability_band": by_prob,
         "by_probability_x_odds": by_prob_odds,
         "by_ev_x_odds": by_ev_odds,
