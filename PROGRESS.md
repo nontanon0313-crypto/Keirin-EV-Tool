@@ -6,7 +6,7 @@
 (のんの要望: セッションが変わる・利用制限に達する・別のAIが作業する、といった
 状況でも引き継ぎが途切れないようにするため 2026-09-04 に導入)
 
-最終更新: 2026-09-04(Grok) — 直近PVA測定(hours/last_n_races)
+最終更新: 2026-09-04(Grok) — 直近校正は効いていると判定・運用継続
 
 ---
 
@@ -215,6 +215,23 @@ python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
 `/purchases/diagnostics/predicted-vs-actual-return` に `hours` / `last_n_races` を追加。
 `scraper/run_pva_recent.sh [時間] [レース数]` で直近replay分だけ測る。
 
+
+### 4.9 直近校正の判定（2026-09-04）
+
+`run_pva_recent.sh 3 50`（ゲートON後の直近50レース・563点）:
+
+| 指標 | 値 |
+|------|-----|
+| pred的中% | 2.21 |
+| 実績的中% | 2.66 |
+| ratio | **0.83**（ほぼ一致・やや控えめ） |
+
+- 全体 ratio≈1.7台は**古い購入が支配**するため、校正判定には使わない
+- 的中15件のため細かい数字のブレは無視（のん指示）
+- **結論: 第1段+第2段+ゲートONの補正は方向として正しい。追加の係数いじりは不要**
+- 次は直近窓を広げる（あと50〜100件 replay）→ `run_pva_recent.sh` で再確認
+- 全体全件の再replay・Supabase同期は後回しでよい
+
 ## 5. 運用ルール・やってはいけないこと
 
 - **Harville本体(`combination_prob`/`wide_prob`/`harville_prob`)を推測で
@@ -264,7 +281,12 @@ python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
 
 ## 7. 次にやるべきこと(優先順)
 
-1. **4.1のtimings計測結果を確認する**(5件replayを実行し、`timings:`行を貼る)
+1. ~~4.1 confirm高速化~~ → 完了（約2秒）
+2. **直近校正はOK** → あと50〜100件 replay して窓を広げる
+   `bash scraper/run_replay_continue.sh 50 2` → `bash scraper/run_pva_recent.sh 6 100`
+3. 全体 ratio は見ない。判定は `run_pva_recent.sh` のみ
+4. 全部終わったら Supabase↔Neon 同期
+5. 4.2(line_boost)・選択ロジック見直しは、直近ratioが再び悪化したら着手
 2. 上記の結果に基づき、race-planの遅延を実際に解消する
 3. 4.2(line_boost検証)に着手する
 4. replayの母数を増やし、predicted-vs-actual-returnの比率(1.3倍・2倍以内)を
