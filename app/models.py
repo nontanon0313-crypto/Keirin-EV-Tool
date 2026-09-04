@@ -146,6 +146,10 @@ class EvResult(Base):
 class Purchase(Base):
     """実際の購入履歴・結果"""
     __tablename__ = "purchases"
+    __table_args__ = (
+        Index("ix_purchases_race_id", "race_id"),
+        Index("ix_purchases_race_result", "race_id", "result"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     race_id = Column(Integer, ForeignKey("races.id"), nullable=False)
@@ -185,6 +189,10 @@ class BankrollState(Base):
 class SkippedBet(Base):
     """見送った買い目の記録(後から検証するため)"""
     __tablename__ = "skipped_bets"
+    __table_args__ = (
+        Index("ix_skipped_bets_race_id", "race_id"),
+        Index("ix_skipped_bets_race_actual", "race_id", "actual_result"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     race_id = Column(Integer, ForeignKey("races.id"), nullable=False)

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from datetime import datetime, timedelta
 import time as _time
 
@@ -19,6 +20,12 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
 
     証拠金残高はここでは変動させない。証拠金はユーザー自身の資金管理として独立させ、
     予想・投票プラン・集計・検証には影響させない方針のため(のんの要望により変更)。
+
+    2026-09-04 再修正:
+    bulk_update_mappings でも「行ごとのUPDATE」が発行され、さらに ORM オブジェクトへ
+    属性代入したまま commit するとユニット・オブ・ワークが同じ更新を二重発行する。
+    Neon(遠距離)では 1往復 ~200ms × 200件 ≒ 40秒になる。
+    → ORMを汚さず、VALUES句1本のUPDATEでまとめて書く。
     """
     from .. import ev_calculator as calc
 
@@ -34,7 +41,6 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         raise HTTPException(400, "着順の形式が正しくありません(例: 2-5-1、同着は7-14=9のように=で区切る)")
 
     race.actual_result = actual_result
-    db.commit()
 
     pending = (
         db.query(models.Purchase)
@@ -42,105 +48,113 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         .all()
     )
 
-    # 確定時に final_odds が空なら、DB上のオッズ表を締切オッズの代理として埋める
-    # （過去データでは最終オッズスクショが無いため。変動診断の欠損を減らす）
     odds_map = {}
     for o in db.query(models.Odds).filter(models.Odds.race_id == race_id).all():
         if o.odds_value and o.odds_value > 0:
             odds_map[(o.bet_type, o.combination)] = float(o.odds_value)
 
     updated = []
-    purchase_mappings = []
+    purchase_rows = []  # (id, result, payout_amount, final_odds)
     for p in pending:
-        if p.final_odds is None:
+        final_odds = p.final_odds
+        if final_odds is None:
             ov = odds_map.get((p.bet_type, p.combination))
             if ov:
-                p.final_odds = ov
+                final_odds = ov
         is_win = calc.judge_purchase_result(p.bet_type, p.combination, parsed_result)
-        settlement_odds = p.final_odds if p.final_odds is not None else p.odds_at_purchase
+        settlement_odds = final_odds if final_odds is not None else p.odds_at_purchase
         payout = round(p.stake_amount * settlement_odds) if (is_win and settlement_odds) else 0
-
-        p.result = "win" if is_win else "lose"
-        p.payout_amount = payout
-
-        # 個別にORMオブジェクトへ属性代入したままcommit()すると、SQLAlchemyが
-        # 変更件数分の個別UPDATE文を発行してしまい、件数が多いレースで
-        # ネットワーク往復コストが積み重なる(1レース45秒以上かかっていた原因の
-        # 一つ。のんの実測により判明・2026-09-04)。bulk_update_mappingsで
-        # まとめて1回のバルク更新にする。
-        purchase_mappings.append({
-            "id": p.id,
-            "final_odds": p.final_odds,
-            "result": p.result,
-            "payout_amount": payout,
-        })
-
+        result = "win" if is_win else "lose"
+        # ORMには触らない（dirtyにすると commit 時に個別UPDATE が再発行される）
+        purchase_rows.append((p.id, result, float(payout), final_odds))
         updated.append({
             "purchase_id": p.id,
             "bet_type": p.bet_type,
             "combination": p.combination,
-            "result": p.result,
+            "result": result,
             "payout_amount": payout,
-            "payout_is_estimated": p.final_odds is None,
+            "payout_is_estimated": final_odds is None,
         })
 
-    if purchase_mappings:
-        db.bulk_update_mappings(models.Purchase, purchase_mappings)
-    db.commit()
-
-    # 見送り記録(SkippedBet)にも同じ着順を適用し、「除外して正解だったか」を検証できるようにする
-    # (のんの指摘により追加。以前はレース確定してもSkippedBetの結果が一切埋まらなかった)。
-    skipped = (
+    skipped_list = (
         db.query(models.SkippedBet)
         .filter(models.SkippedBet.race_id == race_id, models.SkippedBet.actual_result.is_(None))
         .all()
     )
-    # 仮想払戻用: 同一レースのオッズ表から combination の倍率を取る
-    odds_map = {}
-    for o in db.query(models.Odds).filter(models.Odds.race_id == race_id).all():
-        if o.odds_value and o.odds_value > 0:
-            odds_map[(o.bet_type, o.combination)] = float(o.odds_value)
-
-    skipped_updated = 0
-    skipped_mappings = []
-    for s in skipped:
+    skipped_rows = []  # (id, actual_result, actual_payout)
+    for s in skipped_list:
         is_win = calc.judge_purchase_result(s.bet_type, s.combination, parsed_result)
-        actual_result_value = "win" if is_win else "lose"
-        # 仮想投資100円前提の払戻。オッズ表があればそれを優先(診断のROIが現実に近づく)
         if is_win:
+            actual_result_value = "win"
             ov = odds_map.get((s.bet_type, s.combination))
             if ov:
-                actual_payout_value = round(100.0 * ov)
-            elif s.win_prob_estimated and s.ev_pct_estimated is not None and s.win_prob_estimated > 0:
-                implied_odds = (1 + s.ev_pct_estimated / 100) / s.win_prob_estimated
-                actual_payout_value = round(100 * implied_odds)
+                actual_payout_value = float(round(100.0 * ov))
+            elif s.win_prob_estimated and s.win_prob_estimated > 0:
+                implied_odds = 1.0 / s.win_prob_estimated
+                actual_payout_value = float(round(100 * implied_odds))
             else:
                 actual_payout_value = None
         else:
+            actual_result_value = "lose"
             actual_payout_value = 0.0
+        skipped_rows.append((s.id, actual_result_value, actual_payout_value))
 
-        skipped_mappings.append({
-            "id": s.id,
-            "actual_result": actual_result_value,
-            "actual_payout": actual_payout_value,
-        })
-        skipped_updated += 1
+    # --- 1本の SQL で一括更新（ネットワーク往復を最小化） ---
+    if purchase_rows:
+        # VALUES (id, result, payout, final_odds)
+        values_sql = []
+        params = {}
+        for i, (pid, result, payout, final_odds) in enumerate(purchase_rows):
+            values_sql.append(
+                f"(CAST(:pid_{i} AS INTEGER), CAST(:pres_{i} AS TEXT), "
+                f"CAST(:ppay_{i} AS DOUBLE PRECISION), CAST(:pfo_{i} AS DOUBLE PRECISION))"
+            )
+            params[f"pid_{i}"] = pid
+            params[f"pres_{i}"] = result
+            params[f"ppay_{i}"] = payout
+            params[f"pfo_{i}"] = final_odds
+        sql = f"""
+            UPDATE purchases AS p SET
+                result = v.result,
+                payout_amount = v.payout_amount,
+                final_odds = COALESCE(v.final_odds, p.final_odds)
+            FROM (VALUES {', '.join(values_sql)})
+                AS v(id, result, payout_amount, final_odds)
+            WHERE p.id = v.id
+        """
+        db.execute(text(sql), params)
 
-    if skipped_mappings:
-        # SkippedBetは1レースあたり180〜220件になることがあり、個別UPDATEでは
-        # 1件あたりのネットワーク往復(Neonとの通信)が積み重なって45秒以上
-        # かかっていた(のんの実測により判明・2026-09-04)。bulk_update_mappingsで
-        # まとめて1回のバルク更新にすることで、この待ち時間をほぼ解消する。
-        db.bulk_update_mappings(models.SkippedBet, skipped_mappings)
-        db.commit()
+    if skipped_rows:
+        values_sql = []
+        params = {}
+        for i, (sid, ares, apay) in enumerate(skipped_rows):
+            values_sql.append(
+                f"(CAST(:sid_{i} AS INTEGER), CAST(:sres_{i} AS TEXT), "
+                f"CAST(:spay_{i} AS DOUBLE PRECISION))"
+            )
+            params[f"sid_{i}"] = sid
+            params[f"sres_{i}"] = ares
+            params[f"spay_{i}"] = apay
+        sql = f"""
+            UPDATE skipped_bets AS s SET
+                actual_result = v.actual_result,
+                actual_payout = v.actual_payout
+            FROM (VALUES {', '.join(values_sql)})
+                AS v(id, actual_result, actual_payout)
+            WHERE s.id = v.id
+        """
+        db.execute(text(sql), params)
+
+    db.commit()
 
     return {
         "race_id": race_id,
         "actual_result": actual_result,
         "updated_count": len(updated),
         "updated": updated,
-        "skipped_updated_count": skipped_updated,
+        "skipped_updated_count": len(skipped_rows),
     }
+
 
 
 @router.get("/")

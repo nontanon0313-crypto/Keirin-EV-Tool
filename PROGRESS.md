@@ -6,7 +6,7 @@
 (のんの要望: セッションが変わる・利用制限に達する・別のAIが作業する、といった
 状況でも引き継ぎが途切れないようにするため 2026-09-04 に導入)
 
-最終更新: 2026-09-04(Claude)
+最終更新: 2026-09-04(Grok) — confirm_race_result の真因修正
 
 ---
 
@@ -120,22 +120,31 @@
 送信する**ため、実質的にSkippedBet 180〜220件分の個別ネットワーク往復が発生していた。
 1件あたり約230ミリ秒(Neonとの往復)と考えると、200件×0.23秒≒46秒とほぼ一致する。
 
-**対応**: `bulk_update_mappings`に置き換える修正を実装・デプロイ済み(2026-09-04)。
-Purchase・SkippedBetそれぞれの更新ループを、ORMオブジェクトへの属性代入+
-個別commitから、`db.bulk_update_mappings(models.XXX, mappings)`によるまとめての
-バルク更新に変更した。ロジック自体(的中判定・払戻計算式)は一切変更していない。
-**次にやること: 5件replayを再実行し、`confirm_race_result`の秒数が
-劇的に短縮されているか確認すること。** 短縮されていれば1レースあたりの
-所要時間は数秒程度まで下がるはず。
+**対応1 (Claude, 効果なし)**: `bulk_update_mappings` に置き換えたが、実測で
+confirm は 47〜56秒のまま。仮説「1件ずつのUPDATE が原因」だけでは不十分だった。
 
+**真因 (Grok, 2026-09-04 再検証)**:
+1. SQLAlchemy の `bulk_update_mappings` は **行ごとに UPDATE を発行**する
+   （1本のSQLにはならない）。Neon 遠距離では 1往復~200ms × 200件 ≒ 40秒。
+2. さらに ORM オブジェクトへ `p.result = ...` と代入したままだったため、
+   `commit()` 時にユニット・オブ・ワークが **同じ更新を二重発行**していた。
+
+**対応2 (今回)**:
+- ORM 属性は触らない（dirty にしない）
+- `UPDATE ... FROM (VALUES ...)` の **SQL 1本**で Purchase / SkippedBet を更新
+- `purchases.race_id` / `skipped_bets.race_id` に Index を追加
+
+**次にやること（必須）**:
 ```bash
+cd ~/Keirin-EV-Tool
 python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
 ```
+`confirm_race_result` が **数秒以下** になっているか確認。なっていれば
+50件→全件 replay を再開する。
 
-**教訓**: 「1回のcommit()」は「1回のSQL文」を意味しない。ORMオブジェクトを
-ループで大量に書き換える処理は、`bulk_update_mappings`や生SQLのUPDATE(CASE式)を
-使わない限り、行数分のネットワーク往復が発生する。同様のパターンが他の場所
-(purchases.pyのバッチ更新処理など)にも無いか、余裕があれば横展開で確認するとよい。
+**教訓**:
+- `bulk_update_mappings` ≠ 1往復。遠距離DBでは VALUES/UNNEST の1文UPDATEが必要。
+- ORM を dirty にしたまま bulk すると二重更新になる。
 
 ### 4.2 line_boost=1.2が未検証の固定値(保留中・未着手)
 - `app/ev_calculator.py`の`line_map_from_race`(または対応する現行コード)で、
