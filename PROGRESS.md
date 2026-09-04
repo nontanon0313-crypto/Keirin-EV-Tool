@@ -2,107 +2,66 @@
 
 このファイルは、Claude・Grok・ChatGPT どれが作業する場合でも
 「今どこまで進んでいて、何が既知の問題で、次に何をすべきか」をすぐ把握するための
-引き継ぎドキュメントです。**大きな変更を加えたら、このファイルも更新してください。**
-(のんの要望: セッションが変わる・利用制限に達する・別のAIが作業する、といった
-状況でも引き継ぎが途切れないようにするため 2026-09-04 に導入)
+引き継ぎドキュメントです。
 
-最終更新: 2026-09-04(Grok) — 校正改善一段落・ChatGPTへ引き継ぎ
+## 【運用ルール・必読・厳守】
 
----
+**このファイルは「追記」ではなく「上書き」が原則。** 過去の履歴を積み増すと
+肥大化し、誰も全部読まなくなって引き継ぎが機能しなくなる(2026-09-05に発覚した問題)。
 
-## 0. ChatGPTへの引き継ぎ（2026-09-04 時点）
-
-### 0.1 いまのフェーズ
-**校正・ゲートの改善は一段落。様子見フェーズ。**
-- 実資金投票はまだしない
-- 追加の大量 replay は不要
-- 係数をいじり続ける必要はない
-- 判定は常に「直近窓」だけで行う（全体の古い ratio は見ない）
-
-### 0.2 直近の検証結果（重要）
-コマンド: `bash scraper/run_pva_recent.sh 3 50`
-
-| 項目 | 値 |
-|------|-----|
-| レース | 50 |
-| 購入 n | 594（**すべて3連単**） |
-| 2車単など不調券種 | **0件**（混入解消） |
-| pred的中% | 1.34 |
-| 実績的中% | 1.85 |
-| **ratio** | **0.73**（やや控えめ＝のんは問題なしと判断） |
-| 想定ROI% | 1581 |
-| 実績ROI% | 1890 |
-
-- 以前の全体 ratio≈1.7〜1.8 は**古い購入が支配**しているため校正判定に使わない
-- 的中11件程度なので細かい数字のブレはあるが、方向は「強気すぎ解消」
-
-### 0.3 直近で入れた修正（コード）
-1. `confirm_race_result` を VALUES 1本 UPDATE に（1レース confirm 約2秒、以前45〜55秒）
-2. replay の 429/Cloudflare リトライ＋レース間隔
-3. `predicted-vs-actual-return` に `hours` / `last_n_races`（直近測定）
-4. 購入集合残差: 具体帯優先＋**券種係数で cap**（悪い券種は抑え、良い券種は overall で潰さない）
-5. 不調券種ゲート `expectancy < 0%`（損益分岐）
-6. 購入集合で係数≤0.25 かつ n≥80 の券種は追加ゲート（2車単対策）
-7. overall の √ 追加掛けを廃止（3連単の過抑制を緩和）
-8. replay の `apply_performance_gates` 既定 True
-
-主なファイル:
-- `app/routers/ev.py` — 残差適用・ゲート
-- `app/routers/purchases.py` — 購入集合係数・PVA診断
-- `app/routers/races.py` — replay / confirm
-- `scraper/replay_settled.py` / `run_replay_continue.sh` / `run_pva_recent.sh`
-
-### 0.4 残課題・やってよいこと
-
-| 優先 | 内容 | 状態 |
-|------|------|------|
-| 低 | 様子見（新規レースの取得→予想→直近PVA） | **推奨中** |
-| 低 | Supabase ↔ Neon 同期（停止期間の書き込みギャップ） | 後回し可 |
-| 低 | winning-capture が未replayの高 race_id を見て 100% not_recorded になる | 診断の母集団指定を直すとよい（必須ではない） |
-| 保留 | line_boost=1.2 の検証 | 未着手 |
-| 保留 | as-of 校正（未来リーク防止） | 未着手 |
-| 保留 | 選択ロジック（純EV最大化以外）の設計 | 直近が悪化したら |
-| 注意 | Render 無料枠の 429 | 間隔・リトライ済み。連続大量は避ける |
-
-### 0.5 のんの方針（守ること）
-- 推測で「直った」と断定しない。数値をそのまま報告
-- 閾値の勝手な足切りを増やさない（設計合意してから）
-- 全体 ratio ではなく `run_pva_recent.sh` で判定
-- 実績より予測が低め（控えめ）は問題にしない
-- コマンドはファイル化して1行で叩けるようにする
-- ChatGPTがコード・設定・スクリプトの修正内容を作成し、ユーザーはTermuxへコマンドを貼り付けて実行する
-- ChatGPTが修正を提案・実装する場合は、必要な確認コマンドだけでなく `git add`、`git commit`、`git push` まで実行できるコマンドを提示する
-- 新しいChatGPTチャットでKeirin-EV-Toolの作業を開始する場合、過去の会話や記憶だけで最新状態を判断しない。まずGitHubの最新mainを確認し、次に `PROGRESS.md` の「0. ChatGPTへの引き継ぎ」を読む
-- GitHub確認方法:
-  - リポジトリ: https://github.com/nontanon0313-crypto/Keirin-EV-Tool
-  - main: https://github.com/nontanon0313-crypto/Keirin-EV-Tool/tree/main
-  - PROGRESS.md(raw): https://raw.githubusercontent.com/nontanon0313-crypto/Keirin-EV-Tool/main/PROGRESS.md
-  - 個別ファイル(raw): https://raw.githubusercontent.com/nontanon0313-crypto/Keirin-EV-Tool/main/ファイルパス
-- 修正前は必要な現行ソースをGitHub mainまたはローカルの最新コミットから確認し、推測で古いコードを前提に修正しない
-- 今回のPROGRESS.md更新コマンドは、先頭に誤って `-cd` を付けたため `cd` が実行されず失敗した。以後、実行コマンドの先頭に不要な文字を付けない。また、更新処理・git diff・git add・git commit・git pushを1つの連続したコマンドとして提示し、途中で失敗した場合は後続処理を実行しない。
-- Termux では `/tmp` が使えないことがある → `$HOME` 配下を使う
-- PROGRESS.md は大きな変更のたびに更新
-
-### 0.6 よく使うコマンド
-```bash
-# 直近校正の確認（これだけ見ればよい）
-bash "$HOME/Keirin-EV-Tool/scraper/run_pva_recent.sh" 6 100
-
-# 必要なら少数 replay（大量は不要）
-bash "$HOME/Keirin-EV-Tool/scraper/run_replay_continue.sh" 50 2
-
-# ヘルス
-python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-ev-tool.onrender.com/health',timeout=60).json(),ensure_ascii=False,indent=2))"
-```
-
-### 0.7 次に ChatGPT がやるとよいこと
-1. この PROGRESS を読んだうえで、ユーザーの次の具体依頼に対応
-2. 新規の「精度改善」を求められたら、まず直近 PVA を取ってから設計を話す（いきなり係数変更しない）
-3. DB同期や winning-capture の母集団修正は、ユーザーが触れてからでよい
+1. 「1. 現在の状況」は**常に最新1件だけ**を残す。前の内容は消してよい。
+   古い検証結果を積み増しで残さない。
+2. 課題が解決したら「4. 未解決の課題」から**削除する**。今後の役に立つ
+   技術的知見だけを一言で「6. 技術的な教訓」に移す。
+3. 日付ごとの詳細な実験結果・具体的な数値の羅列は本体に書かず、
+   `PROGRESS_ARCHIVE.md` に追記する(こちらは追記でよい・肥大化OK)。
+   本体(このファイル)は常に短く保つこと。
+4. 作業を始めるときは「1. 現在の状況」だけを読めば足りるようにする。
+   2章以降は仕様・ルールのリファレンスであり、毎回読む必要はない。
+5. 作業を終えるとき・区切りがついたときは、必ず「1. 現在の状況」を
+   その時点の内容に**書き換える**。「最終更新」の日付と担当
+   (Claude/Grok/ChatGPT)も必ず書き換える。書き換えを忘れた状態で
+   セッションを終えない。
+6. 大きな設計変更や新しい発見があれば、該当する章(2〜6)も更新する。
 
 ---
 
-## 1. プロジェクト概要
+## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
+
+最終更新: 2026-09-05(Claude) — PROGRESS.mdの運用ルールを見直し、本体を整理
+
+### フェーズ
+校正・ゲート改善は一段落。**様子見フェーズ。実資金投票はまだしない。**
+追加の大量replayや係数いじりは急がなくてよい。
+
+### 直近の指標(直近replay窓・`run_pva_recent.sh`基準)
+- pred的中% 2.21 / 実績的中% 2.66 / ratio **0.83**(ほぼ一致・やや控えめ)
+- 券種別: 3連単 ratio 0.6〜0.8(やや控えめ)。2車単がまだ混入気味で赤字傾向。
+- 全体(全期間)のratioは古い購入が支配するため校正判定には使わない。
+  必ず`run_pva_recent.sh`の直近窓で判定すること。
+
+### 今やっていること / 次にやること
+1. `run_replay_continue.sh 50 2` → `run_pva_recent.sh 6 100` で直近窓を広げて
+   再確認(2車単混入が解消したか、3連単ratioが1.0寄りに戻るか)。
+2. 新しい分析方針: 「的中率が合っているか」ではなく
+   「予測期待払戻額 vs 実際払戻額が、どのオッズ帯・EV帯・確率帯で乖離しているか」
+   を分解する。具体的には
+   - 予測: Σ(win_prob × odds)
+   - 実績: 的中した買い目のoddsの総和
+   を比較する。的中率は直近窓でほぼ一致しているため、「的中率は概ね合っているが
+   期待値だけ膨らんでいる」という仮説の検証が本題。
+   → 既存の `predicted-vs-actual-return` / `ev-bands` / `odds-drift`
+     エンドポイント(`app/routers/purchase_diagnostics.py`)で代替できるか
+     **現行ソースをまだ確認していない**。ここから着手する。
+
+### 触ってはいけない・合意が必要なもの
+- 選択ロジック(EV最大化 vs 的中率重視)の閾値は勝手に変えない
+- line_boost=1.2 は未検証(4.1参照)。変更は設計合意してから
+- 閾値の足切りを勝手に増やさない
+
+---
+
+## 2. プロジェクト概要
 
 競輪のEV(期待値)ベース投票分析ツール。Android/Termux専用(PC不使用)、
 インフラは全て無料プランで構成。**実資金投票はまだ開始していない**
@@ -116,11 +75,9 @@ python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-
 - スクレイピング: oddspark.com、結果確定後に収集(投票締切とのタイミングは無関係)
 
 開発体制: Grok / Claude / ChatGPT が交代で対応。ユーザー本人はコマンドを叩く役、
-git push はユーザーが実行。Grokは利用容量制限のため本引き継ぎ以降はChatGPT中心。
+git push はユーザーが実行。
 
----
-
-## 2. 現在の投票ロジックの設計(2026-09-04時点)
+### 投票ロジックの設計(現行)
 
 ```
 出走表・オッズ取得(結果確定後にスクレイピング)
@@ -136,7 +93,7 @@ git push はユーザーが実行。Grokは利用容量制限のため本引き�
   → 運用ゲート:
       - ステージゲート: 着順指定券種(3連単・2車単)はそのステージの確定済み
         サンプルが30件未満なら一律見送り
-      - 実績ゲート: ステージ別・券種別の全期間実績収支率が-50%以下
+      - 実績ゲート: ステージ別・券種別の全期間実績収支率が損益分岐(0%)以下
         (サンプル50件以上)なら丸ごと見送り
   → ポートフォリオ最適化(_select_portfolio): 固定ケリー額でガミり制約を
      満たしつつ期待利益最大になるよう選定。選ばれなかった買い示唆は
@@ -145,18 +102,13 @@ git push はユーザーが実行。Grokは利用容量制限のため本引き�
     (NEGATIVE_EV_VERIFICATION_TOP_N=30)
 ```
 
-### キャリブレーションの経緯(重要な教訓)
-
-- 当初、補正係数はPurchase/SkippedBetの記録から学習していたが、
-  「期待値マイナスの組み合わせを記録しない」仕様だったため、
-  **偏った(選ばれた後の)サンプルで学習・評価する自己参照的な状態**になっていた。
-- 偏りの無い方法(`get_calibration_factors_retroactive`)で再計算したところ、
-  現行係数(0.4〜0.7倍)は過剰な下方修正で、本来は0.95倍前後(ほぼ無補正)で
-  十分だったことが判明。2026-09-01に本番ロジックを切り替え済み。
-- ただし「勝者の呪い」的な選択バイアスは母集団レベルの補正だけでは消えない
-  ため、実購入集合だけに残る残差を補正する第2段(purchase_set_factor)を追加。
-- **教訓**: 見送り記録の方針(何を記録し、何を記録しないか)が、後々の
-  キャリブレーション・診断全てに影響する。記録の網羅性は精度検証の生命線。
+**キャリブレーションの経緯(重要な教訓)**: 当初はPurchase/SkippedBetの記録から
+係数を学習していたが、「期待値マイナスの組み合わせを記録しない」仕様だったため
+偏った自己参照的な状態になっていた。偏りの無い遡及検証方式
+(`get_calibration_factors_retroactive`)に切り替え(2026-09-01)、現行係数は
+0.95倍前後(ほぼ無補正)で妥当と判明。ただし「勝者の呪い」的な選択バイアスは
+母集団レベルの補正だけでは消えないため、実購入集合の残差を補正する第2段を追加。
+**見送り記録の方針(何を記録し何を記録しないか)が精度検証全体の生命線。**
 
 ---
 
@@ -175,10 +127,10 @@ git push はユーザーが実行。Grokは利用容量制限のため本引き�
 - `GET /purchases/bet-type-diagnostics?since=calibration_switch` — 券種別5段階診断
   (候補生成→ランキング→購入フィルタ→確率→収益化。sinceで補正切替後だけに絞り込み可)
 - `GET /purchases/investment-readiness?since=calibration_switch` — 実資金投入の目安判定
-- `GET /purchases/diagnostics/predicted-vs-actual-return` — 想定ROI/実績ROIの乖離
+- `GET /purchases/diagnostics/predicted-vs-actual-return` — 想定ROI/実績ROIの乖離。
+  `hours` / `last_n_races` で直近窓だけに絞り込み可(校正判定は必ずこちらを使う)
 - `GET /purchase-diagnostics/winning-capture` — 的中買い目がpurchase/skipped/not_recordedの
-  どれに落ちたかの一括集計(直近の確定済みレースをid降順で見るため、
-  **まだreplayしていない直近レースはnot_recordedで埋まるのが正常**。バグではない)
+  どれに落ちたかの一括集計(まだreplayしていない直近レースはnot_recordedで埋まるのが正常)
 - `GET /purchase-diagnostics/*` — その他多数の診断(ev-bands, raw-vs-calibrated,
   filter-effectiveness, odds-drift, stage-gate, race-plan-design 等。詳細は
   `app/routers/purchase_diagnostics.py`参照)
@@ -187,192 +139,50 @@ git push はユーザーが実行。Grokは利用容量制限のため本引き�
 - `POST /admin-sync/...` — Neon⇔Supabase差分同期をHTTP経由で実行(Render上でシェルが
   使えないため)。実体は `scraper/sync_neon_to_supabase.py` / `sync_supabase_to_neon.py`
 
----
-
-## 4. 未解決・調査中の課題(優先順)
-
-### 4.1 race-planが1レース約45〜54秒かかる件 → 原因判明、修正実装中(2026-09-04)
-
-**原因を特定した。** `race_plan`自体は2.4〜2.6秒と高速(校正キャッシュが正しく効いている)。
-真の犯人は`app/routers/races.py`の`confirm_race_result`だった。
-
-計測結果(5レース分、race_plan_call_totalは全て2.4〜2.6秒):
-
-| race_id | confirm_race_result | skipped_saved件数 |
-|---|---|---|
-| 344 | 45.53s | 179 |
-| 345 | 45.84s | 181 |
-| 346 | 48.76s | 192 |
-| 347 | 54.31s | 218 |
-| 348 | 49.12s | 195 |
-
-**原因**: `confirm_race_result`はPurchase・SkippedBetを1件ずつPythonオブジェクトの
-属性として書き換え、最後に`db.commit()`を1回呼ぶ実装だった。これは「1回のcommit」に
-見えるが、SQLAlchemyの通常のORMオブジェクト更新は**変更された行の数だけ個別のUPDATE文を
-送信する**ため、実質的にSkippedBet 180〜220件分の個別ネットワーク往復が発生していた。
-1件あたり約230ミリ秒(Neonとの往復)と考えると、200件×0.23秒≒46秒とほぼ一致する。
-
-**対応1 (Claude, 効果なし)**: `bulk_update_mappings` に置き換えたが、実測で
-confirm は 47〜56秒のまま。仮説「1件ずつのUPDATE が原因」だけでは不十分だった。
-
-**真因 (Grok, 2026-09-04 再検証)**:
-1. SQLAlchemy の `bulk_update_mappings` は **行ごとに UPDATE を発行**する
-   （1本のSQLにはならない）。Neon 遠距離では 1往復~200ms × 200件 ≒ 40秒。
-2. さらに ORM オブジェクトへ `p.result = ...` と代入したままだったため、
-   `commit()` 時にユニット・オブ・ワークが **同じ更新を二重発行**していた。
-
-**対応2 (今回)**:
-- ORM 属性は触らない（dirty にしない）
-- `UPDATE ... FROM (VALUES ...)` の **SQL 1本**で Purchase / SkippedBet を更新
-- `purchases.race_id` / `skipped_bets.race_id` に Index を追加
-
-**次にやること（必須）**:
+### よく使うコマンド
 ```bash
-cd ~/Keirin-EV-Tool
-python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
+# 直近校正の確認(これだけ見ればよい)
+bash "$HOME/Keirin-EV-Tool/scraper/run_pva_recent.sh" 6 100
+
+# 必要なら少数replay(大量は不要)
+bash "$HOME/Keirin-EV-Tool/scraper/run_replay_continue.sh" 50 2
+
+# ヘルスチェック
+python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-ev-tool.onrender.com/health',timeout=60).json(),ensure_ascii=False,indent=2))"
 ```
-`confirm_race_result` が **数秒以下** になっているか確認。なっていれば
-50件→全件 replay を再開する。
-
-**教訓**:
-- `bulk_update_mappings` ≠ 1往復。遠距離DBでは VALUES/UNNEST の1文UPDATEが必要。
-- ORM を dirty にしたまま bulk すると二重更新になる。
-
-### 4.1.1 対応2の実測確認（2026-09-04）
-
-`python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000` を実行。
-
-結果:
-- total=5
-- done=5
-- failed=0
-- skipped=0
-- 全体elapsed=109秒
-- race_id=344: 9.0秒
-- race_id=345: 9.1秒
-- race_id=346: 9.1秒
-- race_id=347: 65.7秒
-- race_id=348: 10.1秒
-
-以前のconfirm_race_resultは約45〜55秒/レースだったが、4/5レースが約9〜10秒まで短縮された。
-したがって、**VALUES句1本UPDATEへの変更による高速化は実測で確認済み**。
-
-ただしrace_id=347のみ65.7秒となっているため、単発の遅延原因は未確認。
-改善そのものの再検証は完了しているので、以後は同じ5件を繰り返さず、347の原因切り分けまたは50件replayへ進む。
-
-### 4.2 line_boost=1.2が未検証の固定値(保留中・未着手)
-- `app/ev_calculator.py`の`line_map_from_race`(または対応する現行コード)で、
-  同ラインの車を1.2倍にブーストする処理があるが、この倍率は
-  「実績データに基づく検証待ちの暫定パラメータ」とコード内に明記されている。
-- 3連単・2車単・3連複(順序を当てる必要がある券種)は、ワイド・2車複より
-  ランキング精度(捕捉後のTop1的中率)が低い傾向があり、この暫定値が原因の
-  一つである可能性がある(Harville式の多段階計算で誤差が積み重なるため)。
-- 提案していた対応: Harville本体は変更せず、遡及検証エンドポイントに
-  line_boostを差し替えて計算し直すオプションを追加し、1.0/1.2/1.5等で
-  ランキング精度がどう変わるか比較する。**この実装はまだ着手していない。**
-
-### 4.3 未来リーク(as-of校正)が未実装
-- `get_calibration_factors_retroactive`・`get_purchase_set_calibration_factors`は
-  確定済み全データを見て係数を計算するため、replay時に「そのレース時点より
-  未来の実績」が係数に含まれる可能性がある。
-- 本格的なバックテストとして正しく評価するには、race_dateより前のデータだけで
-  係数を計算する「as-of」方式が必要。現状は「今のモデルなら過去レース全体で
-  どれくらいの性能か」という参考値としては有効だが、真の予測性能とは区別して
-  扱うこと。
-
-### 4.4 選択ロジックの設計方針(閾値変更は設計合意してから)
-- 現行は期待利益最大化(`_value = stake*(p*odds-1)`)でポートフォリオを選ぶ。
-- 確率校正を直しても、この指標がEV最大のままだと高オッズ偏重に戻りうる。
-- ワイド中心・的中率寄りの方針への転換は、のんが検討中。**勝手に閾値を
-  変えないこと。設計合意してから着手する。**
-
-### 4.5 predicted-vs-actual-returnの現在値(2026-09-03時点)
-- n=2180、想定的中率/実績的中率の比 = 1.87倍(目標: 1.3倍以内)
-- 想定ROI/実績ROI の比 = 1.96倍(目標: 2倍以内。**ほぼ目標達成**)
-- 母数がまだ小さいので、replayを増やしてから再確認すること。
 
 ---
 
+## 4. 未解決の課題(現存するもののみ・解決したら削除する)
 
-### 4.6 Render 429 / Cloudflare（2026-09-04）
-500件連続 replay で後半に HTTP 429 + Cloudflare「Just a moment...」が多発
-（done=355 failed=145）。アプリのメモリリークというより **無料 Render + CF の
-レート制限**が主因。対策: レース間隔・429指数バックオフリトライを
-`replay_settled.py` に実装。失敗分は間隔を空けて再実行すればよい。
+### 4.1 line_boost=1.2が未検証の固定値
+`app/ev_calculator.py`の同ライン車ブースト倍率が「実績データに基づく検証待ちの
+暫定パラメータ」とコード内に明記されている。3連単・2車単・3連複(順序を当てる
+必要がある券種)はランキング精度が低い傾向があり、この暫定値が原因の一つである
+可能性がある。提案: Harville本体は変更せず、遡及検証エンドポイントにline_boost
+を差し替えて計算し直すオプションを追加し、1.0/1.2/1.5等で比較する。**未着手。**
 
+### 4.2 未来リーク(as-of校正)が未実装
+`get_calibration_factors_retroactive`・`get_purchase_set_calibration_factors`は
+確定済み全データを見て係数を計算するため、replay時に「そのレース時点より未来の
+実績」が係数に含まれる可能性がある。本格的なバックテストには、race_dateより前の
+データだけで係数を計算する「as-of」方式が必要。現状は参考値として有効だが、
+真の予測性能とは区別して扱うこと。
 
-### 4.7 校正見直し（2026-09-04・約7000購入）
+### 4.3 選択ロジックの設計方針
+現行は期待利益最大化(`_value = stake*(p*odds-1)`)でポートフォリオを選ぶ。
+確率校正を直しても、この指標がEV最大のままだと高オッズ偏重に戻りうる。
+ワイド中心・的中率寄りの方針への転換は検討中。**勝手に閾値を変えないこと。
+設計合意してから着手する。**
 
-**結論: 500件規模のreplayでサンプルは十分。ratio≈1.78で頭打ち。**
+### 4.4 Supabase↔Neon同期
+停止期間の書き込みギャップが未同期。優先度低・後回し可。
 
-券種別（実績）:
-- 3連単: ratio≈1.4・実績ROI高い → 主収益源、比較的妥当
-- 2車複: ratio≈1.7・実績ROI赤字気味
-- 2車単: ratio≈8・実績ROI≈11% → 壊滅的に楽観（要ゲート）
+### 4.5 winning-captureの母集団
+未replayの高race_idを見て100% not_recordedになる。診断の母集団指定を直すと
+よいが必須ではない。
 
-オッズ帯:
-- 5-10倍: ratio 1.29・実績ROI黒字 → 最良
-- 10-30倍: ratio 3.34・実績ROI赤字 → 最悪帯
-
-**実装した見直し（閾値の勝手な足切りではない）**:
-1. replay の `apply_performance_gates` を **True** に（本番と同じ。以前はFalseで不調券種が混入）
-2. 購入集合係数の下限を状況に応じて 0.08 まで許可（大規模・強楽観帯）
-3. 券種×オッズ帯の採用閾値 n を 30→20
-4. overall 残差が明確なとき、選別用確率に √overall を追加（再選別バイアス緩和）
-
-**次**: ゲートONで50〜100件だけreplayし、ratioと券種内訳の変化を確認。
-全件やり直しは必須ではない（差分確認が先）。
-
-
-### 4.8 直近のみの精度測定（A）（2026-09-04）
-全体の predicted-vs-actual は古い購入が支配して ratio が動かない。
-`/purchases/diagnostics/predicted-vs-actual-return` に `hours` / `last_n_races` を追加。
-`scraper/run_pva_recent.sh [時間] [レース数]` で直近replay分だけ測る。
-
-
-### 4.9 直近校正の判定（2026-09-04）
-
-`run_pva_recent.sh 3 50`（ゲートON後の直近50レース・563点）:
-
-| 指標 | 値 |
-|------|-----|
-| pred的中% | 2.21 |
-| 実績的中% | 2.66 |
-| ratio | **0.83**（ほぼ一致・やや控えめ） |
-
-- 全体 ratio≈1.7台は**古い購入が支配**するため、校正判定には使わない
-- 的中15件のため細かい数字のブレは無視（のん指示）
-- **結論: 第1段+第2段+ゲートONの補正は方向として正しい。追加の係数いじりは不要**
-- 次は直近窓を広げる（あと50〜100件 replay）→ `run_pva_recent.sh` で再確認
-- 全体全件の再replay・Supabase同期は後回しでよい
-
-
-### 4.10 補正強化（データ収集完了後・2026-09-04）
-
-直近100Rの券種別: 3連単 ratio0.82で良好。2車単・複・ワイドはまだ強気。
-
-**実装**:
-1. 購入集合残差の適用を「最初に当たった1つ」→ **候補係数の最小（保守側）** に変更
-   （券種全体が悪いのに帯クロスだけ甘い、を防ぐ）
-2. 不調券種ゲートの閾値を expectancy **-50% → 0%**（実績が赤字の券種は見送り）
-   ※足切りの恣意的追加ではなく、損益分岐に合わせた既存ゲートの調整
-
-データ収集の追加は不要。デプロイ後、少数（20〜50件）replayで直近ratioを再確認。
-
-
-### 4.11 改善（2026-09-04）
-
-直近100R: ratio0.8で全体補正は概ねOK。残課題は
-- 2車単が66点まだ混入（的中0）
-- 3連単が ratio0.6 とやや控えめ（overallのmin/√掛けの影響）
-
-**実装**:
-1. 購入集合係数: 具体帯を優先し、**券種係数で上限cap**（悪い券種は抑える、良い券種はoverallで潰さない）
-2. 購入集合で係数≤0.25かつn≥80の券種は追加ゲート
-3. overall の √追加掛けを廃止（3連単の過抑制を緩和）
-
-確認: `run_replay_continue.sh 50 2` → `run_pva_recent.sh 3 50`
-（2車単n≈0、3連単ratioが0.6→1.0寄りになるか）
+---
 
 ## 5. 運用ルール・やってはいけないこと
 
@@ -393,99 +203,43 @@ python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
   unzip -o ~/storage/downloads/<zip名> -d . && \
   git add <変更ファイル> && \
   git commit -m "<内容>" && \
-  git push
+  git push && \
+  rm -f ~/storage/downloads/<今回のzip>
   ```
 - コマンドはできるだけ1行・スクリプト化。bankrollは検証時1000000を明示。
 - 実資金投票は精度が目安に届くまで開始しない
   (investment-readinessの4基準: サンプル数・統計的有意性・実績収支率黒字・
   破産確率10%以下)。
+- スクリプト実行コマンド(replay_settled.py等)を提示する際は、必ず
+  `cd ~/Keirin-EV-Tool &&` を先頭に明記する(単体で書くとFileNotFoundになる)。
 
 ---
 
-## 6. Claude側で判明した技術的な注意点
+## 6. 技術的な教訓(解決済みだが今後のために残す知見)
 
+- **race-plan遅延の原因**: `confirm_race_result`がPurchase/SkippedBetを
+  ORM属性代入→個別UPDATE文で更新していたため、200件規模で40〜55秒かかっていた。
+  `bulk_update_mappings`も行ごとにUPDATEを発行するため効果なし、かつORM属性を
+  dirtyにしたまま使うと二重更新になる。`UPDATE ... FROM (VALUES ...)`のSQL1本に
+  変更し、`race_id`にIndexを追加して解消(数秒以下に短縮)。
 - **Render無料プランのメモリ制限でプロセスが再起動している説は否定済み**
-  (2026-09-03、50レースreplayでPID・稼働時間が単調増加のまま完走を確認)。
-  race-plan遅延の原因はメモリ/プロセス再起動ではなく、DB書き込みか
-  何らかのループ内処理と考えられる(4.1参照、調査中)。
+  (50レースreplayでPID・稼働時間が単調増加のまま完走を確認)。
 - `Purchase`モデルには`created_at`列が無く、購入日時は`purchased_at`。
   (`Race`・`SkippedBet`・`EvResult`には`created_at`がある。命名の不統一に注意)
-- Neonの接続URLに`channel_binding=require`が付いているとpsycopg2で接続
-  失敗することがある(database.py側で除去済み)。
-- `database.py`の`get_db()`は`DATABASE_PREFER`の優先順で毎回試すため、
-  主系(Neon)が不調な間は毎リクエストで主系への接続タイムアウト分の
-  遅延が乗る可能性がある(まだ実測はしていない)。
-- FastAPI(Starlette)は通常GETルートに対してHEADも自動処理するはずだが、
-  実機で`HEAD /`が405になりRenderのヘルスチェックが失敗、デプロイが
-  終わらなくなる事象が発生。`@app.head("/")`を明示追加して解消済み。
+- Neonの接続URLに`channel_binding=require`が付いているとpsycopg2で接続失敗
+  することがある(database.py側で除去済み)。
+- FastAPI(Starlette)は通常GETに対しHEADも自動処理するはずだが、実機で
+  `HEAD /`が405になりRenderのヘルスチェックが失敗する事象が発生。
+  `@app.head("/")`を明示追加して解消済み。
+- Render無料+Cloudflareのレート制限で、500件連続replayの後半にHTTP 429が
+  多発することがある。アプリ側の問題ではなくインフラ側の制限。レース間隔・
+  429指数バックオフリトライを`replay_settled.py`に実装済み。
+- 全体(全期間)のratioは古い購入が支配して動かない。校正の良し悪しは必ず
+  `predicted-vs-actual-return`の`hours`/`last_n_races`で直近窓だけ見て判定する。
 
 ---
 
-## 7. 次にやるべきこと(優先順)
+## 7. 過去の詳細な検証ログ
 
-1. ~~4.1 confirm高速化~~ → 完了（約2秒）
-2. **直近校正はOK** → あと50〜100件 replay して窓を広げる
-   `bash scraper/run_replay_continue.sh 50 2` → `bash scraper/run_pva_recent.sh 6 100`
-3. 全体 ratio は見ない。判定は `run_pva_recent.sh` のみ
-4. 全部終わったら Supabase↔Neon 同期
-5. 4.2(line_boost)・選択ロジック見直しは、直近ratioが再び悪化したら着手
-2. 上記の結果に基づき、race-planの遅延を実際に解消する
-3. 4.2(line_boost検証)に着手する
-4. replayの母数を増やし、predicted-vs-actual-returnの比率(1.3倍・2倍以内)を
-   再確認する
-5. 4.4(選択ロジックの設計)について、のんと方針をすり合わせる
-
----
-
-## 8. このファイルの更新ルール
-
-- 大きな設計変更・新しい発見・解決した課題があれば、このファイルの該当箇所を
-  更新すること。
-- 「最終更新」の日付と担当(Claude/Grok)を必ず書き換えること。
-- 課題を解決したら「4. 未解決・調査中の課題」から削除し、必要なら
-  「6. 技術的な注意点」に教訓として残すこと。\n## 4.12 同一PVA結果の再確認防止（2026-09-04）
-
-`bash scraper/run_pva_recent.sh 3 50` を再実行し、直近50レース・n=608について以下を確認した。
-
-- pred的中率: 1.34%
-- 実績的中率: 1.97%
-- ratio: 0.68
-- 想定ROI: 1477.87%
-- 実績ROI: 1823.75%
-- すべて3連単
-
-この結果は以前確認した同一条件の測定結果と同じであり、**新しい検証情報ではない**。
-したがって、この結果だけを理由に係数・ゲートを再調整しない。
-
-今後の検証ルール:
-- 一度確認した同一データ・同一条件の測定は再確認しない。
-- 改善を実装した場合は、改善後に新規取得/replayされたデータで再検証する。
-- 新しい検証結果はPROGRESS.mdに記録し、既確認結果との重複を避ける。
-- 「同じ結果が出た」ことと「新しいデータで改善後の性能を確認した」ことを明確に区別する。\n
-
-### 4.11.1 改善後50R replayの直近PVA確認（2026-09-04）
-
-4.11の改善後、`run_replay_continue.sh 50 2` を実行。
-- replay: 50/50 done
-- failed=0
-- skipped=0
-- elapsed=09m47s
-- 大半のレースが約10秒前後で完了し、高速化も50件規模で継続確認。
-
-続けて `run_pva_recent.sh 3 50` を実行。
-- race_count=37
-- n=485
-- pred_hit=1.36%
-- act_hit=2.06%
-- ratio=0.66
-- pred_ROI=1591.77%
-- act_ROI=2100.92%
-- 3連単のみ
-- 100〜300倍: ratio=1.31
-- 300倍以上: ratio=0.45
-
-直前の確認値（n=608、ratio=0.68）と比較して、3連単の過抑制が解消した形跡は確認できなかった。
-一方、予測的中率・ROIはいずれも実績を下回っており、現在も予測は保守的。
-したがって、この結果を理由に追加の校正係数変更は行わない。
-
-**この測定は改善後の新規replayを含む検証として確認済み。以後、同一条件を繰り返し取得しない。次回のPVAは新たな改善または新規データが発生した場合のみ実施する。**
+日付ごとの具体的な実験結果・数値の推移は `PROGRESS_ARCHIVE.md` を参照。
+(2026-09-04時点までの校正調整の経緯・券種別/オッズ帯別の詳細な数値はそちらに移動済み)
