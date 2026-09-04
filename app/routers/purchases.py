@@ -2193,21 +2193,17 @@ def diagnostics_predicted_vs_actual_return(
         since_dt = datetime.utcnow() - timedelta(hours=float(hours))
         filter_note.append(f"hours={hours}")
     elif since:
-        if since == "calibration_switch":
-            since_dt = datetime(2026, 9, 1, 0, 0, 0)
-            filter_note.append("since=calibration_switch")
-        else:
-            try:
-                since_dt = datetime.fromisoformat(
-                    since.replace("Z", "+00:00")
-                )
-                if since_dt.tzinfo is not None:
-                    since_dt = since_dt.replace(tzinfo=None)
-            except ValueError:
-                raise HTTPException(
-                    status_code=400,
-                    detail="sinceはISO日時またはcalibration_switchを指定してください"
-                )
+        try:
+            since_dt = datetime.fromisoformat(
+                since.replace("Z", "+00:00")
+            )
+            if since_dt.tzinfo is not None:
+                since_dt = since_dt.replace(tzinfo=None)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="sinceはISO日時を指定してください"
+            )
 
     if since_dt is not None:
         if hasattr(models.Purchase, "purchased_at"):
