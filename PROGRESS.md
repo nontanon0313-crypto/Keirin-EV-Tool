@@ -6,7 +6,7 @@
 (のんの要望: セッションが変わる・利用制限に達する・別のAIが作業する、といった
 状況でも引き継ぎが途切れないようにするため 2026-09-04 に導入)
 
-最終更新: 2026-09-04(Grok) — 校正見直し(ゲートON・残差強化)
+最終更新: 2026-09-04(Grok) — 直近PVA測定(hours/last_n_races)
 
 ---
 
@@ -208,6 +208,12 @@ python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
 
 **次**: ゲートONで50〜100件だけreplayし、ratioと券種内訳の変化を確認。
 全件やり直しは必須ではない（差分確認が先）。
+
+
+### 4.8 直近のみの精度測定（A）（2026-09-04）
+全体の predicted-vs-actual は古い購入が支配して ratio が動かない。
+`/purchases/diagnostics/predicted-vs-actual-return` に `hours` / `last_n_races` を追加。
+`scraper/run_pva_recent.sh [時間] [レース数]` で直近replay分だけ測る。
 
 ## 5. 運用ルール・やってはいけないこと
 

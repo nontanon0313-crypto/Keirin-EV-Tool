@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..database import get_db
 from .. import models, schemas
@@ -2167,19 +2167,17 @@ def bet_type_diagnostics(since: Optional[str] = None, db: Session = Depends(get_
 @router.get("/diagnostics/predicted-vs-actual-return")
 def diagnostics_predicted_vs_actual_return(
     since: Optional[str] = None,
+    hours: Optional[float] = None,
+    last_n_races: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     """
-    同一の確定済みPurchase集合について、
-    1. 保存EVから逆算した予測払戻
-    2. 購入時確率 × 購入時オッズから再計算した予測払戻
-    3. 実際払戻
-    を直接比較する。
+    同一の確定済みPurchase集合について予測払戻と実際払戻を比較する。
 
-    目的:
-    「全体の的中率は校正されているのにEV/ROIが大きく乖離する」
-    問題について、確率・EV・払戻・集計のどこで乖離しているかを
-    同一母集団で確認する。
+    絞り込み（replay直後の効果測定用）:
+    - hours: 直近N時間（purchased_at 基準）
+    - last_n_races: 直近に購入されたレースをN件分
+    - since: ISO日時
     """
 
     query = (
@@ -2189,30 +2187,51 @@ def diagnostics_predicted_vs_actual_return(
 
     since_dt = None
     since_resolved = None
+    filter_note = []
 
-    if since:
+    if hours is not None and hours > 0:
+        since_dt = datetime.utcnow() - timedelta(hours=float(hours))
+        filter_note.append(f"hours={hours}")
+    elif since:
         if since == "calibration_switch":
-            # 既存の診断と同じ基準日を使うため、
-            # Purchaseに作成日時が存在する場合のみ安全に絞る。
-            # 基準日の解決ができない場合は全件対象とし、
-            # レスポンスで明示する。
             pass
         else:
             try:
                 since_dt = datetime.fromisoformat(
                     since.replace("Z", "+00:00")
                 )
+                if since_dt.tzinfo is not None:
+                    since_dt = since_dt.replace(tzinfo=None)
             except ValueError:
                 raise HTTPException(
                     status_code=400,
                     detail="sinceはISO日時またはcalibration_switchを指定してください"
                 )
 
-    if since_dt is not None and hasattr(models.Purchase, "created_at"):
-        query = query.filter(models.Purchase.created_at >= since_dt)
+    if since_dt is not None:
+        if hasattr(models.Purchase, "purchased_at"):
+            query = query.filter(models.Purchase.purchased_at >= since_dt)
+        elif hasattr(models.Purchase, "created_at"):
+            query = query.filter(models.Purchase.created_at >= since_dt)
         since_resolved = since_dt.isoformat()
 
     purchases = query.all()
+
+    if last_n_races is not None and last_n_races > 0 and purchases:
+        filter_note.append(f"last_n_races={last_n_races}")
+        race_latest = {}
+        for p_obj in purchases:
+            ts = getattr(p_obj, "purchased_at", None) or datetime.min
+            rid = p_obj.race_id
+            if rid not in race_latest or ts > race_latest[rid]:
+                race_latest[rid] = ts
+        top_races = sorted(
+            race_latest.keys(),
+            key=lambda r: race_latest[r],
+            reverse=True,
+        )[: int(last_n_races)]
+        top_set = set(top_races)
+        purchases = [p_obj for p_obj in purchases if p_obj.race_id in top_set]
 
     def empty_stats():
         return {
@@ -2460,6 +2479,10 @@ def diagnostics_predicted_vs_actual_return(
         ),
         "since": since,
         "since_resolved": since_resolved,
+        "hours": hours,
+        "last_n_races": last_n_races,
+        "filter_note": filter_note,
+        "race_count": len({r["race_id"] for r in rows}) if rows else 0,
         "overall": overall,
         "by_odds_band": by_odds,
         "by_ev_band": by_ev,
