@@ -130,44 +130,46 @@ def _odds_band_key(odds: float) -> str:
 def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str, purchase_factors: dict) -> float:
     """
     実購入集合で観測された「予測p vs 実績的中」から求めた追加係数。
-    帯校正の後に掛け、選別後も残る楽観バイアスを抑える。
 
-    2026-09-04 見直し:
-    複数の残差（券種×帯 / 帯 / 券種 / 全体）が取れるときは
-    **最も小さい係数（保守側）**を使う。
-    以前は「最初に条件を満たした1つ」だけだったため、
-    2車単など券種全体では壊滅的でも、帯クロスが甘く残ることがあった。
+    優先（具体 → 粗い）:
+      券種×オッズ帯 → オッズ帯 → 券種 → 全体
+    さらに券種係数がある場合は **上限として券種係数を掛ける（cap）**。
+    - 2車単のように券種全体が悪いのに帯だけ甘い、を防ぐ
+    - 3連単のように券種が妥当なのに overall の min で潰す、も防ぐ
     """
     if not purchase_factors or est_prob is None or est_prob <= 0:
         return est_prob
     band = _odds_band_key(float(odds_value) if odds_value else 0)
-    candidates = []
 
+    factor = None
     cross = (purchase_factors.get("by_bet_type_odds_band") or {}).get(bet_type) or {}
     info = cross.get(band)
     if info and info.get("n", 0) >= 20 and info.get("factor") is not None:
-        candidates.append(float(info["factor"]))
+        factor = float(info["factor"])
+    if factor is None:
+        info = (purchase_factors.get("by_odds_band") or {}).get(band)
+        if info and info.get("n", 0) >= 50 and info.get("factor") is not None:
+            factor = float(info["factor"])
+    bt_info = (purchase_factors.get("by_bet_type") or {}).get(bet_type)
+    bt_factor = None
+    if bt_info and bt_info.get("n", 0) >= 30 and bt_info.get("factor") is not None:
+        bt_factor = float(bt_info["factor"])
+        if factor is None:
+            factor = bt_factor
+    if factor is None:
+        overall = purchase_factors.get("overall") or {}
+        if overall.get("factor") is not None and (overall.get("n") or 0) >= 100:
+            factor = float(overall["factor"])
 
-    info = (purchase_factors.get("by_odds_band") or {}).get(band)
-    if info and info.get("n", 0) >= 50 and info.get("factor") is not None:
-        candidates.append(float(info["factor"]))
-
-    info = (purchase_factors.get("by_bet_type") or {}).get(bet_type)
-    if info and info.get("n", 0) >= 30 and info.get("factor") is not None:
-        candidates.append(float(info["factor"]))
-
-    overall = purchase_factors.get("overall") or {}
-    if overall.get("factor") is not None and (overall.get("n") or 0) >= 100:
-        candidates.append(float(overall["factor"]))
-
-    if not candidates:
+    if factor is None:
         return est_prob
 
-    factor = min(candidates)
-    # 大規模で楽観が強い帯・券種は 0.08 まで下げうる
+    # 券種が明確に悪い/良いときは券種係数で上限を掛ける
+    if bt_factor is not None:
+        factor = min(factor, bt_factor)
+
     factor = max(0.08, min(1.5, factor))
-    out = max(0.0, min(1.0, float(est_prob) * factor))
-    return out
+    return max(0.0, min(1.0, float(est_prob) * factor))
 
 
 
@@ -731,10 +733,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 実績ゲートは「確率を捨てる」のではなく、不調ステージのみ見送り(券種差別なし)。
     # マルチ専用の確率縮小・最低勝率・券種除外は行わない。
     STAGE_EXPECTANCY_CUTOFF = -50.0
-    # 券種ゲートもステージゲートと同じ閾値を踏襲する。実績収支率は少数サンプルでは
-    # ブレが大きいため、0%(単純な黒字/赤字の境目)ではなく-50%を基準にすることで、
-    # 健全な券種が偶然の下振れだけで頻繁に出入りしないようにしている。
-    BET_TYPE_EXPECTANCY_CUTOFF = 0.0  # 実績収支がマイナスの券種は見送り（損益分岐=0%）
+    # 券種ゲート: 実績収支がマイナス（ROI<100%）の券種は見送り。
+    # 2車単など継続赤字の券種をプランから外す。
+    BET_TYPE_EXPECTANCY_CUTOFF = 0.0
 
     # ライン構成を買い目確率に反映
     line_map, line_boost = _line_map_from_race(race)
@@ -751,18 +752,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 est_prob = _apply_purchase_set_factor(
                     est_prob, o.odds_value, o.bet_type, purchase_set_factors
                 )
-                # 選別後にまた楽観が残る（勝者の呪い）対策:
-                # overall 残差が明確に1未満なら、ランキング用に追加で寄せる。
-                # 足切りではなく確率を縮めるだけ（閾値の勝手な変更ではない）。
-                ov = (purchase_set_factors or {}).get("overall") or {}
-                ov_f = ov.get("factor")
-                ov_n = ov.get("n") or 0
-                if ov_f is not None and ov_n >= 500 and float(ov_f) < 0.85:
-                    # overall を二重に掛けないよう、不足分だけ追加
-                    # 例: 既に帯で0.5、overall0.53 → 追加は max(0.53/max(applied,0.53), ...)
-                    # 簡易: overall をさらに一度だけ穏やかに掛ける（sqrtで過抑制を防ぐ）
-                    extra = float(ov_f) ** 0.5
-                    est_prob = max(0.0, min(1.0, est_prob * extra))
+                # overall の追加√掛けは廃止（3連単を潰しすぎた）。
+                # 不調券種は券種係数cap + ゲートで扱う。
                 low_prob_warning = est_prob < 0.05
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
@@ -788,6 +779,20 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                     gate_reason = (
                         f"不調券種除外({o.bet_type}:実績{bt_exp['expectancy_pct']}%/"
                         f"{bt_exp['n']}件)"
+                    )
+            # 購入集合で的中が極端に不足している券種も見送り
+            # （収支ゲートをすり抜けても、的中比が壊滅的なら買わない）
+            if gate_reason is None and purchase_set_factors:
+                ps_bt = (purchase_set_factors.get("by_bet_type") or {}).get(o.bet_type)
+                if (
+                    ps_bt
+                    and (ps_bt.get("n") or 0) >= 80
+                    and ps_bt.get("factor") is not None
+                    and float(ps_bt["factor"]) <= 0.25
+                ):
+                    gate_reason = (
+                        f"購入集合で的中不足({o.bet_type}:係数{ps_bt['factor']}/"
+                        f"{ps_bt['n']}件)"
                     )
 
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
