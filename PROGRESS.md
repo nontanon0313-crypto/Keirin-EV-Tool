@@ -99,29 +99,37 @@
 
 ## 4. 未解決・調査中の課題(優先順)
 
-### 4.1 race-planが1レース約45〜54秒かかる(調査中・進行中)
-- 校正係数(第1段・第2段)とゲート集計(ステージ/券種別実績)には**60分TTLの
-  プロセス内メモリキャッシュを導入済み**(2026-09-03)。`warm-calibration`で
-  事前計算可能。
-- しかし実測では、キャッシュ有効中(同一プロセス・PID変化なしを確認済み)でも
-  1レースあたり45〜54秒かかったまま改善しなかった。
-- `skipped_saved_count`(見送り記録件数、1レースあたり120〜220件)と所要時間の
-  相関係数は**0.886**、候補1件あたり約210ミリ秒という強い線形関係が判明。
-  → 見送り記録の保存(`_save_skipped_bets`)かその前後で、1件ずつDB往復して
-    いるような処理がある可能性が高いが、コードを読む限りでは
-    `db.add_all()` + 単一`commit()`のバッチ処理に見え、原因を特定できていない。
-- **対応済み**: `app/routers/ev.py`の`race_plan`内と`app/routers/races.py`の
-  `replay_settled_one`内に、フェーズ別(オッズ取得・校正係数取得・
-  stage_sample_countクエリ・ゲート集計・候補評価ループ・見送りリスト組立・
-  SkippedBet保存・soft_reset・race_plan呼び出し全体・購入保存・confirm処理)
-  の所要時間計測を追加済み(`debug_race_plan_timings` / `debug_outer_timings`
-  としてレスポンスに含まれる)。**まだこの計測結果を受け取っておらず、
-  次にやるべきことは5件程度のreplayを実行して`timings:`行を確認すること。**
-  ```bash
-  python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
-  ```
-  (出力は要点サマリー+ `scraper/data/replay_log_*.jsonl` に詳細を保存する
-  仕様に変更済み。貼り付ける時は画面の`timings:`行だけで十分)
+### 4.1 race-planが1レース約45〜54秒かかる件 → 原因判明、修正実装中(2026-09-04)
+
+**原因を特定した。** `race_plan`自体は2.4〜2.6秒と高速(校正キャッシュが正しく効いている)。
+真の犯人は`app/routers/races.py`の`confirm_race_result`だった。
+
+計測結果(5レース分、race_plan_call_totalは全て2.4〜2.6秒):
+
+| race_id | confirm_race_result | skipped_saved件数 |
+|---|---|---|
+| 344 | 45.53s | 179 |
+| 345 | 45.84s | 181 |
+| 346 | 48.76s | 192 |
+| 347 | 54.31s | 218 |
+| 348 | 49.12s | 195 |
+
+**原因**: `confirm_race_result`はPurchase・SkippedBetを1件ずつPythonオブジェクトの
+属性として書き換え、最後に`db.commit()`を1回呼ぶ実装だった。これは「1回のcommit」に
+見えるが、SQLAlchemyの通常のORMオブジェクト更新は**変更された行の数だけ個別のUPDATE文を
+送信する**ため、実質的にSkippedBet 180〜220件分の個別ネットワーク往復が発生していた。
+1件あたり約230ミリ秒(Neonとの往復)と考えると、200件×0.23秒≒46秒とほぼ一致する。
+
+**対応**: `bulk_update_mappings`(またはCASE式を使った一括UPDATE)に置き換える修正を
+Claudeが実装中。次のセッションでこの状態のままなら、まず
+`app/routers/races.py`の`confirm_race_result`関数を見て、Purchase/SkippedBetの
+更新ループが`bulk_update_mappings`化されているか確認すること。されていなければ
+このセクションの通り修正する。
+
+**教訓**: 「1回のcommit()」は「1回のSQL文」を意味しない。ORMオブジェクトを
+ループで大量に書き換える処理は、`bulk_update_mappings`や生SQLのUPDATE(CASE式)を
+使わない限り、行数分のネットワーク往復が発生する。同様のパターンが他の場所
+(purchases.pyのバッチ更新処理など)にも無いか、余裕があれば横展開で確認するとよい。
 
 ### 4.2 line_boost=1.2が未検証の固定値(保留中・未着手)
 - `app/ev_calculator.py`の`line_map_from_race`(または対応する現行コード)で、
