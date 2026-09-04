@@ -844,7 +844,6 @@ def replay_settled_targets(
             or_(
                 models.Entry.blended_win_prob.isnot(None),
                 models.Entry.ai_win_prob.isnot(None),
-                models.Entry.tipstar_win_prob.isnot(None),
             )
         )
         .distinct()
