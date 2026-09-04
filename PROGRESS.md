@@ -1,12 +1,95 @@
 # Keirin-EV-Tool 進捗・引き継ぎメモ
 
-このファイルは、Claude・Grokどちらが作業する場合でも「今どこまで進んでいて、
-何が既知の問題で、次に何をすべきか」をすぐ把握できるようにするための
+このファイルは、Claude・Grok・ChatGPT どれが作業する場合でも
+「今どこまで進んでいて、何が既知の問題で、次に何をすべきか」をすぐ把握するための
 引き継ぎドキュメントです。**大きな変更を加えたら、このファイルも更新してください。**
 (のんの要望: セッションが変わる・利用制限に達する・別のAIが作業する、といった
 状況でも引き継ぎが途切れないようにするため 2026-09-04 に導入)
 
-最終更新: 2026-09-04(Grok) — 券種cap補正・2車単ゲート強化・overall二重掛け廃止
+最終更新: 2026-09-04(Grok) — 校正改善一段落・ChatGPTへ引き継ぎ
+
+---
+
+## 0. ChatGPTへの引き継ぎ（2026-09-04 時点）
+
+### 0.1 いまのフェーズ
+**校正・ゲートの改善は一段落。様子見フェーズ。**
+- 実資金投票はまだしない
+- 追加の大量 replay は不要
+- 係数をいじり続ける必要はない
+- 判定は常に「直近窓」だけで行う（全体の古い ratio は見ない）
+
+### 0.2 直近の検証結果（重要）
+コマンド: `bash scraper/run_pva_recent.sh 3 50`
+
+| 項目 | 値 |
+|------|-----|
+| レース | 50 |
+| 購入 n | 594（**すべて3連単**） |
+| 2車単など不調券種 | **0件**（混入解消） |
+| pred的中% | 1.34 |
+| 実績的中% | 1.85 |
+| **ratio** | **0.73**（やや控えめ＝のんは問題なしと判断） |
+| 想定ROI% | 1581 |
+| 実績ROI% | 1890 |
+
+- 以前の全体 ratio≈1.7〜1.8 は**古い購入が支配**しているため校正判定に使わない
+- 的中11件程度なので細かい数字のブレはあるが、方向は「強気すぎ解消」
+
+### 0.3 直近で入れた修正（コード）
+1. `confirm_race_result` を VALUES 1本 UPDATE に（1レース confirm 約2秒、以前45〜55秒）
+2. replay の 429/Cloudflare リトライ＋レース間隔
+3. `predicted-vs-actual-return` に `hours` / `last_n_races`（直近測定）
+4. 購入集合残差: 具体帯優先＋**券種係数で cap**（悪い券種は抑え、良い券種は overall で潰さない）
+5. 不調券種ゲート `expectancy < 0%`（損益分岐）
+6. 購入集合で係数≤0.25 かつ n≥80 の券種は追加ゲート（2車単対策）
+7. overall の √ 追加掛けを廃止（3連単の過抑制を緩和）
+8. replay の `apply_performance_gates` 既定 True
+
+主なファイル:
+- `app/routers/ev.py` — 残差適用・ゲート
+- `app/routers/purchases.py` — 購入集合係数・PVA診断
+- `app/routers/races.py` — replay / confirm
+- `scraper/replay_settled.py` / `run_replay_continue.sh` / `run_pva_recent.sh`
+
+### 0.4 残課題・やってよいこと
+
+| 優先 | 内容 | 状態 |
+|------|------|------|
+| 低 | 様子見（新規レースの取得→予想→直近PVA） | **推奨中** |
+| 低 | Supabase ↔ Neon 同期（停止期間の書き込みギャップ） | 後回し可 |
+| 低 | winning-capture が未replayの高 race_id を見て 100% not_recorded になる | 診断の母集団指定を直すとよい（必須ではない） |
+| 保留 | line_boost=1.2 の検証 | 未着手 |
+| 保留 | as-of 校正（未来リーク防止） | 未着手 |
+| 保留 | 選択ロジック（純EV最大化以外）の設計 | 直近が悪化したら |
+| 注意 | Render 無料枠の 429 | 間隔・リトライ済み。連続大量は避ける |
+
+### 0.5 のんの方針（守ること）
+- 推測で「直った」と断定しない。数値をそのまま報告
+- 閾値の勝手な足切りを増やさない（設計合意してから）
+- 全体 ratio ではなく `run_pva_recent.sh` で判定
+- 実績より予測が低め（控えめ）は問題にしない
+- コマンドはファイル化して1行で叩けるようにする
+- git push / デプロイはユーザーが実行。zip とコマンドをセットで出す
+- Termux では `/tmp` が使えないことがある → `$HOME` 配下を使う
+- PROGRESS.md は大きな変更のたびに更新
+
+### 0.6 よく使うコマンド
+```bash
+# 直近校正の確認（これだけ見ればよい）
+bash "$HOME/Keirin-EV-Tool/scraper/run_pva_recent.sh" 6 100
+
+# 必要なら少数 replay（大量は不要）
+bash "$HOME/Keirin-EV-Tool/scraper/run_replay_continue.sh" 50 2
+
+# ヘルス
+python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-ev-tool.onrender.com/health',timeout=60).json(),ensure_ascii=False,indent=2))"
+```
+
+### 0.7 次に ChatGPT がやるとよいこと
+1. この PROGRESS を読んだうえで、ユーザーの次の具体依頼に対応
+2. 新規の「精度改善」を求められたら、まず直近 PVA を取ってから設計を話す（いきなり係数変更しない）
+3. DB同期や winning-capture の母集団修正は、ユーザーが触れてからでよい
 
 ---
 
@@ -23,8 +106,8 @@
 - AI予想: Gemini API
 - スクレイピング: oddspark.com、結果確定後に収集(投票締切とのタイミングは無関係)
 
-開発体制: Grok(Termux上での実行・一次修正)とClaude(コードレビュー・設計・
-統合)の分業。ユーザー本人はコマンドを叩く役、git push はユーザーが実行。
+開発体制: Grok / Claude / ChatGPT が交代で対応。ユーザー本人はコマンドを叩く役、
+git push はユーザーが実行。Grokは利用容量制限のため本引き継ぎ以降はChatGPT中心。
 
 ---
 
