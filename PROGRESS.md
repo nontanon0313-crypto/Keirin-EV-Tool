@@ -70,7 +70,16 @@
 - 全体 ratio ではなく `run_pva_recent.sh` で判定
 - 実績より予測が低め（控えめ）は問題にしない
 - コマンドはファイル化して1行で叩けるようにする
-- git push / デプロイはユーザーが実行。zip とコマンドをセットで出す
+- ChatGPTがコード・設定・スクリプトの修正内容を作成し、ユーザーはTermuxへコマンドを貼り付けて実行する
+- ChatGPTが修正を提案・実装する場合は、必要な確認コマンドだけでなく `git add`、`git commit`、`git push` まで実行できるコマンドを提示する
+- 新しいChatGPTチャットでKeirin-EV-Toolの作業を開始する場合、過去の会話や記憶だけで最新状態を判断しない。まずGitHubの最新mainを確認し、次に `PROGRESS.md` の「0. ChatGPTへの引き継ぎ」を読む
+- GitHub確認方法:
+  - リポジトリ: https://github.com/nontanon0313-crypto/Keirin-EV-Tool
+  - main: https://github.com/nontanon0313-crypto/Keirin-EV-Tool/tree/main
+  - PROGRESS.md(raw): https://raw.githubusercontent.com/nontanon0313-crypto/Keirin-EV-Tool/main/PROGRESS.md
+  - 個別ファイル(raw): https://raw.githubusercontent.com/nontanon0313-crypto/Keirin-EV-Tool/main/ファイルパス
+- 修正前は必要な現行ソースをGitHub mainまたはローカルの最新コミットから確認し、推測で古いコードを前提に修正しない
+- 今回のPROGRESS.md更新コマンドは、先頭に誤って `-cd` を付けたため `cd` が実行されず失敗した。以後、実行コマンドの先頭に不要な文字を付けない。また、更新処理・git diff・git add・git commit・git pushを1つの連続したコマンドとして提示し、途中で失敗した場合は後続処理を実行しない。
 - Termux では `/tmp` が使えないことがある → `$HOME` 配下を使う
 - PROGRESS.md は大きな変更のたびに更新
 
