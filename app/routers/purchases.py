@@ -244,12 +244,14 @@ def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) ->
                 "factor": 1.0,
             }
         raw = act / pred
-        # サンプルが少ないほど1.0に寄せる
-        required = 80
+        # サンプルが少ないほど1.0に寄せる。nが増えたらほぼ生比率を使う。
+        required = 60
         shrink = min(1.0, n / required)
-        # p値が強い（乖離が偶然でない）ほどshrinkを強める簡易版
         factor = 1.0 + shrink * (raw - 1.0)
-        factor = max(0.15, min(1.5, factor))
+        # 大規模サンプルで大きく楽観が残る帯は下限を下げて寄せる
+        # (2車単・10-30倍帯など。2026-09-04の6927件診断で確認)
+        floor = 0.08 if n >= 100 and raw < 0.5 else 0.12 if n >= 80 else 0.15
+        factor = max(floor, min(1.5, factor))
         return {
             "n": n,
             "wins": wins,

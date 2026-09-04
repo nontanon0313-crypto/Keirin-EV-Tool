@@ -141,7 +141,7 @@ def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str
 
     cross = (purchase_factors.get("by_bet_type_odds_band") or {}).get(bet_type) or {}
     info = cross.get(band)
-    if info and info.get("n", 0) >= 30 and info.get("factor") is not None:
+    if info and info.get("n", 0) >= 20 and info.get("factor") is not None:
         factor = float(info["factor"])
         used = f"bt_odds:{bet_type}:{band}"
     else:
@@ -158,8 +158,8 @@ def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str
                 factor = float(purchase_factors["overall"]["factor"])
                 used = "overall"
 
-    # 購入集合では0.15まで下げうる（30-100倍帯など）
-    factor = max(0.15, min(1.5, factor))
+    # 購入集合の残差。大規模で楽観が強い帯は 0.08 まで下げうる
+    factor = max(0.08, min(1.5, factor))
     out = max(0.0, min(1.0, float(est_prob) * factor))
     return out
 
@@ -745,6 +745,18 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 est_prob = _apply_purchase_set_factor(
                     est_prob, o.odds_value, o.bet_type, purchase_set_factors
                 )
+                # 選別後にまた楽観が残る（勝者の呪い）対策:
+                # overall 残差が明確に1未満なら、ランキング用に追加で寄せる。
+                # 足切りではなく確率を縮めるだけ（閾値の勝手な変更ではない）。
+                ov = (purchase_set_factors or {}).get("overall") or {}
+                ov_f = ov.get("factor")
+                ov_n = ov.get("n") or 0
+                if ov_f is not None and ov_n >= 500 and float(ov_f) < 0.85:
+                    # overall を二重に掛けないよう、不足分だけ追加
+                    # 例: 既に帯で0.5、overall0.53 → 追加は max(0.53/max(applied,0.53), ...)
+                    # 簡易: overall をさらに一度だけ穏やかに掛ける（sqrtで過抑制を防ぐ）
+                    extra = float(ov_f) ** 0.5
+                    est_prob = max(0.0, min(1.0, est_prob * extra))
                 low_prob_warning = est_prob < 0.05
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None

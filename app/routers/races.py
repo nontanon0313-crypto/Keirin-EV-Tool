@@ -615,7 +615,7 @@ def soft_reset_bets(race_id: int, db: Session = Depends(get_db)):
 def replay_settled_one(
     race_id: int,
     bankroll: float = 1_000_000,
-    apply_performance_gates: bool = False,
+    apply_performance_gates: bool = True,
     apply_odds_safety_margin: bool = False,
     db: Session = Depends(get_db),
 ):

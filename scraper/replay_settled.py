@@ -178,7 +178,7 @@ def main():
                 session,
                 "POST",
                 url,
-                params={"bankroll": args.bankroll},
+                params={"bankroll": args.bankroll, "apply_performance_gates": "true"},
                 timeout=180,
                 max_retries=8,
                 base_wait=8.0,
