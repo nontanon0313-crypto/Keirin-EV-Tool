@@ -2194,7 +2194,8 @@ def diagnostics_predicted_vs_actual_return(
         filter_note.append(f"hours={hours}")
     elif since:
         if since == "calibration_switch":
-            pass
+            since_dt = datetime(2026, 9, 1, 0, 0, 0)
+            filter_note.append("since=calibration_switch")
         else:
             try:
                 since_dt = datetime.fromisoformat(
