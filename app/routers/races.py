@@ -820,6 +820,7 @@ def replay_settled_one(
 def replay_settled_targets(
     since: str = None,
     limit: int = 5000,
+    after_race_id: int = None,
     db: Session = Depends(get_db),
 ):
     """再投票対象のrace_id一覧（進捗付きクライアント用）。"""
@@ -833,46 +834,42 @@ def replay_settled_targets(
         since_dt = purchases_router._parse_since_param(since)
         since_out = since
 
-    id_set = set()
-    q1 = (
+    # Race + Entry をJOINして、勝率のあるsettled raceだけをDB側で抽出。
+    # 旧実装のraceごとのEntry問い合わせ（N+1）を解消する。
+    q = (
         db.query(models.Race.id)
+        .join(models.Entry, models.Entry.race_id == models.Race.id)
         .filter(models.Race.actual_result.isnot(None))
+        .filter(
+            or_(
+                models.Entry.blended_win_prob.isnot(None),
+                models.Entry.ai_win_prob.isnot(None),
+                models.Entry.tipstar_win_prob.isnot(None),
+            )
+        )
+        .distinct()
         .order_by(models.Race.id.asc())
     )
-    if since_dt is not None:
-        q1 = q1.filter(or_(models.Race.race_date >= since_dt, models.Race.race_date.is_(None)))
-    for row in q1.limit(limit * 3).all():
-        id_set.add(row[0])
-    if since_dt is not None:
-        q2 = (
-            db.query(models.Purchase.race_id)
-            .join(models.Race, models.Race.id == models.Purchase.race_id)
-            .filter(models.Race.actual_result.isnot(None))
-            .filter(models.Purchase.purchased_at >= since_dt)
-            .distinct()
-        )
-        for row in q2.all():
-            id_set.add(row[0])
-    # 勝率があるレースだけ（replayが即死しないように）
-    usable = []
-    for rid in sorted(id_set):
-        ents = db.query(models.Entry).filter(models.Entry.race_id == rid).all()
-        ok = False
-        for e in ents:
-            if (
-                e.blended_win_prob is not None
-                or getattr(e, "ai_win_prob", None) is not None
-                or getattr(e, "tipstar_win_prob", None) is not None
-            ):
-                ok = True
-                break
-        if ok:
-            usable.append(rid)
-        if len(usable) >= limit:
-            break
-    ids = usable
 
-    return {"since": since_out, "total": len(ids), "race_ids": ids}
+    if since_dt is not None:
+        q = q.filter(
+            or_(
+                models.Race.race_date >= since_dt,
+                models.Race.race_date.is_(None),
+            )
+        )
+
+    if after_race_id is not None:
+        q = q.filter(models.Race.id > after_race_id)
+
+    ids = [row[0] for row in q.limit(limit).all()]
+
+    return {
+        "since": since_out,
+        "after_race_id": after_race_id,
+        "total": len(ids),
+        "race_ids": ids,
+    }
 
 
 @router.post("/replay-settled/batch")
