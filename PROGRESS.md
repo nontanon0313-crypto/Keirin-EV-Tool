@@ -238,6 +238,28 @@ python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
 - `bulk_update_mappings` ≠ 1往復。遠距離DBでは VALUES/UNNEST の1文UPDATEが必要。
 - ORM を dirty にしたまま bulk すると二重更新になる。
 
+### 4.1.1 対応2の実測確認（2026-09-04）
+
+`python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000` を実行。
+
+結果:
+- total=5
+- done=5
+- failed=0
+- skipped=0
+- 全体elapsed=109秒
+- race_id=344: 9.0秒
+- race_id=345: 9.1秒
+- race_id=346: 9.1秒
+- race_id=347: 65.7秒
+- race_id=348: 10.1秒
+
+以前のconfirm_race_resultは約45〜55秒/レースだったが、4/5レースが約9〜10秒まで短縮された。
+したがって、**VALUES句1本UPDATEへの変更による高速化は実測で確認済み**。
+
+ただしrace_id=347のみ65.7秒となっているため、単発の遅延原因は未確認。
+改善そのものの再検証は完了しているので、以後は同じ5件を繰り返さず、347の原因切り分けまたは50件replayへ進む。
+
 ### 4.2 line_boost=1.2が未検証の固定値(保留中・未着手)
 - `app/ev_calculator.py`の`line_map_from_race`(または対応する現行コード)で、
   同ラインの車を1.2倍にブーストする処理があるが、この倍率は
