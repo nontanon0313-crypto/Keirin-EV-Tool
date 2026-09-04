@@ -6,7 +6,7 @@
 (のんの要望: セッションが変わる・利用制限に達する・別のAIが作業する、といった
 状況でも引き継ぎが途切れないようにするため 2026-09-04 に導入)
 
-最終更新: 2026-09-04(Grok) — confirm VALUES1本化 + Index import修正
+最終更新: 2026-09-04(Grok) — confirm高速化 + 429リトライ
 
 ---
 
@@ -178,6 +178,13 @@ python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
 - 母数がまだ小さいので、replayを増やしてから再確認すること。
 
 ---
+
+
+### 4.6 Render 429 / Cloudflare（2026-09-04）
+500件連続 replay で後半に HTTP 429 + Cloudflare「Just a moment...」が多発
+（done=355 failed=145）。アプリのメモリリークというより **無料 Render + CF の
+レート制限**が主因。対策: レース間隔・429指数バックオフリトライを
+`replay_settled.py` に実装。失敗分は間隔を空けて再実行すればよい。
 
 ## 5. 運用ルール・やってはいけないこと
 
