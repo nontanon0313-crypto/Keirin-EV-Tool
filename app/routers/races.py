@@ -50,6 +50,7 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
             odds_map[(o.bet_type, o.combination)] = float(o.odds_value)
 
     updated = []
+    purchase_mappings = []
     for p in pending:
         if p.final_odds is None:
             ov = odds_map.get((p.bet_type, p.combination))
@@ -62,6 +63,18 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         p.result = "win" if is_win else "lose"
         p.payout_amount = payout
 
+        # 個別にORMオブジェクトへ属性代入したままcommit()すると、SQLAlchemyが
+        # 変更件数分の個別UPDATE文を発行してしまい、件数が多いレースで
+        # ネットワーク往復コストが積み重なる(1レース45秒以上かかっていた原因の
+        # 一つ。のんの実測により判明・2026-09-04)。bulk_update_mappingsで
+        # まとめて1回のバルク更新にする。
+        purchase_mappings.append({
+            "id": p.id,
+            "final_odds": p.final_odds,
+            "result": p.result,
+            "payout_amount": payout,
+        })
+
         updated.append({
             "purchase_id": p.id,
             "bet_type": p.bet_type,
@@ -71,6 +84,8 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
             "payout_is_estimated": p.final_odds is None,
         })
 
+    if purchase_mappings:
+        db.bulk_update_mappings(models.Purchase, purchase_mappings)
     db.commit()
 
     # 見送り記録(SkippedBet)にも同じ着順を適用し、「除外して正解だったか」を検証できるようにする
@@ -87,23 +102,36 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
             odds_map[(o.bet_type, o.combination)] = float(o.odds_value)
 
     skipped_updated = 0
+    skipped_mappings = []
     for s in skipped:
         is_win = calc.judge_purchase_result(s.bet_type, s.combination, parsed_result)
-        s.actual_result = "win" if is_win else "lose"
+        actual_result_value = "win" if is_win else "lose"
         # 仮想投資100円前提の払戻。オッズ表があればそれを優先(診断のROIが現実に近づく)
         if is_win:
             ov = odds_map.get((s.bet_type, s.combination))
             if ov:
-                s.actual_payout = round(100.0 * ov)
+                actual_payout_value = round(100.0 * ov)
             elif s.win_prob_estimated and s.ev_pct_estimated is not None and s.win_prob_estimated > 0:
                 implied_odds = (1 + s.ev_pct_estimated / 100) / s.win_prob_estimated
-                s.actual_payout = round(100 * implied_odds)
+                actual_payout_value = round(100 * implied_odds)
             else:
-                s.actual_payout = None
+                actual_payout_value = None
         else:
-            s.actual_payout = 0.0
+            actual_payout_value = 0.0
+
+        skipped_mappings.append({
+            "id": s.id,
+            "actual_result": actual_result_value,
+            "actual_payout": actual_payout_value,
+        })
         skipped_updated += 1
-    if skipped_updated:
+
+    if skipped_mappings:
+        # SkippedBetは1レースあたり180〜220件になることがあり、個別UPDATEでは
+        # 1件あたりのネットワーク往復(Neonとの通信)が積み重なって45秒以上
+        # かかっていた(のんの実測により判明・2026-09-04)。bulk_update_mappingsで
+        # まとめて1回のバルク更新にすることで、この待ち時間をほぼ解消する。
+        db.bulk_update_mappings(models.SkippedBet, skipped_mappings)
         db.commit()
 
     return {

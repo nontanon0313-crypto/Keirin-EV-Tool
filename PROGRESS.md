@@ -120,11 +120,17 @@
 送信する**ため、実質的にSkippedBet 180〜220件分の個別ネットワーク往復が発生していた。
 1件あたり約230ミリ秒(Neonとの往復)と考えると、200件×0.23秒≒46秒とほぼ一致する。
 
-**対応**: `bulk_update_mappings`(またはCASE式を使った一括UPDATE)に置き換える修正を
-Claudeが実装中。次のセッションでこの状態のままなら、まず
-`app/routers/races.py`の`confirm_race_result`関数を見て、Purchase/SkippedBetの
-更新ループが`bulk_update_mappings`化されているか確認すること。されていなければ
-このセクションの通り修正する。
+**対応**: `bulk_update_mappings`に置き換える修正を実装・デプロイ済み(2026-09-04)。
+Purchase・SkippedBetそれぞれの更新ループを、ORMオブジェクトへの属性代入+
+個別commitから、`db.bulk_update_mappings(models.XXX, mappings)`によるまとめての
+バルク更新に変更した。ロジック自体(的中判定・払戻計算式)は一切変更していない。
+**次にやること: 5件replayを再実行し、`confirm_race_result`の秒数が
+劇的に短縮されているか確認すること。** 短縮されていれば1レースあたりの
+所要時間は数秒程度まで下がるはず。
+
+```bash
+python3 -u scraper/replay_settled.py --since all --limit 5 --bankroll 1000000
+```
 
 **教訓**: 「1回のcommit()」は「1回のSQL文」を意味しない。ORMオブジェクトを
 ループで大量に書き換える処理は、`bulk_update_mappings`や生SQLのUPDATE(CASE式)を
