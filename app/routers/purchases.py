@@ -2570,6 +2570,17 @@ def diagnostics_predicted_vs_actual_return(
         group = [r for r in rows if ev_band(r["ev_pct"]) == band]
         by_ev[band] = finalize(group)
 
+    def prob_band(prob):
+        if prob is None:
+            return "不明"
+        return calc.get_prob_bucket(prob)[0]
+
+    by_prob = {}
+    prob_band_order = [name for _, _, name, _ in calc.PROB_BUCKETS] + ["不明"]
+    for band in prob_band_order:
+        group = [r for r in rows if prob_band(r["prob"]) == band]
+        by_prob[band] = finalize(group)
+
     by_bet_type = {}
     for bet_type in sorted({r["bet_type"] for r in rows if r["bet_type"]}):
         group = [r for r in rows if r["bet_type"] == bet_type]
@@ -2616,6 +2627,7 @@ def diagnostics_predicted_vs_actual_return(
         "overall": overall,
         "by_odds_band": by_odds,
         "by_ev_band": by_ev,
+        "by_prob_band": by_prob,
         "by_bet_type": by_bet_type,
         "consistency": consistency,
         "interpretation": {
@@ -2627,6 +2639,11 @@ def diagnostics_predicted_vs_actual_return(
             ),
             "actual": (
                 "確定済みpayout_amountの合計"
+            ),
+            "by_prob_band": (
+                "win_prob_at_purchase(補正後確率)の勝率帯別。"
+                "prob_odds_predicted_roi_pctとactual_roi_pctの乖離が"
+                "どの勝率帯に集中しているかを見る"
             ),
         },
     }

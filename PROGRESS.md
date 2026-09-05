@@ -28,7 +28,7 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-05(ChatGPT) — retroactive-capture-diagnosticsの500原因切り分けを継続。parse_actual_result / probability / calibrationの例外を個別計上する修正を実装・構文検証済み。次はデプロイ後の診断結果で原因箇所を特定する。
+最終更新: 2026-09-05(Claude) — 「予測期待払戻額 vs 実際払戻額」の乖離をオッズ帯/EV帯/確率帯で分解する件、現行ソース確認済み。`predicted-vs-actual-return`(app/routers/purchases.py)に`by_odds_band`・`by_ev_band`は既にあったが`by_prob_band`(勝率帯別)が無かったため追加(既存の`calc.get_prob_bucket`を再利用、新規閾値は導入せず)。`run_pva_recent.sh`にも`by_prob_band`の出力を追加。構文検証済み・未デプロイ。retroactive-capture-diagnosticsの500原因切り分けは別件として未解決のまま(4章参照)。
 
 ### フェーズ
 校正・ゲート改善は一段落。**様子見フェーズ。実資金投票はまだしない。**
@@ -184,6 +184,13 @@ python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-
 ### 4.5 winning-captureの母集団
 未replayの高race_idを見て100% not_recordedになる。診断の母集団指定を直すと
 よいが必須ではない。
+
+### 4.6 retroactive-capture-diagnosticsの移行日指定で500エラー
+`GET /purchases/retroactive-capture-diagnostics`にキャリブレーション移行日
+(2026-09-01)を指定すると500エラーになる問題を調査中。parse_actual_result・
+確率計算・キャリブレーションの例外を個別に捕捉してエラー箇所を切り分ける修正を
+実装・構文検証済みだが未デプロイ。次はデプロイ後に実際のエラー詳細を取得して
+原因箇所を特定する。
 
 ---
 
