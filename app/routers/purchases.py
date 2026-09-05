@@ -448,6 +448,7 @@ DEFAULT_ODDS_SAFETY_MARGIN_PCT = 20.0
 _stage_expectancy_cache = {"computed_at": 0.0, "value": None}
 _bet_type_expectancy_cache = {"computed_at": 0.0, "value": None}
 _bet_type_odds_band_expectancy_cache = {"computed_at": 0.0, "value": None}
+_high_odds_residual_cache = {"computed_at": 0.0, "value": None}
 
 
 def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool = True) -> dict:
@@ -622,6 +623,120 @@ def get_bet_type_odds_band_expectancy_map(
 
 
 
+
+HIGH_ODDS_BANDS = ("1000-3000倍", "3000倍以上")
+
+
+def get_high_odds_residual_factors(db: Session, use_cache: bool = True) -> dict:
+    """
+    高オッズ帯(1000-3000 / 3000以上)専用の的中率残差係数。
+
+    全期間ROIがプラスでも、予測的中率が実績より高い帯は確率を縮める(方針B)。
+    買い目の禁止ではなく est_prob に係数を掛けるだけ。
+
+    戻り値:
+      {
+        "by_odds_band": {band: {n, predicted_avg_pct, actual_hit_rate_pct, factor}},
+        "by_bet_type_odds_band": {bet_type: {band: {...}}},
+      }
+    """
+    now = _time.time()
+    if use_cache:
+        cached = _high_odds_residual_cache["value"]
+        if (
+            cached is not None
+            and (now - _high_odds_residual_cache["computed_at"])
+            < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS
+        ):
+            return cached
+
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    by_band = {}
+    by_bt_band = {}
+
+    def _resolve_odds(p):
+        odds = p.odds_at_purchase
+        if odds is None or odds <= 0:
+            if p.final_odds is not None and p.final_odds > 0:
+                odds = p.final_odds
+            elif (
+                p.result == "win"
+                and p.stake_amount
+                and p.payout_amount
+                and p.stake_amount > 0
+            ):
+                odds = p.payout_amount / p.stake_amount
+        return odds
+
+    for p in purchases:
+        odds = _resolve_odds(p)
+        band = odds_band_label(odds)
+        if band not in HIGH_ODDS_BANDS:
+            continue
+        prob = p.win_prob_at_purchase
+        if prob is None:
+            prob = p.win_prob_raw
+        if prob is None or prob <= 0:
+            continue
+        won = p.result == "win"
+        by_band.setdefault(band, []).append((float(prob), won))
+        by_bt_band.setdefault(p.bet_type, {}).setdefault(band, []).append((float(prob), won))
+
+    def _factor(rows, min_n):
+        n = len(rows)
+        if n < min_n:
+            return None
+        wins = sum(1 for _, w in rows if w)
+        pred = sum(pr for pr, _ in rows) / n
+        act = wins / n
+        if pred <= 1e-12:
+            return {
+                "n": n,
+                "wins": wins,
+                "predicted_avg_pct": round(pred * 100, 4),
+                "actual_hit_rate_pct": round(act * 100, 4),
+                "factor": 1.0,
+            }
+        raw = act / pred
+        # サンプルが増えるほど生比率に寄せる
+        required = 40
+        shrink = min(1.0, n / required)
+        factor = 1.0 + shrink * (raw - 1.0)
+        # 高オッズは下限を低めに（過大予測を強く戻す）
+        floor = 0.08 if n >= 50 else 0.12
+        factor = max(floor, min(1.5, factor))
+        return {
+            "n": n,
+            "wins": wins,
+            "predicted_avg_pct": round(pred * 100, 4),
+            "actual_hit_rate_pct": round(act * 100, 4),
+            "raw_ratio": round(raw, 4),
+            "factor": round(factor, 4),
+        }
+
+    out_band = {}
+    for band, rows in by_band.items():
+        info = _factor(rows, min_n=30)
+        if info:
+            out_band[band] = info
+
+    out_bt = {}
+    for bt, bands in by_bt_band.items():
+        cell = {}
+        for band, rows in bands.items():
+            info = _factor(rows, min_n=20)
+            if info:
+                cell[band] = info
+        if cell:
+            out_bt[bt] = cell
+
+    out = {"by_odds_band": out_band, "by_bet_type_odds_band": out_bt}
+    _high_odds_residual_cache["value"] = out
+    _high_odds_residual_cache["computed_at"] = now
+    return out
+
+
+
 def get_odds_safety_margins(db: Session) -> dict:
     """
     券種ごとに「投票時オッズ→最終オッズ」の実績ズレ(最悪ケース)から、
@@ -746,6 +861,8 @@ def warm_calibration(db: Session = Depends(get_db)):
     t4 = _time.time()
     bt_odds_exp = get_bet_type_odds_band_expectancy_map(db, min_samples=30, use_cache=False)
     t5 = _time.time()
+    high_odds = get_high_odds_residual_factors(db, use_cache=False)
+    t6 = _time.time()
     overall = (retro or {}).get("overall") or {}
     ps = (purchase_set or {}).get("overall") or {}
     return {
@@ -755,7 +872,8 @@ def warm_calibration(db: Session = Depends(get_db)):
         "stage_expectancy_seconds": round(t3 - t2, 2),
         "bet_type_expectancy_seconds": round(t4 - t3, 2),
         "bet_type_odds_band_expectancy_seconds": round(t5 - t4, 2),
-        "total_seconds": round(t5 - t0, 2),
+        "high_odds_residual_seconds": round(t6 - t5, 2),
+        "total_seconds": round(t6 - t0, 2),
         "retroactive_overall_factor": overall.get("calibration_factor"),
         "retroactive_sample_count": overall.get("sample_count"),
         "purchase_set_factor": ps.get("factor"),
@@ -769,6 +887,7 @@ def warm_calibration(db: Session = Depends(get_db)):
             k: v for k, v in sorted(bt_odds_exp.items())
             if (v.get("expectancy_pct") is not None and v["expectancy_pct"] < 0)
         },
+        "high_odds_residual": high_odds,
         "cache_ttl_seconds": RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS,
         "process_pid": _PROCESS_PID,
         "process_uptime_seconds": round(_time.time() - _PROCESS_STARTED_AT, 1),

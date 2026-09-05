@@ -178,6 +178,37 @@ def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str
 
 
 
+
+def _apply_high_odds_residual(est_prob: float, odds_value: float, bet_type: str, high_odds_factors: dict) -> float:
+    """
+    1000-3000倍・3000倍以上帯の的中率残差を掛ける(方針B)。
+    券種×帯があれば優先、なければ帯全体。係数が無ければそのまま。
+    """
+    if not high_odds_factors or est_prob is None or est_prob <= 0:
+        return est_prob
+    try:
+        odds = float(odds_value) if odds_value is not None else 0.0
+    except (TypeError, ValueError):
+        return est_prob
+    band = _odds_band_key(odds)
+    if band not in ("1000-3000倍", "3000倍以上"):
+        return est_prob
+
+    factor = None
+    cross = (high_odds_factors.get("by_bet_type_odds_band") or {}).get(bet_type) or {}
+    info = cross.get(band)
+    if info and info.get("factor") is not None:
+        factor = float(info["factor"])
+    if factor is None:
+        info = (high_odds_factors.get("by_odds_band") or {}).get(band)
+        if info and info.get("factor") is not None:
+            factor = float(info["factor"])
+    if factor is None:
+        return est_prob
+    factor = max(0.08, min(1.5, factor))
+    return max(0.0, min(1.0, float(est_prob) * factor))
+
+
 def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list) -> int:
     """
     見送った買い目を「見送り」として記録する。
@@ -685,6 +716,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
     # 実購入集合で残る楽観バイアス用の追加係数（選別後校正）
     purchase_set_factors = purchases_router.get_purchase_set_calibration_factors(db)
+    high_odds_residual_factors = purchases_router.get_high_odds_residual_factors(db)
     _t2 = _time.time()  # ここまで: 校正係数(第1段+第2段)取得
 
     # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
@@ -764,8 +796,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 est_prob = _apply_purchase_set_factor(
                     est_prob, o.odds_value, o.bet_type, purchase_set_factors
                 )
-                # overall の追加√掛けは廃止（3連単を潰しすぎた）。
-                # 不調券種は券種係数cap + ゲートで扱う。
+                # 方針B: 高オッズ帯は的中率残差でさらに確率を寄せる（禁止ではない）
+                if getattr(req, "apply_purchase_set_calibration", True):
+                    est_prob = _apply_high_odds_residual(
+                        est_prob, o.odds_value, o.bet_type, high_odds_residual_factors
+                    )
                 low_prob_warning = est_prob < 0.05
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
