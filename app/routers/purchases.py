@@ -1321,6 +1321,16 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
     races_skipped_invalid_result = 0
     probability_errors = 0
     calibration_errors = 0
+    # 的中組合せが「Oddsに存在しなかった」のか、
+    # 「Oddsには存在したが判定できなかった」のかを分離する診断。
+    winner_presence = {
+        bt: {
+            "races": 0,
+            "winner_present_in_odds": 0,
+            "winner_missing_from_odds": 0,
+        }
+        for bt in TARGET_BET_TYPES
+    }
 
     # レースごとのN+1クエリを避けるため、OddsをレースID単位で
     # 500レースずつ一括取得する。
@@ -1357,6 +1367,57 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
             continue
 
         line_map, line_boost = calc.line_map_from_race(race)
+
+        # actual_resultから、その券種で実際に的中する組合せを正規化して作る。
+        actual_winners = {}
+        canonical = parsed_result.get("canonical_orderings") or []
+        top3 = parsed_result.get("top3_set") or set()
+
+        for bt in TARGET_BET_TYPES:
+            winners = set()
+            if bt == "3連単":
+                winners = {"-".join(str(x) for x in order[:3]) for order in canonical if len(order) >= 3}
+            elif bt == "2車単":
+                winners = {"-".join(str(x) for x in order[:2]) for order in canonical if len(order) >= 2}
+            elif bt in ("2車複", "ワイド"):
+                if len(top3) >= 2:
+                    for order in canonical:
+                        if len(order) >= 2:
+                            winners.add("-".join(str(x) for x in sorted(order[:2])))
+            elif bt == "3連複":
+                if len(top3) == 3:
+                    winners = {"-".join(str(x) for x in sorted(top3))}
+
+            actual_winners[bt] = winners
+
+            if winners:
+                winner_presence[bt]["races"] += 1
+
+        stored_odds_by_type = {}
+        for o in odds_rows:
+            if o.bet_type in TARGET_BET_TYPES and o.combination:
+                combo = str(o.combination)
+                if o.bet_type in ("2車複", "ワイド"):
+                    try:
+                        combo = "-".join(str(x) for x in sorted(int(v) for v in combo.split("-")))
+                    except (ValueError, TypeError):
+                        pass
+                elif o.bet_type == "3連複":
+                    try:
+                        combo = "-".join(str(x) for x in sorted(int(v) for v in combo.split("-")))
+                    except (ValueError, TypeError):
+                        pass
+                stored_odds_by_type.setdefault(o.bet_type, set()).add(combo)
+
+        for bt in TARGET_BET_TYPES:
+            winners = actual_winners.get(bt) or set()
+            if not winners:
+                continue
+            stored = stored_odds_by_type.get(bt) or set()
+            if winners & stored:
+                winner_presence[bt]["winner_present_in_odds"] += 1
+            else:
+                winner_presence[bt]["winner_missing_from_odds"] += 1
 
         races_evaluated += 1
 
@@ -1450,14 +1511,15 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
         "races_skipped_invalid_result": races_skipped_invalid_result,
         "probability_errors": probability_errors,
         "calibration_errors": calibration_errors,
+        "winner_presence_by_bet_type": winner_presence,
         "by_bet_type": result,
         "message": (
             "これは記録(Purchase/SkippedBet)に一切頼らず、オッズが存在する"
             "組み合わせを毎回全て使って現在のモデルで再計算した結果です。"
-            "ranking_diagnosticsのwinner_captured_rate_pctが低い場合、"
-            "それはオッズが存在する組み合わせの中でAIの候補生成が漏らしている"
-            "ことを意味します(このエンドポイントはオッズが存在する組み合わせを"
-            "全て評価しているため、過去の記録漏れの影響を受けません)。"
+            "winner_captured_rate_pctは、この診断で保存済みOddsを評価候補とした場合の"
+            "捕捉率です。AIの購入候補生成率ではありません。"
+            "winner_presence_by_bet_typeで、実際の的中組合せ自体が保存Oddsに存在したかを"
+            "別途確認できます。"
         ),
     }
 
