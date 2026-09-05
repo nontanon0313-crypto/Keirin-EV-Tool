@@ -736,7 +736,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             bet_type_exp_map = {}
         try:
             bet_type_odds_band_exp_map = purchases_router.get_bet_type_odds_band_expectancy_map(
-                db, min_samples=50
+                db, min_samples=30
             )
         except Exception:
             bet_type_odds_band_exp_map = {}

@@ -559,7 +559,7 @@ def odds_band_label(odds) -> str:
 
 
 def get_bet_type_odds_band_expectancy_map(
-    db: Session, min_samples: int = 50, use_cache: bool = True
+    db: Session, min_samples: int = 30, use_cache: bool = True
 ) -> dict:
     """
     券種×オッズ帯ごとの実績収支率。
@@ -579,7 +579,20 @@ def get_bet_type_odds_band_expectancy_map(
     purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
     buckets = {}
     for p in purchases:
-        band = odds_band_label(p.odds_at_purchase)
+        # odds_at_purchase が空の古い行でも帯を推定できるよう補完する
+        # （欠けると券種×帯ゲートが発火せず 1000-3000倍が残る原因になる）
+        odds = p.odds_at_purchase
+        if odds is None or odds <= 0:
+            if p.final_odds is not None and p.final_odds > 0:
+                odds = p.final_odds
+            elif (
+                p.result == "win"
+                and p.stake_amount
+                and p.payout_amount
+                and p.stake_amount > 0
+            ):
+                odds = p.payout_amount / p.stake_amount
+        band = odds_band_label(odds)
         if band == "不明":
             continue
         key = f"{p.bet_type}|{band}"
@@ -731,7 +744,7 @@ def warm_calibration(db: Session = Depends(get_db)):
     t3 = _time.time()
     bet_type_exp = get_bet_type_expectancy_map(db, min_samples=50, use_cache=False)
     t4 = _time.time()
-    bt_odds_exp = get_bet_type_odds_band_expectancy_map(db, min_samples=50, use_cache=False)
+    bt_odds_exp = get_bet_type_odds_band_expectancy_map(db, min_samples=30, use_cache=False)
     t5 = _time.time()
     overall = (retro or {}).get("overall") or {}
     ps = (purchase_set or {}).get("overall") or {}
@@ -750,6 +763,12 @@ def warm_calibration(db: Session = Depends(get_db)):
         "stage_expectancy_stage_count": len(stage_exp),
         "bet_type_expectancy_count": len(bet_type_exp),
         "bet_type_odds_band_expectancy_count": len(bt_odds_exp),
+        "bet_type_expectancy": bet_type_exp,
+        "bet_type_odds_band_expectancy": bt_odds_exp,
+        "bet_type_odds_band_negative": {
+            k: v for k, v in sorted(bt_odds_exp.items())
+            if (v.get("expectancy_pct") is not None and v["expectancy_pct"] < 0)
+        },
         "cache_ttl_seconds": RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS,
         "process_pid": _PROCESS_PID,
         "process_uptime_seconds": round(_time.time() - _PROCESS_STARTED_AT, 1),
