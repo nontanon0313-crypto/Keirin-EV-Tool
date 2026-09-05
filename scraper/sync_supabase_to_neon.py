@@ -250,7 +250,7 @@ def step_odds(sb, neon):
 def step_purchases(sb, neon):
     """id 順に ROW_LIMIT 件ずつ（AFTER_ID から再開）。"""
     after_id = int(os.environ.get("AFTER_ID", "0"))
-    limit = int(os.environ.get("ROW_LIMIT", "2500"))
+    limit = int(os.environ.get("ROW_LIMIT", "800"))
     race_map, _ = build_race_map(sb, neon)
     rows = list(
         sb.execute(
@@ -307,7 +307,7 @@ def step_purchases(sb, neon):
 def step_skipped(sb, neon):
     """id 順に ROW_LIMIT 件ずつ（AFTER_ID から再開）。skipped は件数が多い。"""
     after_id = int(os.environ.get("AFTER_ID", "0"))
-    limit = int(os.environ.get("ROW_LIMIT", "4000"))
+    limit = int(os.environ.get("ROW_LIMIT", "500"))
     race_map, _ = build_race_map(sb, neon)
     rows = list(
         sb.execute(
