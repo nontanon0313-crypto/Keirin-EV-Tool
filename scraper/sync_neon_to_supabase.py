@@ -76,36 +76,39 @@ def get_engines():
 
 
 def sync_table(neon_conn, supabase_conn, table_name: str) -> int:
-    """idベースの差分同期。Supabase側の最大idより大きい行だけNeonから取ってきて追記する。"""
-    max_id_row = supabase_conn.execute(text(f"SELECT COALESCE(MAX(id), 0) FROM {table_name}")).fetchone()
-    max_id = max_id_row[0] if max_id_row else 0
-
-    result = neon_conn.execute(
-        text(f"SELECT * FROM {table_name} WHERE id > :max_id ORDER BY id"), {"max_id": max_id}
-    )
+    """
+    Neon にあって Supabase に無い id の行を追記する。
+    MAX(id) 方式だと欠け id が取りこぼされるため、id 集合の差で同期する。
+    """
+    target_ids = {
+        r[0] for r in supabase_conn.execute(text(f"SELECT id FROM {table_name}")).fetchall()
+    }
+    result = neon_conn.execute(text(f"SELECT * FROM {table_name} ORDER BY id"))
     rows = result.mappings().all()
-    if not rows:
+    missing = [row for row in rows if row["id"] not in target_ids]
+    if not missing:
         return 0
 
-    columns = list(rows[0].keys())
+    columns = list(missing[0].keys())
     col_list = ", ".join(columns)
     placeholders = ", ".join(f":{c}" for c in columns)
     insert_sql = text(
         f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING"
     )
-    for row in rows:
+    for row in missing:
         supabase_conn.execute(insert_sql, dict(row))
 
     # 明示的にidを指定してINSERTしたので、Supabase側の自動採番シーケンスを
     # MAX(id)に合わせ直す(ズレたままだと今後Supabase運用中の新規行が
-    # 既存idと衝突する恐れがあるため)
+    # 既存idと衝突する恐れがある)
     supabase_conn.execute(
         text(
             f"SELECT setval(pg_get_serial_sequence('{table_name}', 'id'), "
             f"(SELECT COALESCE(MAX(id), 1) FROM {table_name}))"
         )
     )
-    return len(rows)
+    return len(missing)
+
 
 
 def sync_bankroll_state(neon_conn, supabase_conn) -> str:

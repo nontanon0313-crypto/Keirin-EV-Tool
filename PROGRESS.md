@@ -28,26 +28,21 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-05(Grok) — DB統合+全体再投票用の手順・APIを整備
+最終更新: 2026-09-05(Grok) — 差分同期の取りこぼし修正（欠けidも追記）
 
-### フェーズ
-校正・方針B(300-1000以上の高オッズ残差)まで完了。次は **DB統合 → 全体再投票 → 検証**。
+### 問題
+Supabase→Neon が 0 件だったが、実際は差分あり。原因は同期が
+「相手の MAX(id) より大きい行だけ」を取っていたため、副系にだけある
+（MAX以下の）id がコピーされなかった。
 
-### 今回追加
-- `POST /admin/sync-supabase-to-neon`（副系→主系の差分同期）
-- `scraper/run_merge_and_full_replay.sh`（同期→warm→全replay→PVA）
+### 修正
+- `sync_table`: **source にあって target に無い id** を全部追記
+- `GET /admin/compare-db-counts?token=...` で両DBの COUNT/MAX を比較
 
-### 実行（Termux）
-```bash
-export ADMIN_SYNC_SECRET=（Renderと同じ秘密）
-bash "$HOME/Keirin-EV-Tool/scraper/run_merge_and_full_replay.sh"
-# まず少数: bash .../run_merge_and_full_replay.sh 100 2
-```
-
-### 注意
-- 全体再投票はレース数×約10秒。500件超なら数時間＋429に注意
-- 中断後は `run_replay_continue.sh` で再開
-- 実資金はまだ入れない
+### 次（ユーザー実行）
+1. デプロイ後、まず件数比較
+2. 再度 `POST /admin/sync-supabase-to-neon`
+3. もう一度件数比較してギャップが縮んだか確認
 
 ## 2. プロジェクト概要
 

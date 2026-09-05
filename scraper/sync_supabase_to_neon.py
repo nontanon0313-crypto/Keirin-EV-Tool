@@ -64,24 +64,29 @@ def get_engines():
 
 
 def sync_table(source_conn, target_conn, table_name: str) -> int:
-    """idベースの差分同期。targetの最大idより大きい行だけsourceから取ってきて追記する。"""
-    max_id_row = target_conn.execute(text(f"SELECT COALESCE(MAX(id), 0) FROM {table_name}")).fetchone()
-    max_id = max_id_row[0] if max_id_row else 0
+    """
+    source にあって target に無い id の行を追記する。
 
-    result = source_conn.execute(
-        text(f"SELECT * FROM {table_name} WHERE id > :max_id ORDER BY id"), {"max_id": max_id}
-    )
+    旧実装は target の MAX(id) より大きい行だけを取っていたため、
+    副系で採番された「MAX以下の欠けた id」が永久に同期されなかった。
+    差分があるのに 0 件になる原因はこれ。
+    """
+    target_ids = {
+        r[0] for r in target_conn.execute(text(f"SELECT id FROM {table_name}")).fetchall()
+    }
+    result = source_conn.execute(text(f"SELECT * FROM {table_name} ORDER BY id"))
     rows = result.mappings().all()
-    if not rows:
+    missing = [row for row in rows if row["id"] not in target_ids]
+    if not missing:
         return 0
 
-    columns = list(rows[0].keys())
+    columns = list(missing[0].keys())
     col_list = ", ".join(columns)
     placeholders = ", ".join(f":{c}" for c in columns)
     insert_sql = text(
         f"INSERT INTO {table_name} ({col_list}) VALUES ({placeholders}) ON CONFLICT (id) DO NOTHING"
     )
-    for row in rows:
+    for row in missing:
         target_conn.execute(insert_sql, dict(row))
 
     target_conn.execute(
@@ -90,7 +95,8 @@ def sync_table(source_conn, target_conn, table_name: str) -> int:
             f"(SELECT COALESCE(MAX(id), 1) FROM {table_name}))"
         )
     )
-    return len(rows)
+    return len(missing)
+
 
 
 def sync_bankroll_state(source_conn, target_conn) -> str:
