@@ -1448,7 +1448,12 @@ TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 # 予想ロジック・確率補正・運用ゲートなど投票の中身に関わる修正を入れたら、
 # 必ずこの値を修正日の日付に更新すること(更新を忘れると、新旧ロジックの
 # 混在データが「現行基準」として集計されてしまい、精度検証の意味が壊れる)。
-CALIBRATION_SWITCH_AT = datetime(2026, 9, 6, 0, 0, 0)
+CALIBRATION_SWITCH_AT = datetime(2026, 9, 5, 15, 0, 0)
+# ↑ JST 2026-09-06 00:00:00 を UTC で表現。
+# Purchase.purchased_at は datetime.utcnow() のため、naive の「日付の0時」を
+# 日本の暦日の始まりと取り違えると、JST 当日の再投票が集計から消える。
+# (2026-09-06 修正: UTC 9/6 0:00 だと JST 9/6 0:00〜9:00 の購入が除外されるバグ)
+
 
 
 def _parse_since_param(since: Optional[str]) -> Optional[datetime]:
@@ -3443,7 +3448,7 @@ def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_sw
     勝率帯別・券種別の回収率など、複数の切り口で集計する。
     単一要素だけで結論づけないためのFX版ルールを踏襲。
 
-    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT(現行の投票基準の開始日時)以降の
+    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT(現行の投票基準の開始・UTC)以降の
     データだけに絞り込むようにした。以前はsinceの絞り込みが無く、投票ロジックが
     変わる前の旧データまで「現行基準の集計」として表示されていた(のんの指摘で発覚)。
     全期間を見たい場合は since=all を指定する。
@@ -3505,7 +3510,20 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     skipped_eval = sq.all()
     purchases = list(purchases_only) + [_SkippedAsPurchase(s) for s in skipped_eval]
     if not purchases:
-        return {"message": "まだ確定した購入履歴がありません"}
+        pending_n = db.query(models.Purchase).filter(models.Purchase.result == "pending").count()
+        all_settled_n = db.query(models.Purchase).filter(models.Purchase.result != "pending").count()
+        return {
+            "message": "まだ確定した購入履歴がありません",
+            "hint": (
+                "集計期間(since)以降に result!=pending の購入が0件です。"
+                "JSTとUTCのずれ、または since=calibration_switch の境界を確認してください。"
+                "全期間は /purchases/stats?since=all"
+            ),
+            "pending_count": pending_n,
+            "settled_count_all_time": all_settled_n,
+            "since_filter_active": since_dt is not None,
+            "since_resolved": since_dt.isoformat() if since_dt else None,
+        }
 
     total_stake = sum(p.stake_amount for p in purchases_only)
     total_payout = sum(p.payout_amount for p in purchases_only)
