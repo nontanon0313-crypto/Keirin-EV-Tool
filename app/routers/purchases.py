@@ -1421,9 +1421,10 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
                 winner_presence[bt]["winner_missing_from_odds"] += 1
                 winner_missing_races[bt].append({
                     "race_id": race.id,
-                    "jo_code": getattr(race, "jo_code", None),
-                    "kaisai_bi": getattr(race, "kaisai_bi", None),
-                    "race_no": getattr(race, "race_no", None),
+                    "external_ref": race.external_ref,
+                    "venue_name": race.venue_name,
+                    "race_date": race.race_date.isoformat() if race.race_date else None,
+                    "race_number": race.race_number,
                     "actual_result": race.actual_result,
                     "winner_combinations": sorted(winners),
                 })
