@@ -1,30 +1,22 @@
 """
-管理用: Neon→Supabase 差分同期を HTTP から実行する。
+管理用: Neon⇔Supabase 差分同期を HTTP から実行する。
 Render 無料枠は Shell が使えないため、Termux 等から curl で叩けるようにする。
 """
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path as PathLib
 
 from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-def _project_root() -> Path:
-    # app/routers/admin_sync.py → リポジトリルート
-    return Path(__file__).resolve().parents[2]
+def _project_root() -> PathLib:
+    return PathLib(__file__).resolve().parents[2]
 
 
-@router.post("/sync-neon-to-supabase")
-def sync_neon_to_supabase(
-    token: str = Query(..., description="Render の ADMIN_SYNC_SECRET と同じ値"),
-):
-    """
-    Neon(DATABASE_URL) → Supabase(DATABASE_URL_FALLBACK) の差分同期。
-    秘密トークン必須。実行はデプロイ先(Render)上で行うため Termux に psycopg2 は不要。
-    """
+def _check_token(token: str) -> None:
     secret = (os.environ.get("ADMIN_SYNC_SECRET") or "").strip()
     if not secret:
         raise HTTPException(
@@ -34,6 +26,8 @@ def sync_neon_to_supabase(
     if token != secret:
         raise HTTPException(status_code=403, detail="トークンが違います")
 
+
+def _require_both_db_urls() -> None:
     neon = (os.environ.get("DATABASE_URL") or "").strip()
     supabase = (
         os.environ.get("DATABASE_URL_FALLBACK")
@@ -46,11 +40,12 @@ def sync_neon_to_supabase(
             detail="DATABASE_URL(Neon) と DATABASE_URL_FALLBACK(Supabase) の両方が必要です",
         )
 
+
+def _run_sync_script(script_name: str) -> dict:
     root = _project_root()
-    script = root / "scraper" / "sync_neon_to_supabase.py"
+    script = root / "scraper" / script_name
     if not script.is_file():
-        # Render の配置差異向け
-        alt = root / "sync_neon_to_supabase.py"
+        alt = root / script_name
         script = alt if alt.is_file() else script
     if not script.is_file():
         raise HTTPException(status_code=500, detail=f"同期スクリプトが見つかりません: {script}")
@@ -73,4 +68,27 @@ def sync_neon_to_supabase(
             status_code=500,
             detail={"returncode": proc.returncode, "log": out[-8000:]},
         )
-    return {"ok": True, "log": out[-8000:]}
+    return {"ok": True, "script": script_name, "log": out[-8000:]}
+
+
+@router.post("/sync-neon-to-supabase")
+def sync_neon_to_supabase(
+    token: str = Query(..., description="Render の ADMIN_SYNC_SECRET と同じ値"),
+):
+    """Neon(主) → Supabase(副) の差分同期。バックアップ・切替前用。"""
+    _check_token(token)
+    _require_both_db_urls()
+    return _run_sync_script("sync_neon_to_supabase.py")
+
+
+@router.post("/sync-supabase-to-neon")
+def sync_supabase_to_neon(
+    token: str = Query(..., description="Render の ADMIN_SYNC_SECRET と同じ値"),
+):
+    """
+    Supabase(副) → Neon(主) の差分同期。
+    Neon制限中に fallback へ書いた分を、主系復帰後に戻すために使う。
+    """
+    _check_token(token)
+    _require_both_db_urls()
+    return _run_sync_script("sync_supabase_to_neon.py")

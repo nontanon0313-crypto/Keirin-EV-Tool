@@ -28,19 +28,26 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-05(Grok) — 方針Bを300-1000倍帯にも拡張
+最終更新: 2026-09-05(Grok) — DB統合+全体再投票用の手順・APIを整備
 
 ### フェーズ
-1000-3000倍は方針Bでほぼ解消(n=71→1)。直近の主戦場は300-1000倍(n≈255)で
-ratio0.44・想定ROI過大傾向。同方式を300-1000倍にも適用。
+校正・方針B(300-1000以上の高オッズ残差)まで完了。次は **DB統合 → 全体再投票 → 検証**。
 
-### 実装
-- `HIGH_ODDS_BANDS` = 300-1000 / 1000-3000 / 3000以上
-- 的中率残差で確率縮小のみ（禁止しない）
+### 今回追加
+- `POST /admin/sync-supabase-to-neon`（副系→主系の差分同期）
+- `scraper/run_merge_and_full_replay.sh`（同期→warm→全replay→PVA）
 
-### 次
-デプロイ → warm → `run_replay_continue.sh 50 2` → `run_pva_recent.sh 3 50`
-確認: 300-1000のpredROI低下、ratioが極端に崩れないこと
+### 実行（Termux）
+```bash
+export ADMIN_SYNC_SECRET=（Renderと同じ秘密）
+bash "$HOME/Keirin-EV-Tool/scraper/run_merge_and_full_replay.sh"
+# まず少数: bash .../run_merge_and_full_replay.sh 100 2
+```
+
+### 注意
+- 全体再投票はレース数×約10秒。500件超なら数時間＋429に注意
+- 中断後は `run_replay_continue.sh` で再開
+- 実資金はまだ入れない
 
 ## 2. プロジェクト概要
 
