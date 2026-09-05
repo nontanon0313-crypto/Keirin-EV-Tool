@@ -3490,17 +3490,19 @@ def purchase_stats(db: Session = Depends(get_db)):
     # 「1番人気オッズ集中度パターン」判定用: レースごとの3連単最低オッズ(1番人気)を取得する。
     # 境界値は遠山競輪研究所(Gamboo)の実データ分析(S級・A12班9車立て基準)を採用。
     # https://gamboo.jp/topics/?tid=tohyama024-pc (のんが共有)
+    # 2026-09-06修正: 以前はレースごとの3連単オッズを全組み合わせ分(1レース最大500件超)
+    # まるごと読み込んでPython側で最小値を探していたため、対象レースが増えるほど
+    # 転送量・処理時間が線形以上に膨らんでいた(実測86秒でタイムアウトの原因)。
+    # SQL側でGROUP BY MINするだけで済むので、1レース1行だけ転送する形に変更。
     top_fav_odds_by_race = {}
     if race_ids:
-        tan_odds = (
-            db.query(models.Odds)
+        min_odds_rows = (
+            db.query(models.Odds.race_id, func.min(models.Odds.odds_value))
             .filter(models.Odds.race_id.in_(race_ids), models.Odds.bet_type == "3連単")
+            .group_by(models.Odds.race_id)
             .all()
         )
-        for o in tan_odds:
-            cur = top_fav_odds_by_race.get(o.race_id)
-            if cur is None or o.odds_value < cur:
-                top_fav_odds_by_race[o.race_id] = o.odds_value
+        top_fav_odds_by_race = {race_id: odds_value for race_id, odds_value in min_odds_rows}
 
     def popularity_pattern_bucket(p):
         odds = top_fav_odds_by_race.get(p.race_id)
