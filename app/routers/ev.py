@@ -112,6 +112,7 @@ def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str
 
 
 def _odds_band_key(odds: float) -> str:
+    """実績ゲート・購入集合残差と揃えた細分化オッズ帯。"""
     if odds is None or odds <= 0:
         return "不明"
     if odds < 5:
@@ -124,7 +125,11 @@ def _odds_band_key(odds: float) -> str:
         return "30-100倍"
     if odds < 300:
         return "100-300倍"
-    return "300倍以上"
+    if odds < 1000:
+        return "300-1000倍"
+    if odds < 3000:
+        return "1000-3000倍"
+    return "3000倍以上"
 
 
 def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str, purchase_factors: dict) -> float:
@@ -723,11 +728,18 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # こちらは「その券種自体の予想ロジックが継続的に実績で負けている」ことを検出する。
     # 両者は独立していて、どちらか一方に該当すれば見送りになる。
     bet_type_exp_map = {}
+    bet_type_odds_band_exp_map = {}
     if apply_gates:
         try:
             bet_type_exp_map = purchases_router.get_bet_type_expectancy_map(db, min_samples=50)
         except Exception:
             bet_type_exp_map = {}
+        try:
+            bet_type_odds_band_exp_map = purchases_router.get_bet_type_odds_band_expectancy_map(
+                db, min_samples=50
+            )
+        except Exception:
+            bet_type_odds_band_exp_map = {}
     _t4 = _time.time()  # ここまで: ステージ/券種ゲート集計取得(キャッシュ済みのはず)
 
     # 実績ゲートは「確率を捨てる」のではなく、不調ステージのみ見送り(券種差別なし)。
@@ -780,6 +792,17 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                         f"不調券種除外({o.bet_type}:実績{bt_exp['expectancy_pct']}%/"
                         f"{bt_exp['n']}件)"
                     )
+            # 券種×オッズ帯の実績ゲート（例: 3連単は全体黒字でも1000-3000倍だけ赤字なら除外）
+            if gate_reason is None and bet_type_odds_band_exp_map:
+                band = _odds_band_key(float(o.odds_value) if o.odds_value else 0)
+                key = f"{o.bet_type}|{band}"
+                cell = bet_type_odds_band_exp_map.get(key)
+                if cell and cell.get("expectancy_pct") is not None:
+                    if cell["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF:
+                        gate_reason = (
+                            f"不調券種×オッズ帯除外({o.bet_type}/{band}:"
+                            f"実績{cell['expectancy_pct']}%/{cell['n']}件)"
+                        )
             # 購入集合で的中が極端に不足している券種も見送り
             # （収支ゲートをすり抜けても、的中比が壊滅的なら買わない）
             if gate_reason is None and purchase_set_factors:
@@ -1047,6 +1070,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "performance_gated_count": len(performance_gated_keys),
         "stage_expectancy_used": stage_exp_map.get(race.race_stage) if race.race_stage else None,
         "bet_type_expectancy_used": bet_type_exp_map,
+        "bet_type_odds_band_expectancy_count": len(bet_type_odds_band_exp_map or {}),
+        "bet_type_odds_band_expectancy_used": bet_type_odds_band_exp_map,
         "garami_free": req.avoid_garami,
         "odds_safety_margins_used_pct": odds_safety_margins if req.avoid_garami else {},
         "total_expected_profit": round(total_expected_profit, 0),

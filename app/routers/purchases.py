@@ -214,19 +214,7 @@ def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) ->
     )
 
     def _band(odds):
-        if odds is None or odds <= 0:
-            return "不明"
-        if odds < 5:
-            return "1-5倍"
-        if odds < 10:
-            return "5-10倍"
-        if odds < 30:
-            return "10-30倍"
-        if odds < 100:
-            return "30-100倍"
-        if odds < 300:
-            return "100-300倍"
-        return "300倍以上"
+        return odds_band_label(odds)
 
     def _factor(rows):
         n = len(rows)
@@ -459,6 +447,7 @@ DEFAULT_ODDS_SAFETY_MARGIN_PCT = 20.0
 
 _stage_expectancy_cache = {"computed_at": 0.0, "value": None}
 _bet_type_expectancy_cache = {"computed_at": 0.0, "value": None}
+_bet_type_odds_band_expectancy_cache = {"computed_at": 0.0, "value": None}
 
 
 def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool = True) -> dict:
@@ -539,6 +528,83 @@ def get_bet_type_expectancy_map(db: Session, min_samples: int = 50, use_cache: b
         }
     _bet_type_expectancy_cache["value"] = out
     _bet_type_expectancy_cache["computed_at"] = now
+    return out
+
+
+def odds_band_label(odds) -> str:
+    """実績ゲート・PVA共通のオッズ帯ラベル（細分化版）。"""
+    if odds is None:
+        return "不明"
+    try:
+        o = float(odds)
+    except (TypeError, ValueError):
+        return "不明"
+    if o <= 0:
+        return "不明"
+    if o < 5:
+        return "1-5倍"
+    if o < 10:
+        return "5-10倍"
+    if o < 30:
+        return "10-30倍"
+    if o < 100:
+        return "30-100倍"
+    if o < 300:
+        return "100-300倍"
+    if o < 1000:
+        return "300-1000倍"
+    if o < 3000:
+        return "1000-3000倍"
+    return "3000倍以上"
+
+
+def get_bet_type_odds_band_expectancy_map(
+    db: Session, min_samples: int = 50, use_cache: bool = True
+) -> dict:
+    """
+    券種×オッズ帯ごとの実績収支率。
+    実績ゲートを「券種まるごと」ではなく「3連単×1000-3000倍」など細かく切るために使う。
+    キーは "{bet_type}|{odds_band}"。値は expectancy_pct / n / win_rate_pct。
+    """
+    now = _time.time()
+    if use_cache:
+        cached = _bet_type_odds_band_expectancy_cache["value"]
+        if (
+            cached is not None
+            and (now - _bet_type_odds_band_expectancy_cache["computed_at"])
+            < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS
+        ):
+            return cached
+
+    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    buckets = {}
+    for p in purchases:
+        band = odds_band_label(p.odds_at_purchase)
+        if band == "不明":
+            continue
+        key = f"{p.bet_type}|{band}"
+        b = buckets.setdefault(key, {"stake": 0.0, "payout": 0.0, "n": 0, "wins": 0,
+                                       "bet_type": p.bet_type, "odds_band": band})
+        b["stake"] += p.stake_amount or 0
+        b["payout"] += p.payout_amount or 0
+        b["n"] += 1
+        if p.result == "win":
+            b["wins"] += 1
+
+    out = {}
+    for key, b in buckets.items():
+        if b["n"] < min_samples or b["stake"] <= 0:
+            continue
+        exp = (b["payout"] - b["stake"]) / b["stake"] * 100
+        out[key] = {
+            "bet_type": b["bet_type"],
+            "odds_band": b["odds_band"],
+            "n": b["n"],
+            "expectancy_pct": round(exp, 2),
+            "win_rate_pct": round(b["wins"] / b["n"] * 100, 2),
+        }
+    _bet_type_odds_band_expectancy_cache["value"] = out
+    _bet_type_odds_band_expectancy_cache["computed_at"] = now
     return out
 
 
@@ -665,6 +731,8 @@ def warm_calibration(db: Session = Depends(get_db)):
     t3 = _time.time()
     bet_type_exp = get_bet_type_expectancy_map(db, min_samples=50, use_cache=False)
     t4 = _time.time()
+    bt_odds_exp = get_bet_type_odds_band_expectancy_map(db, min_samples=50, use_cache=False)
+    t5 = _time.time()
     overall = (retro or {}).get("overall") or {}
     ps = (purchase_set or {}).get("overall") or {}
     return {
@@ -673,13 +741,15 @@ def warm_calibration(db: Session = Depends(get_db)):
         "purchase_set_seconds": round(t2 - t1, 2),
         "stage_expectancy_seconds": round(t3 - t2, 2),
         "bet_type_expectancy_seconds": round(t4 - t3, 2),
-        "total_seconds": round(t4 - t0, 2),
+        "bet_type_odds_band_expectancy_seconds": round(t5 - t4, 2),
+        "total_seconds": round(t5 - t0, 2),
         "retroactive_overall_factor": overall.get("calibration_factor"),
         "retroactive_sample_count": overall.get("sample_count"),
         "purchase_set_factor": ps.get("factor"),
         "purchase_set_n": ps.get("n"),
         "stage_expectancy_stage_count": len(stage_exp),
         "bet_type_expectancy_count": len(bet_type_exp),
+        "bet_type_odds_band_expectancy_count": len(bt_odds_exp),
         "cache_ttl_seconds": RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS,
         "process_pid": _PROCESS_PID,
         "process_uptime_seconds": round(_time.time() - _PROCESS_STARTED_AT, 1),
