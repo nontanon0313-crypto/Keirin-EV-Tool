@@ -209,6 +209,12 @@ python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-
 - **選択ロジックの閾値(EV最大化 vs 的中率重視など)を勝手に変えない。**
   設計合意してから。
 - git操作(push)はユーザーが実行する。Claude/Grokはzipまたはパッチで返す。
+- **git commitとgit pushのコマンドは、実行状態を考慮して書くこと。**
+  - `git commit`が既に成功している場合、次のコマンドは`git push origin main`だけを書く。
+  - `git commit && git push`を、既にコミット済みの状態で再実行しない。
+    `git commit`が「nothing to commit」で終了コード1になると`&&`により`git push`まで実行されないため。
+  - 修正→commit→pushを一度に提示する場合は、commit対象を明示し、commit成功後にpushまで実行される構成にする。
+  - ユーザーがcommit済みの実行結果を提示した場合は、commitを再実行せず、pushだけを提示する。
 - 既存実装を確認した上で最小差分。推測での大規模改修はしない。
 - デプロイコマンドは実際に動く形で書く(プレースホルダー禁止)。
   リポジトリのローカルパスは `~/Keirin-EV-Tool`、zipのダウンロード先は
