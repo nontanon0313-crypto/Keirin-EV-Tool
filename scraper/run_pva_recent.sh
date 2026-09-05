@@ -52,7 +52,10 @@ for band, s in (d.get("by_odds_band") or {}).items():
     p = s.get("predicted_avg_prob_pct") or 0
     a = s.get("actual_hit_rate_pct") or 0
     rr = round(p / a, 2) if a > 0 else None
-    print(f"{band}: n={s.get('bet_count')} ratio={rr} actROI={s.get('actual_roi_pct')}")
+    print(
+        f"{band}: n={s.get('bet_count')} ratio={rr} "
+        f"actROI={s.get('actual_roi_pct')} predROI={s.get('stored_ev_predicted_roi_pct')}"
+    )
 print("--- by_prob_band (n>0) ---")
 for band, s in (d.get("by_prob_band") or {}).items():
     if not s.get("bet_count"):
