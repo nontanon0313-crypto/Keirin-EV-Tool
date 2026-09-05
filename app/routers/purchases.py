@@ -1322,6 +1322,22 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
     probability_errors = 0
     calibration_errors = 0
 
+    # レースごとのN+1クエリを避けるため、OddsをレースID単位で
+    # 500レースずつ一括取得する。
+    odds_by_race = {}
+    race_ids = [race.id for race in races]
+    CHUNK = 500
+
+    for i in range(0, len(race_ids), CHUNK):
+        chunk = race_ids[i:i + CHUNK]
+        odds_rows_chunk = (
+            db.query(models.Odds)
+            .filter(models.Odds.race_id.in_(chunk))
+            .all()
+        )
+        for odds_row in odds_rows_chunk:
+            odds_by_race.setdefault(odds_row.race_id, []).append(odds_row)
+
     for race in races:
         entries = race.entries
         win_probs = calc.build_win_probs_from_entries(entries)
@@ -1329,7 +1345,7 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
             races_skipped_no_win_probs += 1
             continue
 
-        odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race.id).all()
+        odds_rows = odds_by_race.get(race.id) or []
         if not odds_rows:
             races_skipped_no_odds += 1
             continue
