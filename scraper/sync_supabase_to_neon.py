@@ -248,15 +248,36 @@ def step_odds(sb, neon):
 
 
 def step_purchases(sb, neon):
+    """id 順に ROW_LIMIT 件ずつ（AFTER_ID から再開）。"""
+    after_id = int(os.environ.get("AFTER_ID", "0"))
+    limit = int(os.environ.get("ROW_LIMIT", "2500"))
     race_map, _ = build_race_map(sb, neon)
-    existing = {
-        (r["race_id"], r["bet_type"], r["combination"])
-        for r in neon.execute(
-            text("SELECT race_id, bet_type, combination FROM purchases")
+    rows = list(
+        sb.execute(
+            text(
+                "SELECT * FROM purchases WHERE id > :a ORDER BY id LIMIT :lim"
+            ),
+            {"a": after_id, "lim": limit},
         ).mappings()
-    }
+    )
+    if not rows:
+        print("purchases: 完了 残り0 last_id=%s" % after_id, flush=True)
+        return 0
+    neon_rids = {race_map[r["race_id"]] for r in rows if r["race_id"] in race_map}
+    existing = set()
+    if neon_rids:
+        existing = {
+            (r["race_id"], r["bet_type"], r["combination"])
+            for r in neon.execute(
+                text(
+                    "SELECT race_id, bet_type, combination FROM purchases "
+                    "WHERE race_id = ANY(:ids)"
+                ),
+                {"ids": list(neon_rids)},
+            ).mappings()
+        }
     buf, n = [], 0
-    for r in sb.execute(text("SELECT * FROM purchases")).mappings():
+    for r in rows:
         r = dict(r)
         n_rid = race_map.get(r["race_id"])
         if n_rid is None:
@@ -274,20 +295,46 @@ def step_purchases(sb, neon):
             buf = []
     n += _bulk_insert(neon, "purchases", buf)
     neon.commit()
-    print(f"purchases: 新規{n}", flush=True)
+    last_id = rows[-1]["id"]
+    print(
+        f"purchases: 新規{n} last_id={last_id} batch={len(rows)} "
+        f"{'続きあり' if len(rows) >= limit else 'この帯は完了'}",
+        flush=True,
+    )
     return n
 
 
 def step_skipped(sb, neon):
+    """id 順に ROW_LIMIT 件ずつ（AFTER_ID から再開）。skipped は件数が多い。"""
+    after_id = int(os.environ.get("AFTER_ID", "0"))
+    limit = int(os.environ.get("ROW_LIMIT", "4000"))
     race_map, _ = build_race_map(sb, neon)
-    existing = {
-        (r["race_id"], r["bet_type"], r["combination"], (r.get("reason") or "")[:60])
-        for r in neon.execute(
-            text("SELECT race_id, bet_type, combination, reason FROM skipped_bets")
+    rows = list(
+        sb.execute(
+            text(
+                "SELECT * FROM skipped_bets WHERE id > :a ORDER BY id LIMIT :lim"
+            ),
+            {"a": after_id, "lim": limit},
         ).mappings()
-    }
+    )
+    if not rows:
+        print("skipped: 完了 残り0 last_id=%s" % after_id, flush=True)
+        return 0
+    neon_rids = {race_map[r["race_id"]] for r in rows if r["race_id"] in race_map}
+    existing = set()
+    if neon_rids:
+        existing = {
+            (r["race_id"], r["bet_type"], r["combination"], (r.get("reason") or "")[:60])
+            for r in neon.execute(
+                text(
+                    "SELECT race_id, bet_type, combination, reason FROM skipped_bets "
+                    "WHERE race_id = ANY(:ids)"
+                ),
+                {"ids": list(neon_rids)},
+            ).mappings()
+        }
     buf, n = [], 0
-    for r in sb.execute(text("SELECT * FROM skipped_bets")).mappings():
+    for r in rows:
         r = dict(r)
         n_rid = race_map.get(r["race_id"])
         if n_rid is None:
@@ -304,7 +351,12 @@ def step_skipped(sb, neon):
             buf = []
     n += _bulk_insert(neon, "skipped_bets", buf)
     neon.commit()
-    print(f"skipped: 新規{n}", flush=True)
+    last_id = rows[-1]["id"]
+    print(
+        f"skipped: 新規{n} last_id={last_id} batch={len(rows)} "
+        f"{'続きあり' if len(rows) >= limit else 'この帯は完了'}",
+        flush=True,
+    )
     return n
 
 
@@ -354,7 +406,12 @@ def step_bankroll(sb, neon):
 
 def main():
     step = (sys.argv[1] if len(sys.argv) > 1 else "all").strip().lower()
-    print(f"[{datetime.now().isoformat()}] step={step}", flush=True)
+    if len(sys.argv) > 2 and sys.argv[2].isdigit():
+        os.environ["AFTER_ID"] = sys.argv[2]
+    print(
+        f"[{datetime.now().isoformat()}] step={step} AFTER_ID={os.environ.get('AFTER_ID','0')}",
+        flush=True,
+    )
     neon_eng, sb_eng = get_engines()
     with sb_eng.connect() as sb, neon_eng.connect() as neon:
         if step == "all":

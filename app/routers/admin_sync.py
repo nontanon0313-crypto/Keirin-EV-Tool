@@ -90,10 +90,11 @@ def sync_supabase_to_neon(
         "races",
         description="banks|races|entries|odds|purchases|skipped|bankroll",
     ),
+    after_id: int = Query(0, description="purchases/skipped の続き用 (前回の last_id)"),
 ):
     """
     1リクエスト1ステップ。Renderの502を避ける。
-    odds は複数回呼ぶ（残りレースが0になるまで）。
+    odds / purchases / skipped は複数回呼ぶ（完了表示まで）。
     """
     _check_token(token)
     _require_both_db_urls()
@@ -101,9 +102,13 @@ def sync_supabase_to_neon(
     allowed = {"banks", "races", "entries", "odds", "purchases", "skipped", "bankroll"}
     if step not in allowed:
         raise HTTPException(400, detail=f"step は {sorted(allowed)} のいずれか")
-    # odds は少し長め
-    timeout = 100 if step == "odds" else 90
-    return _run_sync_script("sync_supabase_to_neon.py", args=[step], timeout=timeout)
+    args = [step]
+    if step in ("purchases", "skipped") and after_id:
+        args.append(str(int(after_id)))
+    elif step in ("purchases", "skipped"):
+        args.append("0")
+    timeout = 100 if step in ("odds", "purchases", "skipped") else 90
+    return _run_sync_script("sync_supabase_to_neon.py", args=args, timeout=timeout)
 
 
 @router.get("/compare-db-counts")
