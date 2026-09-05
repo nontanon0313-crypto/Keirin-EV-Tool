@@ -3438,31 +3438,46 @@ PURCHASE_STATS_CACHE_TTL_SECONDS = 60 * 10  # 10分。全件スキャンで数�
 
 
 @router.get("/stats")
-def purchase_stats(refresh: bool = False, db: Session = Depends(get_db)):
+def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_switch", db: Session = Depends(get_db)):
     """
     勝率帯別・券種別の回収率など、複数の切り口で集計する。
     単一要素だけで結論づけないためのFX版ルールを踏襲。
 
-    2026-09-06追加: 購入・見送り全件(10万件超)+関連オッズを毎回スキャンするため
-    重く(実測80秒超)、Neonの転送量も無視できないので10分キャッシュする。
-    最新のreplay結果をすぐ見たい時は refresh=true で強制再計算できる。
+    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT(現行の投票基準の開始日時)以降の
+    データだけに絞り込むようにした。以前はsinceの絞り込みが無く、投票ロジックが
+    変わる前の旧データまで「現行基準の集計」として表示されていた(のんの指摘で発覚)。
+    全期間を見たい場合は since=all を指定する。
+
+    2026-09-06追加: 購入・見送り全件+関連オッズを毎回スキャンするため重く
+    (実測80秒超)、Neonの転送量も無視できないので既定条件(since=calibration_switch)
+    の結果だけ10分キャッシュする。最新のreplay結果をすぐ見たい時は refresh=true。
     """
     import time as _time
 
-    if not refresh:
+    since = since or "calibration_switch"
+    use_cache = not refresh and since == "calibration_switch"
+
+    if use_cache:
         cached = _purchase_stats_cache["value"]
         if cached is not None and (_time.time() - _purchase_stats_cache["computed_at"]) < PURCHASE_STATS_CACHE_TTL_SECONDS:
             return {**cached, "cache_hit": True, "cached_at": _purchase_stats_cache["computed_at"]}
 
-    result = _compute_purchase_stats(db)
+    since_dt = _parse_since_param(since) if since != "all" else None
+    result = _compute_purchase_stats(db, since_dt)
     if "message" not in result:
-        _purchase_stats_cache["value"] = result
-        _purchase_stats_cache["computed_at"] = _time.time()
+        result["since"] = since
+        result["since_resolved"] = since_dt.isoformat() if since_dt else None
+        if use_cache:
+            _purchase_stats_cache["value"] = result
+            _purchase_stats_cache["computed_at"] = _time.time()
     return {**result, "cache_hit": False}
 
 
-def _compute_purchase_stats(db: Session):
-    purchases_only = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+def _compute_purchase_stats(db: Session, since_dt=None):
+    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+    purchases_only = pq.all()
     class _SkippedAsPurchase:
         __slots__ = (
             "race_id", "bet_type", "combination", "stake_amount", "payout_amount",
@@ -3484,11 +3499,10 @@ def _compute_purchase_stats(db: Session):
             # 無く、見送りを含む集計処理が軒並み500エラーになっていた)。
             self.odds_at_purchase = None
             self.final_odds = None
-    skipped_eval = (
-        db.query(models.SkippedBet)
-        .filter(models.SkippedBet.actual_result.isnot(None))
-        .all()
-    )
+    sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
+    if since_dt is not None:
+        sq = sq.filter(models.SkippedBet.created_at >= since_dt)
+    skipped_eval = sq.all()
     purchases = list(purchases_only) + [_SkippedAsPurchase(s) for s in skipped_eval]
     if not purchases:
         return {"message": "まだ確定した購入履歴がありません"}
