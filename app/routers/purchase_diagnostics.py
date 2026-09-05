@@ -606,6 +606,36 @@ def diagnostics_odds_drift(
     }
 
 
+@router.get("/gate-expectancy-raw")
+def diagnostics_gate_expectancy_raw(db: Session = Depends(get_db)):
+    """
+    実績ゲート(ステージゲート・券種ゲート)が実際に使っている
+    get_stage_expectancy_map / get_bet_type_expectancy_map の生値をそのまま返す。
+
+    2026-09-05: 直近24時間replayで2車単がactROI 15.7%(predROI 517.6%)という
+    壊滅的な実績にもかかわらず券種ゲートに引っかからなかった件を確認するため追加。
+    両関数とも確定済みPurchase全件(as-ofカット無し・全期間)を集計しているため、
+    古い購入が多いと直近の悪化が薄まって0%カットラインを超えたままになりうる
+    (4.2の未来リーク問題と同根)。値を直接見て確認する。
+    """
+    stage_exp = purchases_router.get_stage_expectancy_map(db, min_samples=50, use_cache=False)
+    bet_type_exp = purchases_router.get_bet_type_expectancy_map(db, min_samples=50, use_cache=False)
+    return {
+        "stage_expectancy_map": stage_exp,
+        "bet_type_expectancy_map": bet_type_exp,
+        "gate_cutoffs": {
+            "stage_expectancy_cutoff_pct": -50.0,
+            "bet_type_expectancy_cutoff_pct": 0.0,
+        },
+        "note": (
+            "どちらの集計もconfirmed Purchase全件(全期間・as-ofカット無し)を対象にしており、"
+            "直近窓だけの悪化ではゲートが反応しない可能性がある。"
+            "bet_type_expectancy_mapに該当券種が無い場合はサンプル50件未満(全期間)で"
+            "ゲート対象外という意味。"
+        ),
+    }
+
+
 @router.get("/stage-gate")
 def diagnostics_stage_gate(
     since: Optional[str] = Query("calibration_switch"),
