@@ -1,10 +1,13 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# 使い方: bash scraper/run_replay_continue.sh [件数] [間隔秒]
+# 使い方: bash scraper/run_replay_continue.sh [件数] [間隔秒] [証拠金] [続きのafter_race_id]
+# 旧データを少しずつ再投票する場合、最後の出力に出る
+# 「続きから: --after-race-id XXXX」の数字を第4引数に渡せば途中から再開できる。
 set -e
 API="${API_BASE:-https://keirin-ev-tool.onrender.com}"
 LIMIT="${1:-50}"
 INTERVAL="${2:-2}"
 BANKROLL="${3:-1000000}"
+AFTER_RACE_ID="${4:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -25,8 +28,12 @@ for i in range(6):
     time.sleep(min(5*(2**i), 60))
 "
 
-echo "=== replay limit=$LIMIT interval=${INTERVAL}s ==="
-python3 -u scraper/replay_settled.py --since all --limit "$LIMIT" --bankroll "$BANKROLL" --interval "$INTERVAL"
+echo "=== replay limit=$LIMIT interval=${INTERVAL}s after_race_id=${AFTER_RACE_ID:-なし} ==="
+if [ -n "$AFTER_RACE_ID" ]; then
+  python3 -u scraper/replay_settled.py --since all --limit "$LIMIT" --bankroll "$BANKROLL" --interval "$INTERVAL" --after-race-id "$AFTER_RACE_ID"
+else
+  python3 -u scraper/replay_settled.py --since all --limit "$LIMIT" --bankroll "$BANKROLL" --interval "$INTERVAL"
+fi
 
 echo "=== 診断前に30秒待機(429緩和) ==="
 sleep 30

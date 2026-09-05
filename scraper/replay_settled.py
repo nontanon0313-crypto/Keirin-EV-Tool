@@ -94,6 +94,12 @@ def request_with_retry(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--since", default="all")
+    parser.add_argument(
+        "--after-race-id",
+        type=int,
+        default=None,
+        help="このrace_idより大きいものだけ対象(前回の続きから再開する用)",
+    )
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--bankroll", type=float, default=1000000)
     parser.add_argument(
@@ -133,11 +139,14 @@ def main():
 
     print(f"[{now()}] 対象レースID一覧取得: {target_url}", flush=True)
     try:
+        params = {"since": args.since, "limit": args.limit}
+        if args.after_race_id is not None:
+            params["after_race_id"] = args.after_race_id
         r = request_with_retry(
             session,
             "GET",
             target_url,
-            params={"since": args.since, "limit": args.limit},
+            params=params,
             timeout=90,
         )
         r.raise_for_status()
@@ -270,6 +279,12 @@ def main():
     print(f"skipped = {skipped}", flush=True)
     print(f"elapsed = {fmt_seconds(time.time() - started)}", flush=True)
     print(f"詳細ログ: {log_path}", flush=True)
+    if race_ids:
+        last_id = race_ids[-1]
+        if processed >= total:
+            print(f"last_race_id={last_id} (この続きから: --after-race-id {last_id})", flush=True)
+        else:
+            print(f"中断/未処理あり。続きから: --after-race-id {last_id}", flush=True)
     log_f.close()
 
 
