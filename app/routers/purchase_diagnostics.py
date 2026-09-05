@@ -549,7 +549,15 @@ def diagnostics_odds_drift(
     since: Optional[str] = Query("calibration_switch"),
     db: Session = Depends(get_db),
 ):
-    """課題5: 購入時オッズとfinal_odds / 実現倍率の乖離。"""
+    """課題5: 購入時オッズとfinal_odds / 実現倍率の乖離。
+
+    2026-09-05: 本ツールのオッズは結果確定後に1回だけスクレイピングして保存する
+    設計(PROGRESS.md参照)のため、odds_at_purchaseとfinal_odds/実現倍率は
+    常に同一のOddsスナップショット由来になり、drift_pctは構造的に常に0になる。
+    「投票締切前オッズ→最終オッズ」の変動という意味での実測ドリフトはこの
+    データでは検出できない(バグではなく、リアルタイム投票をしていないための
+    データモデル上の限界)。
+    """
     since_dt = _since_dt(since)
     purchases = _load_settled_purchases(db, since_dt)
 
@@ -602,6 +610,8 @@ def diagnostics_odds_drift(
         "note": (
             "drift_pct = (final_or_realized - odds_at_purchase) / odds_at_purchase × 100。"
             "負なら購入後にオッズ下落。final_oddsが空の場合は的中時の実現倍率を使用。"
+            "本ツールはオッズを結果確定後に1回だけ取得するため、この値は構造的に"
+            "常に0になる(締切前後の実際のオッズ変動は測定できない)。"
         ),
     }
 

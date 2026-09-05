@@ -2481,7 +2481,11 @@ def diagnostics_predicted_vs_actual_return(
             return "30-100倍"
         if odds < 300:
             return "100-300倍"
-        return "300倍以上"
+        if odds < 1000:
+            return "300-1000倍"
+        if odds < 3000:
+            return "1000-3000倍"
+        return "3000倍以上"
 
     def ev_band(ev):
         if ev is None:
@@ -2551,7 +2555,9 @@ def diagnostics_predicted_vs_actual_return(
         "10-30倍",
         "30-100倍",
         "100-300倍",
-        "300倍以上",
+        "300-1000倍",
+        "1000-3000倍",
+        "3000倍以上",
         "不明",
     ]:
         group = [r for r in rows if odds_band(r["odds"]) == band]
