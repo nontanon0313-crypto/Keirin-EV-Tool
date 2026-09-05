@@ -1331,6 +1331,7 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
         }
         for bt in TARGET_BET_TYPES
     }
+    winner_missing_races = {bt: [] for bt in TARGET_BET_TYPES}
 
     # レースごとのN+1クエリを避けるため、OddsをレースID単位で
     # 500レースずつ一括取得する。
@@ -1418,6 +1419,14 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
                 winner_presence[bt]["winner_present_in_odds"] += 1
             else:
                 winner_presence[bt]["winner_missing_from_odds"] += 1
+                winner_missing_races[bt].append({
+                    "race_id": race.id,
+                    "jo_code": getattr(race, "jo_code", None),
+                    "kaisai_bi": getattr(race, "kaisai_bi", None),
+                    "race_no": getattr(race, "race_no", None),
+                    "actual_result": race.actual_result,
+                    "winner_combinations": sorted(winners),
+                })
 
         races_evaluated += 1
 
@@ -1512,6 +1521,7 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
         "probability_errors": probability_errors,
         "calibration_errors": calibration_errors,
         "winner_presence_by_bet_type": winner_presence,
+        "winner_missing_races_by_bet_type": winner_missing_races,
         "by_bet_type": result,
         "message": (
             "これは記録(Purchase/SkippedBet)に一切頼らず、オッズが存在する"
