@@ -1318,6 +1318,9 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
     races_evaluated = 0
     races_skipped_no_win_probs = 0
     races_skipped_no_odds = 0
+    races_skipped_invalid_result = 0
+    probability_errors = 0
+    calibration_errors = 0
 
     for race in races:
         entries = race.entries
@@ -1331,7 +1334,12 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
             races_skipped_no_odds += 1
             continue
 
-        parsed_result = calc.parse_actual_result(race.actual_result)
+        try:
+            parsed_result = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            races_skipped_invalid_result += 1
+            continue
+
         line_map, line_boost = calc.line_map_from_race(race)
 
         races_evaluated += 1
@@ -1344,15 +1352,43 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
             except (ValueError, AttributeError):
                 continue
 
-            prob_raw = calc.estimate_prob_for_bet(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
-            prob_cal = calc.apply_calibration_to_prob(prob_raw, calibration_factors, bet_type=o.bet_type)
-            won = calc.judge_purchase_result(o.bet_type, o.combination, parsed_result)
+            try:
+                prob_raw = calc.estimate_prob_for_bet(
+                    win_probs,
+                    o.bet_type,
+                    cars,
+                    line_map=line_map,
+                    line_boost=line_boost,
+                )
+            except Exception:
+                probability_errors += 1
+                continue
 
+            try:
+                prob_cal = calc.apply_calibration_to_prob(
+                    prob_raw,
+                    calibration_factors,
+                    bet_type=o.bet_type,
+                )
+            except Exception:
+                calibration_errors += 1
+                continue
+
+            won = calc.judge_purchase_result(
+                o.bet_type,
+                o.combination,
+                parsed_result,
+            )
             key = (race.id, o.bet_type)
-            groups_raw_by_type.setdefault(o.bet_type, {}).setdefault(key, []).append((o.combination, prob_raw, won))
-            groups_cal_by_type.setdefault(o.bet_type, {}).setdefault(key, []).append((o.combination, prob_cal, won))
-            flat_records_by_type.setdefault(o.bet_type, []).append((prob_raw, prob_cal, won))
-
+            groups_raw_by_type.setdefault(o.bet_type, {}).setdefault(
+                key, []
+            ).append((o.combination, prob_raw, won))
+            groups_cal_by_type.setdefault(o.bet_type, {}).setdefault(
+                key, []
+            ).append((o.combination, prob_cal, won))
+            flat_records_by_type.setdefault(o.bet_type, []).append(
+                (prob_raw, prob_cal, won)
+            )
     result = {}
     for bt in TARGET_BET_TYPES:
         flat = flat_records_by_type.get(bt, [])
@@ -1395,6 +1431,9 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
         "races_evaluated": races_evaluated,
         "races_skipped_no_win_probs": races_skipped_no_win_probs,
         "races_skipped_no_odds": races_skipped_no_odds,
+        "races_skipped_invalid_result": races_skipped_invalid_result,
+        "probability_errors": probability_errors,
+        "calibration_errors": calibration_errors,
         "by_bet_type": result,
         "message": (
             "これは記録(Purchase/SkippedBet)に一切頼らず、オッズが存在する"

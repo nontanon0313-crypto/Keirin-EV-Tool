@@ -28,7 +28,7 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-05(Claude) — PROGRESS.mdの運用ルールを見直し、本体を整理
+最終更新: 2026-09-05(ChatGPT) — retroactive-capture-diagnosticsの500原因切り分けを継続。parse_actual_result / probability / calibrationの例外を個別計上する修正を実装・構文検証済み。次はデプロイ後の診断結果で原因箇所を特定する。
 
 ### フェーズ
 校正・ゲート改善は一段落。**様子見フェーズ。実資金投票はまだしない。**
