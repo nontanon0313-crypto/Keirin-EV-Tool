@@ -56,11 +56,11 @@ def _run_sync_script(script_name: str) -> dict:
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=1800,
             env=os.environ.copy(),
         )
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="同期がタイムアウトしました(10分)")
+        raise HTTPException(status_code=504, detail="同期がタイムアウトしました(30分)")
 
     out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     if proc.returncode != 0:
