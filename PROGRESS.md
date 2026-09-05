@@ -28,21 +28,22 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-05(Grok) — 差分同期の取りこぼし修正（欠けidも追記）
+最終更新: 2026-09-05(Grok) — Supabase→Neon を業務キー・マージに変更
 
 ### 問題
-Supabase→Neon が 0 件だったが、実際は差分あり。原因は同期が
-「相手の MAX(id) より大きい行だけ」を取っていたため、副系にだけある
-（MAX以下の）id がコピーされなかった。
+Neon→Supabase→Neon の切替で、副系の id が主系と衝突する。
+MAX(id)/欠けid 方式では 0 件になり、差分が残る。
 
 ### 修正
-- `sync_table`: **source にあって target に無い id** を全部追記
-- `GET /admin/compare-db-counts?token=...` で両DBの COUNT/MAX を比較
+`scraper/sync_supabase_to_neon.py` を **業務キー・マージ** に刷新:
+- races: `external_ref`（なければ会場+R+日付）
+- 新規レースは Neon で新 id 採番、子表は race_id 付け替え
+- entries/odds: (race_id, 車番/券種+組)
+- purchases/skipped: 既存 race+券種+組が無ければ追加
 
-### 次（ユーザー実行）
-1. デプロイ後、まず件数比較
-2. 再度 `POST /admin/sync-supabase-to-neon`
-3. もう一度件数比較してギャップが縮んだか確認
+### 次
+デプロイ → `POST /admin/sync-supabase-to-neon` → ログで新規件数確認
+→ `GET /admin/compare-db-counts`（件数は id 採番差で一致しない場合あり。新規件数を優先）
 
 ## 2. プロジェクト概要
 
