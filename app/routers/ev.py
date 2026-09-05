@@ -181,7 +181,7 @@ def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str
 
 def _apply_high_odds_residual(est_prob: float, odds_value: float, bet_type: str, high_odds_factors: dict) -> float:
     """
-    1000-3000倍・3000倍以上帯の的中率残差を掛ける(方針B)。
+    300-1000 / 1000-3000 / 3000倍以上帯の的中率残差を掛ける(方針B)。
     券種×帯があれば優先、なければ帯全体。係数が無ければそのまま。
     """
     if not high_odds_factors or est_prob is None or est_prob <= 0:
@@ -191,7 +191,7 @@ def _apply_high_odds_residual(est_prob: float, odds_value: float, bet_type: str,
     except (TypeError, ValueError):
         return est_prob
     band = _odds_band_key(odds)
-    if band not in ("1000-3000倍", "3000倍以上"):
+    if band not in ("300-1000倍", "1000-3000倍", "3000倍以上"):
         return est_prob
 
     factor = None

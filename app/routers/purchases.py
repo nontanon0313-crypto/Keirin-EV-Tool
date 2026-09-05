@@ -624,14 +624,15 @@ def get_bet_type_odds_band_expectancy_map(
 
 
 
-HIGH_ODDS_BANDS = ("1000-3000倍", "3000倍以上")
+HIGH_ODDS_BANDS = ("300-1000倍", "1000-3000倍", "3000倍以上")
 
 
 def get_high_odds_residual_factors(db: Session, use_cache: bool = True) -> dict:
     """
-    高オッズ帯(1000-3000 / 3000以上)専用の的中率残差係数。
+    高オッズ帯(300-1000 / 1000-3000 / 3000以上)専用の的中率残差係数。
 
     全期間ROIがプラスでも、予測的中率が実績より高い帯は確率を縮める(方針B)。
+    2026-09-05: 300-1000倍も直近で勝率過大傾向のため対象に追加。
     買い目の禁止ではなく est_prob に係数を掛けるだけ。
 
     戻り値:
