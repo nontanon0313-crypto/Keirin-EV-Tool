@@ -3433,12 +3433,35 @@ def list_purchases(race_id: Optional[int] = None, db: Session = Depends(get_db))
     return q.order_by(models.Purchase.purchased_at.desc()).all()
 
 
+_purchase_stats_cache = {"computed_at": 0.0, "value": None}
+PURCHASE_STATS_CACHE_TTL_SECONDS = 60 * 10  # 10分。全件スキャンで数十秒かかるため、連打で毎回再計算しない
+
+
 @router.get("/stats")
-def purchase_stats(db: Session = Depends(get_db)):
+def purchase_stats(refresh: bool = False, db: Session = Depends(get_db)):
     """
     勝率帯別・券種別の回収率など、複数の切り口で集計する。
     単一要素だけで結論づけないためのFX版ルールを踏襲。
+
+    2026-09-06追加: 購入・見送り全件(10万件超)+関連オッズを毎回スキャンするため
+    重く(実測80秒超)、Neonの転送量も無視できないので10分キャッシュする。
+    最新のreplay結果をすぐ見たい時は refresh=true で強制再計算できる。
     """
+    import time as _time
+
+    if not refresh:
+        cached = _purchase_stats_cache["value"]
+        if cached is not None and (_time.time() - _purchase_stats_cache["computed_at"]) < PURCHASE_STATS_CACHE_TTL_SECONDS:
+            return {**cached, "cache_hit": True, "cached_at": _purchase_stats_cache["computed_at"]}
+
+    result = _compute_purchase_stats(db)
+    if "message" not in result:
+        _purchase_stats_cache["value"] = result
+        _purchase_stats_cache["computed_at"] = _time.time()
+    return {**result, "cache_hit": False}
+
+
+def _compute_purchase_stats(db: Session):
     purchases_only = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
     class _SkippedAsPurchase:
         __slots__ = (
