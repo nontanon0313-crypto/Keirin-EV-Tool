@@ -293,8 +293,6 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     odds_skipped_bet_types = []
     odds_payload = payload.get("odds") or {}
     if odds_payload:
-        # 同一レースの既存オッズは一旦洗い替える(再取り込み時に古い不完全データを残さないため)
-        db.query(models.Odds).filter(models.Odds.race_id == race.id).delete()
         for bet_type, info in odds_payload.items():
             if not info.get("is_complete"):
                 odds_skipped_bet_types.append({
@@ -303,6 +301,13 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
                     "expected": info.get("expected_count"),
                 })
                 continue
+
+            # 完全取得できた券種だけ、同一レース・同一券種の既存オッズを洗い替える
+            db.query(models.Odds).filter(
+                models.Odds.race_id == race.id,
+                models.Odds.bet_type == bet_type,
+            ).delete()
+
             for item in info.get("matrix", []):
                 odds_v = _to_odds_float(item.get("オッズ"))
                 if odds_v is None:
@@ -397,7 +402,6 @@ def refresh_odds_now(race_id: int, db: Session = Depends(get_db)):
 
     odds_created = 0
     odds_skipped_bet_types = []
-    db.query(models.Odds).filter(models.Odds.race_id == race.id).delete()
     for bet_type, info in odds_payload.items():
         if not info.get("is_complete"):
             odds_skipped_bet_types.append({
@@ -406,6 +410,13 @@ def refresh_odds_now(race_id: int, db: Session = Depends(get_db)):
                 "expected": info.get("expected_count"),
             })
             continue
+
+        # 完全取得できた券種だけ、同一レース・同一券種の既存オッズを洗い替える
+        db.query(models.Odds).filter(
+            models.Odds.race_id == race.id,
+            models.Odds.bet_type == bet_type,
+        ).delete()
+
         for item in info.get("matrix", []):
             odds_v = _to_odds_float(item.get("オッズ"))
             if odds_v is None:
