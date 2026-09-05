@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Supabase → Neon 業務キー・マージ（高速版）。
+Supabase → Neon 段階マージ。
 
-id の話:
-  - シーケンスが揃っていれば、副系の新規は MAX(Neon)+1 以降になり「重複しない」。
-  - 同期が中途半端だと、同じ id に別内容が入ることがある（衝突）。
-  - どちらでも拾えるよう、external_ref 等の業務キーでマージする。
+Render の HTTP は長時間で 502 になるため、ステップ分割する。
 
-速度:
-  - 一括 INSERT
-  - odds は「新規レース」と「Neon に1件も odds が無い既存レース」だけ
-  - purchases/skipped は race 対応後に欠け分のみ
+  python scraper/sync_supabase_to_neon.py banks
+  python scraper/sync_supabase_to_neon.py races
+  python scraper/sync_supabase_to_neon.py entries
+  python scraper/sync_supabase_to_neon.py odds
+  python scraper/sync_supabase_to_neon.py purchases
+  python scraper/sync_supabase_to_neon.py skipped
+  python scraper/sync_supabase_to_neon.py bankroll
+  python scraper/sync_supabase_to_neon.py all   # ローカル用・一括
+
+環境変数: DATABASE_URL=Neon, DATABASE_URL_FALLBACK=Supabase
+odds は ODDS_LIMIT (既定 80) レースずつ。繰り返し呼ぶと続きを処理。
 """
 from __future__ import annotations
 
@@ -24,6 +28,8 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 load_dotenv()
+
+STEPS = ("banks", "races", "entries", "odds", "purchases", "skipped", "bankroll")
 
 
 def _normalize_url(url: str) -> str:
@@ -44,7 +50,7 @@ def get_engines():
         or os.environ.get("DATABASE_URL_SECONDARY", "")
     )
     if not neon_url or not sb_url:
-        print("エラー: DATABASE_URL と DATABASE_URL_FALLBACK が必要です")
+        print("エラー: DATABASE_URL / DATABASE_URL_FALLBACK が必要")
         sys.exit(1)
     kw = dict(pool_pre_ping=True, connect_args={"connect_timeout": 30})
     return create_engine(neon_url, **kw), create_engine(sb_url, **kw)
@@ -66,24 +72,22 @@ def _race_key(r: dict) -> Optional[str]:
     return None
 
 
-def _bulk_insert(conn, table: str, rows: list[dict], skip_cols=frozenset({"id"})) -> int:
+def _bulk_insert(conn, table: str, rows: list, skip_cols=frozenset({"id"})) -> int:
     if not rows:
         return 0
     cols = [c for c in rows[0].keys() if c not in skip_cols]
-    col_list = ", ".join(cols)
-    placeholders = ", ".join(f":{c}" for c in cols)
-    sql = text(f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})")
-    payload = [{c: row.get(c) for c in cols} for row in rows]
-    # chunk
+    sql = text(
+        f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join(':'+c for c in cols)})"
+    )
     n = 0
-    for i in range(0, len(payload), 200):
-        chunk = payload[i : i + 200]
+    for i in range(0, len(rows), 150):
+        chunk = [{c: row.get(c) for c in cols} for row in rows[i : i + 150]]
         conn.execute(sql, chunk)
         n += len(chunk)
     return n
 
 
-def _insert_one_returning(conn, table: str, data: dict, skip_cols=frozenset({"id"})) -> int:
+def _insert_one(conn, table: str, data: dict, skip_cols=frozenset({"id"})) -> int:
     payload = {k: v for k, v in data.items() if k not in skip_cols}
     cols = list(payload.keys())
     sql = text(
@@ -92,244 +96,294 @@ def _insert_one_returning(conn, table: str, data: dict, skip_cols=frozenset({"id
     return conn.execute(sql, payload).scalar()
 
 
-def main():
-    neon_eng, sb_eng = get_engines()
-    print(f"[{datetime.now().isoformat()}] Supabase→Neon マージ開始", flush=True)
+def build_race_map(sb, neon):
+    neon_by_key = {}
+    for r in neon.execute(
+        text("SELECT id, external_ref, venue_name, race_number, race_date FROM races")
+    ).mappings():
+        r = dict(r)
+        k = _race_key(r)
+        if k:
+            neon_by_key[k] = r["id"]
+    race_map = {}
+    for r in sb.execute(
+        text("SELECT id, external_ref, venue_name, race_number, race_date FROM races")
+    ).mappings():
+        r = dict(r)
+        k = _race_key(r)
+        if k and k in neon_by_key:
+            race_map[r["id"]] = neon_by_key[k]
+    return race_map, neon_by_key
 
-    with sb_eng.connect() as sb, neon_eng.connect() as neon:
-        # --- bank ---
-        neon_banks = {
-            r["name"]: r["id"]
-            for r in neon.execute(text("SELECT id, name FROM bank_master")).mappings()
+
+def step_banks(sb, neon):
+    neon_banks = {
+        r["name"]: r["id"]
+        for r in neon.execute(text("SELECT id, name FROM bank_master")).mappings()
+    }
+    n = 0
+    for r in sb.execute(text("SELECT * FROM bank_master")).mappings():
+        r = dict(r)
+        if r["name"] in neon_banks:
+            continue
+        new_id = _insert_one(neon, "bank_master", r)
+        neon_banks[r["name"]] = new_id
+        n += 1
+    neon.commit()
+    print(f"banks: 新規{n}", flush=True)
+    return n
+
+
+def step_races(sb, neon):
+    neon_banks = {
+        r["name"]: r["id"]
+        for r in neon.execute(text("SELECT id, name FROM bank_master")).mappings()
+    }
+    sb_banks = {
+        r["id"]: r["name"]
+        for r in sb.execute(text("SELECT id, name FROM bank_master")).mappings()
+    }
+    neon_by_key = {}
+    for r in neon.execute(
+        text("SELECT id, external_ref, venue_name, race_number, race_date FROM races")
+    ).mappings():
+        r = dict(r)
+        k = _race_key(r)
+        if k:
+            neon_by_key[k] = r["id"]
+    n = 0
+    for r in sb.execute(text("SELECT * FROM races ORDER BY id")).mappings():
+        r = dict(r)
+        k = _race_key(r)
+        if k and k in neon_by_key:
+            continue
+        if r.get("bank_id") is not None:
+            bname = sb_banks.get(r["bank_id"])
+            if bname and bname in neon_banks:
+                r["bank_id"] = neon_banks[bname]
+        new_id = _insert_one(neon, "races", r)
+        if k:
+            neon_by_key[k] = new_id
+        n += 1
+        if n % 50 == 0:
+            neon.commit()
+            print(f"  races progress {n}", flush=True)
+    neon.commit()
+    print(f"races: 新規{n}", flush=True)
+    return n
+
+
+def step_entries(sb, neon):
+    race_map, _ = build_race_map(sb, neon)
+    existing = {
+        (r["race_id"], r["car_number"])
+        for r in neon.execute(text("SELECT race_id, car_number FROM entries")).mappings()
+    }
+    buf, n = [], 0
+    for r in sb.execute(text("SELECT * FROM entries")).mappings():
+        r = dict(r)
+        n_rid = race_map.get(r["race_id"])
+        if n_rid is None:
+            continue
+        if (n_rid, r["car_number"]) in existing:
+            continue
+        r["race_id"] = n_rid
+        buf.append(r)
+        existing.add((n_rid, r["car_number"]))
+        if len(buf) >= 150:
+            n += _bulk_insert(neon, "entries", buf)
+            neon.commit()
+            buf = []
+    n += _bulk_insert(neon, "entries", buf)
+    neon.commit()
+    print(f"entries: 新規{n}", flush=True)
+    return n
+
+
+def step_odds(sb, neon):
+    """Neon に odds が無いレースだけ、最大 ODDS_LIMIT 件ずつ。"""
+    limit = int(os.environ.get("ODDS_LIMIT", "60"))
+    race_map, _ = build_race_map(sb, neon)
+    neon_with_odds = {
+        r[0] for r in neon.execute(text("SELECT DISTINCT race_id FROM odds")).fetchall()
+    }
+    # neon race ids that need odds, that we can fill from sb
+    need = []
+    for sb_id, n_id in race_map.items():
+        if n_id not in neon_with_odds:
+            need.append((sb_id, n_id))
+    need.sort(key=lambda x: x[1])
+    batch = need[:limit]
+    print(f"odds: 要埋め{len(need)}レース中 今回{len(batch)}", flush=True)
+    if not batch:
+        print("odds: 完了(残り0)", flush=True)
+        return 0
+    n = 0
+    for sb_id, n_id in batch:
+        existing = {
+            (r["bet_type"], r["combination"])
+            for r in neon.execute(
+                text(
+                    "SELECT bet_type, combination FROM odds WHERE race_id=:rid"
+                ),
+                {"rid": n_id},
+            ).mappings()
         }
-        bank_map = {}
-        n_bank = 0
-        for r in sb.execute(text("SELECT * FROM bank_master")).mappings():
-            r = dict(r)
-            if r["name"] in neon_banks:
-                bank_map[r["id"]] = neon_banks[r["name"]]
-            else:
-                new_id = _insert_one_returning(neon, "bank_master", r)
-                neon_banks[r["name"]] = new_id
-                bank_map[r["id"]] = new_id
-                n_bank += 1
-        neon.commit()
-        print(f"  bank_master: 新規{n_bank}", flush=True)
-
-        # --- races ---
-        neon_by_key = {}
-        neon_race_ids = set()
-        for r in neon.execute(
-            text("SELECT id, external_ref, venue_name, race_number, race_date FROM races")
+        buf = []
+        for r in sb.execute(
+            text("SELECT * FROM odds WHERE race_id=:rid"), {"rid": sb_id}
         ).mappings():
             r = dict(r)
-            neon_race_ids.add(r["id"])
-            k = _race_key(r)
-            if k:
-                neon_by_key[k] = r["id"]
-
-        race_map = {}
-        new_race_sb_ids = []
-        n_race = 0
-        for r in sb.execute(text("SELECT * FROM races ORDER BY id")).mappings():
-            r = dict(r)
-            sb_id = r["id"]
-            k = _race_key(r)
-            if k and k in neon_by_key:
-                race_map[sb_id] = neon_by_key[k]
+            key = (r["bet_type"], r["combination"])
+            if key in existing:
                 continue
-            data = dict(r)
-            if data.get("bank_id") is not None:
-                data["bank_id"] = bank_map.get(data["bank_id"], data["bank_id"])
-            new_id = _insert_one_returning(neon, "races", data)
-            race_map[sb_id] = new_id
-            if k:
-                neon_by_key[k] = new_id
-            new_race_sb_ids.append(sb_id)
-            n_race += 1
+            r["race_id"] = n_id
+            buf.append(r)
+            existing.add(key)
+        n += _bulk_insert(neon, "odds", buf)
         neon.commit()
-        print(f"  races: 新規{n_race} / 対応{len(race_map)}", flush=True)
+    remain = max(0, len(need) - len(batch))
+    print(f"odds: 新規行{n} 残りレース約{remain}", flush=True)
+    return n
 
-        new_neon_race_ids = {race_map[s] for s in new_race_sb_ids}
 
-        # Neon に odds が1件も無いレース（既存だが空）も埋める
-        neon_with_odds = {
-            r[0]
-            for r in neon.execute(text("SELECT DISTINCT race_id FROM odds")).fetchall()
-        }
-        fill_odds_neon_ids = set(new_neon_race_ids)
-        for sb_id, n_id in race_map.items():
-            if n_id not in neon_with_odds:
-                fill_odds_neon_ids.add(n_id)
-        # reverse: neon_id -> list of sb race ids (usually 1)
-        neon_to_sb = {}
-        for sb_id, n_id in race_map.items():
-            neon_to_sb.setdefault(n_id, []).append(sb_id)
-
-        # --- entries (new races only, plus races with 0 entries on neon) ---
-        neon_entry_keys = {
-            (r["race_id"], r["car_number"])
-            for r in neon.execute(text("SELECT race_id, car_number FROM entries")).mappings()
-        }
-        neon_with_entries = {k[0] for k in neon_entry_keys}
-        entry_rows = []
-        for r in sb.execute(text("SELECT * FROM entries")).mappings():
-            r = dict(r)
-            n_rid = race_map.get(r["race_id"])
-            if n_rid is None:
-                continue
-            if (n_rid, r["car_number"]) in neon_entry_keys:
-                continue
-            if n_rid not in new_neon_race_ids and n_rid in neon_with_entries:
-                continue
-            r["race_id"] = n_rid
-            entry_rows.append(r)
-        n_ent = _bulk_insert(neon, "entries", entry_rows)
-        neon.commit()
-        print(f"  entries: 新規{n_ent}", flush=True)
-
-        # --- odds: only for races needing fill ---
-        need_sb_race_ids = set()
-        for n_id in fill_odds_neon_ids:
-            need_sb_race_ids.update(neon_to_sb.get(n_id, []))
-        n_odds = 0
-        if need_sb_race_ids:
-            # existing keys only for those neon races
-            existing_odds = {
-                (r["race_id"], r["bet_type"], r["combination"])
-                for r in neon.execute(
-                    text(
-                        "SELECT race_id, bet_type, combination FROM odds "
-                        "WHERE race_id = ANY(:ids)"
-                    ),
-                    {"ids": list(fill_odds_neon_ids)},
-                ).mappings()
-            }
-            odds_buf = []
-            # fetch sb odds in chunks by sb race id
-            sb_ids = list(need_sb_race_ids)
-            for i in range(0, len(sb_ids), 50):
-                chunk_ids = sb_ids[i : i + 50]
-                for r in sb.execute(
-                    text("SELECT * FROM odds WHERE race_id = ANY(:ids)"),
-                    {"ids": chunk_ids},
-                ).mappings():
-                    r = dict(r)
-                    n_rid = race_map.get(r["race_id"])
-                    if n_rid is None:
-                        continue
-                    key = (n_rid, r["bet_type"], r["combination"])
-                    if key in existing_odds:
-                        continue
-                    r["race_id"] = n_rid
-                    odds_buf.append(r)
-                    existing_odds.add(key)
-                    if len(odds_buf) >= 300:
-                        n_odds += _bulk_insert(neon, "odds", odds_buf)
-                        neon.commit()
-                        odds_buf = []
-            n_odds += _bulk_insert(neon, "odds", odds_buf)
+def step_purchases(sb, neon):
+    race_map, _ = build_race_map(sb, neon)
+    existing = {
+        (r["race_id"], r["bet_type"], r["combination"])
+        for r in neon.execute(
+            text("SELECT race_id, bet_type, combination FROM purchases")
+        ).mappings()
+    }
+    buf, n = [], 0
+    for r in sb.execute(text("SELECT * FROM purchases")).mappings():
+        r = dict(r)
+        n_rid = race_map.get(r["race_id"])
+        if n_rid is None:
+            continue
+        key = (n_rid, r["bet_type"], r["combination"])
+        if key in existing:
+            continue
+        r["race_id"] = n_rid
+        r["ev_result_id"] = None
+        buf.append(r)
+        existing.add(key)
+        if len(buf) >= 150:
+            n += _bulk_insert(neon, "purchases", buf)
             neon.commit()
-        print(f"  odds: 新規{n_odds}", flush=True)
+            buf = []
+    n += _bulk_insert(neon, "purchases", buf)
+    neon.commit()
+    print(f"purchases: 新規{n}", flush=True)
+    return n
 
-        # --- purchases ---
-        existing_pur = {
-            (r["race_id"], r["bet_type"], r["combination"])
-            for r in neon.execute(
-                text("SELECT race_id, bet_type, combination FROM purchases")
-            ).mappings()
-        }
-        pur_buf = []
-        n_pur = 0
-        for r in sb.execute(text("SELECT * FROM purchases")).mappings():
-            r = dict(r)
-            n_rid = race_map.get(r["race_id"])
-            if n_rid is None:
-                continue
-            key = (n_rid, r["bet_type"], r["combination"])
-            if key in existing_pur:
-                continue
-            r["race_id"] = n_rid
-            r["ev_result_id"] = None  # FK は付けない（衝突回避）
-            pur_buf.append(r)
-            existing_pur.add(key)
-            if len(pur_buf) >= 200:
-                n_pur += _bulk_insert(neon, "purchases", pur_buf)
-                neon.commit()
-                pur_buf = []
-        n_pur += _bulk_insert(neon, "purchases", pur_buf)
-        neon.commit()
-        print(f"  purchases: 新規{n_pur}", flush=True)
 
-        # --- skipped ---
-        existing_sk = {
-            (r["race_id"], r["bet_type"], r["combination"], (r.get("reason") or "")[:60])
-            for r in neon.execute(
-                text("SELECT race_id, bet_type, combination, reason FROM skipped_bets")
-            ).mappings()
-        }
-        sk_buf = []
-        n_sk = 0
-        for r in sb.execute(text("SELECT * FROM skipped_bets")).mappings():
-            r = dict(r)
-            n_rid = race_map.get(r["race_id"])
-            if n_rid is None:
-                continue
-            key = (n_rid, r["bet_type"], r["combination"], (r.get("reason") or "")[:60])
-            if key in existing_sk:
-                continue
-            r["race_id"] = n_rid
-            sk_buf.append(r)
-            existing_sk.add(key)
-            if len(sk_buf) >= 200:
-                n_sk += _bulk_insert(neon, "skipped_bets", sk_buf)
-                neon.commit()
-                sk_buf = []
-        n_sk += _bulk_insert(neon, "skipped_bets", sk_buf)
-        neon.commit()
-        print(f"  skipped_bets: 新規{n_sk}", flush=True)
+def step_skipped(sb, neon):
+    race_map, _ = build_race_map(sb, neon)
+    existing = {
+        (r["race_id"], r["bet_type"], r["combination"], (r.get("reason") or "")[:60])
+        for r in neon.execute(
+            text("SELECT race_id, bet_type, combination, reason FROM skipped_bets")
+        ).mappings()
+    }
+    buf, n = [], 0
+    for r in sb.execute(text("SELECT * FROM skipped_bets")).mappings():
+        r = dict(r)
+        n_rid = race_map.get(r["race_id"])
+        if n_rid is None:
+            continue
+        key = (n_rid, r["bet_type"], r["combination"], (r.get("reason") or "")[:60])
+        if key in existing:
+            continue
+        r["race_id"] = n_rid
+        buf.append(r)
+        existing.add(key)
+        if len(buf) >= 150:
+            n += _bulk_insert(neon, "skipped_bets", buf)
+            neon.commit()
+            buf = []
+    n += _bulk_insert(neon, "skipped_bets", buf)
+    neon.commit()
+    print(f"skipped: 新規{n}", flush=True)
+    return n
 
-        # bankroll: 新しい方
-        sb_b = sb.execute(
+
+def step_bankroll(sb, neon):
+    sb_b = sb.execute(
+        text(
+            "SELECT current_balance, initial_balance, updated_at FROM bankroll_state WHERE id=1"
+        )
+    ).mappings().first()
+    if not sb_b:
+        print("bankroll: SBに無し", flush=True)
+        return 0
+    sb_b = dict(sb_b)
+    nb = neon.execute(
+        text(
+            "SELECT current_balance, initial_balance, updated_at FROM bankroll_state WHERE id=1"
+        )
+    ).mappings().first()
+    if nb is None:
+        neon.execute(
             text(
-                "SELECT current_balance, initial_balance, updated_at FROM bankroll_state WHERE id=1"
-            )
-        ).mappings().first()
-        if sb_b:
-            sb_b = dict(sb_b)
-            nb = neon.execute(
-                text(
-                    "SELECT current_balance, initial_balance, updated_at FROM bankroll_state WHERE id=1"
-                )
-            ).mappings().first()
-            if nb is None:
-                neon.execute(
-                    text(
-                        "INSERT INTO bankroll_state (id, current_balance, initial_balance, updated_at) "
-                        "VALUES (1, :current_balance, :initial_balance, :updated_at)"
-                    ),
-                    sb_b,
-                )
-                print(f"  bankroll: insert {sb_b['current_balance']}", flush=True)
-            else:
-                nb = dict(nb)
-                if not nb.get("updated_at") or (
-                    sb_b.get("updated_at") and sb_b["updated_at"] > nb["updated_at"]
-                ):
-                    neon.execute(
-                        text(
-                            "UPDATE bankroll_state SET current_balance=:current_balance, "
-                            "initial_balance=:initial_balance, updated_at=:updated_at WHERE id=1"
-                        ),
-                        sb_b,
-                    )
-                    print(f"  bankroll: update {sb_b['current_balance']}", flush=True)
-                else:
-                    print("  bankroll: Neon側が新しいためスキップ", flush=True)
-            neon.commit()
+                "INSERT INTO bankroll_state (id, current_balance, initial_balance, updated_at) "
+                "VALUES (1, :current_balance, :initial_balance, :updated_at)"
+            ),
+            sb_b,
+        )
+        neon.commit()
+        print(f"bankroll: insert {sb_b['current_balance']}", flush=True)
+        return 1
+    nb = dict(nb)
+    if not nb.get("updated_at") or (
+        sb_b.get("updated_at") and sb_b["updated_at"] > nb["updated_at"]
+    ):
+        neon.execute(
+            text(
+                "UPDATE bankroll_state SET current_balance=:current_balance, "
+                "initial_balance=:initial_balance, updated_at=:updated_at WHERE id=1"
+            ),
+            sb_b,
+        )
+        neon.commit()
+        print(f"bankroll: update {sb_b['current_balance']}", flush=True)
+        return 1
+    print("bankroll: skip (Neon newer)", flush=True)
+    return 0
 
-        total = n_bank + n_race + n_ent + n_odds + n_pur + n_sk
-        print(f"[{datetime.now().isoformat()}] 完了 新規合計={total}", flush=True)
+
+def main():
+    step = (sys.argv[1] if len(sys.argv) > 1 else "all").strip().lower()
+    print(f"[{datetime.now().isoformat()}] step={step}", flush=True)
+    neon_eng, sb_eng = get_engines()
+    with sb_eng.connect() as sb, neon_eng.connect() as neon:
+        if step == "all":
+            for s in STEPS:
+                if s == "odds":
+                    # odds は繰り返し
+                    while True:
+                        n = step_odds(sb, neon)
+                        if n == 0:
+                            # check remain
+                            race_map, _ = build_race_map(sb, neon)
+                            neon_with = {
+                                r[0]
+                                for r in neon.execute(
+                                    text("SELECT DISTINCT race_id FROM odds")
+                                ).fetchall()
+                            }
+                            remain = sum(1 for _, nid in race_map.items() if nid not in neon_with)
+                            if remain == 0:
+                                break
+                        # continue loop
+                else:
+                    globals()[f"step_{s}"](sb, neon)
+        elif step in STEPS:
+            globals()[f"step_{step}"](sb, neon)
+        else:
+            print(f"未知のstep: {step} 有効: {STEPS} all")
+            sys.exit(1)
+    print(f"[{datetime.now().isoformat()}] step={step} done", flush=True)
 
 
 if __name__ == "__main__":

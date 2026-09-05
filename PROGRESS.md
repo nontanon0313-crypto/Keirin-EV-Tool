@@ -28,19 +28,22 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-05(Grok) — マージ高速化 + 同期タイムアウト30分
+最終更新: 2026-09-05(Grok) — Supabase→Neon をステップ同期に変更(502回避)
 
-### IDについて（訂正）
-- シーケンスが揃っていれば副系の新規 id は MAX(主)+1 以降で **重複しない**
-- 同期が中途半端なときだけ同じ id に別内容が載りうる
-- どちらでも拾うため external_ref マージを使う（「重複しない」が嘘だったわけではなく、両方のケースがある）
+### 原因
+Render が長時間HTTPを切る(502)。一括マージは不可。
 
 ### 修正
-- 一括INSERT・oddsは必要レースのみ
-- admin 同期タイムアウト 10分→30分
+- `step=banks|races|entries|odds|purchases|skipped|bankroll`
+- `bash scraper/run_sync_sb_to_neon_steps.sh` で順に実行
+- odds は複数回（残り0まで）
 
 ### 次
-デプロイ後に再度 sync-supabase-to-neon
+デプロイ後:
+```bash
+export ADMIN_SYNC_SECRET=keirin-sync-nontanon0313
+bash "$HOME/Keirin-EV-Tool/scraper/run_sync_sb_to_neon_steps.sh"
+```
 
 ## 2. プロジェクト概要
 

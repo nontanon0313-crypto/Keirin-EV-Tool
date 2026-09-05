@@ -1,6 +1,5 @@
 """
-管理用: Neon⇔Supabase 差分同期を HTTP から実行する。
-Render 無料枠は Shell が使えないため、Termux 等から curl で叩けるようにする。
+管理用: Neon⇔Supabase 差分/マージ同期を HTTP から実行する。
 """
 import os
 import subprocess
@@ -21,7 +20,7 @@ def _check_token(token: str) -> None:
     if not secret:
         raise HTTPException(
             status_code=503,
-            detail="ADMIN_SYNC_SECRET が未設定です。Render の Environment に追加してください",
+            detail="ADMIN_SYNC_SECRET が未設定です",
         )
     if token != secret:
         raise HTTPException(status_code=403, detail="トークンが違います")
@@ -37,30 +36,34 @@ def _require_both_db_urls() -> None:
     if not neon or not supabase:
         raise HTTPException(
             status_code=503,
-            detail="DATABASE_URL(Neon) と DATABASE_URL_FALLBACK(Supabase) の両方が必要です",
+            detail="DATABASE_URL と DATABASE_URL_FALLBACK の両方が必要です",
         )
 
 
-def _run_sync_script(script_name: str) -> dict:
+def _run_sync_script(script_name: str, args: list | None = None, timeout: int = 90) -> dict:
     root = _project_root()
     script = root / "scraper" / script_name
     if not script.is_file():
         alt = root / script_name
         script = alt if alt.is_file() else script
     if not script.is_file():
-        raise HTTPException(status_code=500, detail=f"同期スクリプトが見つかりません: {script}")
+        raise HTTPException(status_code=500, detail=f"スクリプト無し: {script}")
 
+    cmd = [sys.executable, str(script)] + (args or [])
     try:
         proc = subprocess.run(
-            [sys.executable, str(script)],
+            cmd,
             cwd=str(root),
             capture_output=True,
             text=True,
-            timeout=1800,
+            timeout=timeout,
             env=os.environ.copy(),
         )
     except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="同期がタイムアウトしました(30分)")
+        raise HTTPException(
+            status_code=504,
+            detail=f"同期がタイムアウトしました({timeout}秒). step を分けて再実行してください",
+        )
 
     out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
     if proc.returncode != 0:
@@ -68,40 +71,45 @@ def _run_sync_script(script_name: str) -> dict:
             status_code=500,
             detail={"returncode": proc.returncode, "log": out[-8000:]},
         )
-    return {"ok": True, "script": script_name, "log": out[-8000:]}
+    return {"ok": True, "script": script_name, "args": args or [], "log": out[-8000:]}
 
 
 @router.post("/sync-neon-to-supabase")
 def sync_neon_to_supabase(
-    token: str = Query(..., description="Render の ADMIN_SYNC_SECRET と同じ値"),
+    token: str = Query(..., description="ADMIN_SYNC_SECRET"),
 ):
-    """Neon(主) → Supabase(副) の差分同期。バックアップ・切替前用。"""
     _check_token(token)
     _require_both_db_urls()
-    return _run_sync_script("sync_neon_to_supabase.py")
+    return _run_sync_script("sync_neon_to_supabase.py", timeout=120)
 
 
 @router.post("/sync-supabase-to-neon")
 def sync_supabase_to_neon(
-    token: str = Query(..., description="Render の ADMIN_SYNC_SECRET と同じ値"),
+    token: str = Query(..., description="ADMIN_SYNC_SECRET"),
+    step: str = Query(
+        "races",
+        description="banks|races|entries|odds|purchases|skipped|bankroll",
+    ),
 ):
     """
-    Supabase(副) → Neon(主) の差分同期。
-    Neon制限中に fallback へ書いた分を、主系復帰後に戻すために使う。
+    1リクエスト1ステップ。Renderの502を避ける。
+    odds は複数回呼ぶ（残りレースが0になるまで）。
     """
     _check_token(token)
     _require_both_db_urls()
-    return _run_sync_script("sync_supabase_to_neon.py")
+    step = (step or "races").strip().lower()
+    allowed = {"banks", "races", "entries", "odds", "purchases", "skipped", "bankroll"}
+    if step not in allowed:
+        raise HTTPException(400, detail=f"step は {sorted(allowed)} のいずれか")
+    # odds は少し長め
+    timeout = 100 if step == "odds" else 90
+    return _run_sync_script("sync_supabase_to_neon.py", args=[step], timeout=timeout)
 
 
 @router.get("/compare-db-counts")
 def compare_db_counts(
-    token: str = Query(..., description="Render の ADMIN_SYNC_SECRET と同じ値"),
+    token: str = Query(..., description="ADMIN_SYNC_SECRET"),
 ):
-    """
-    Neon と Supabase の各テーブル COUNT / MAX(id) を並べて返す。
-    差分同期の取りこぼし有無の確認用。
-    """
     from sqlalchemy import create_engine, text
 
     _check_token(token)
@@ -123,13 +131,7 @@ def compare_db_counts(
         or os.environ.get("DATABASE_URL_SECONDARY", "")
     )
     tables = [
-        "bank_master",
-        "races",
-        "entries",
-        "odds",
-        "ev_results",
-        "purchases",
-        "skipped_bets",
+        "bank_master", "races", "entries", "odds", "ev_results", "purchases", "skipped_bets",
     ]
     neon_eng = create_engine(neon_url, pool_pre_ping=True, connect_args={"connect_timeout": 15})
     sb_eng = create_engine(sb_url, pool_pre_ping=True, connect_args={"connect_timeout": 15})
