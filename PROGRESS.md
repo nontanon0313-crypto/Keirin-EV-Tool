@@ -28,18 +28,15 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-05(Grok) — Supabase→Neon をステップ同期に変更(502回避)
+最終更新: 2026-09-05(Grok) — 大量処理は最初からステップ分割するルールを明文化
 
-### 原因
-Render が長時間HTTPを切る(502)。一括マージは不可。
+### 反省
+DB同期を一括HTTPにしたため504/502。最初から step 分割すべきだった。
 
-### 修正
-- `step=banks|races|entries|odds|purchases|skipped|bankroll`
-- `bash scraper/run_sync_sb_to_neon_steps.sh` で順に実行
-- odds は複数回（残り0まで）
+### ルール
+PROGRESS「0.1 大量・長時間処理」を必読。90秒以内・再開可能。
 
 ### 次
-デプロイ後:
 ```bash
 export ADMIN_SYNC_SECRET=keirin-sync-nontanon0313
 bash "$HOME/Keirin-EV-Tool/scraper/run_sync_sb_to_neon_steps.sh"
@@ -197,6 +194,23 @@ python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-
 - 作業の区切り・完了時には、必ずPROGRESS.mdの「1. 現在の状況」をその時点の最新状態へ更新する。
 
 ---
+
+
+## 0.1 大量・長時間処理の必須ルール（Render無料枠・厳守）
+
+**最初から分割する。一括で長時間HTTPを叩かない。**
+
+1. Render 無料のWebサービスは長時間リクエストを切る（502/504/空レスポンス）。
+   目安: **1リクエスト90秒以内**に必ず終わる設計にする。
+2. DB同期・全件replay・全表スキャン・大批量インポートは必ず次のいずれかにする。
+   - **ステップ分割**（step=races / entries / odds …）
+   - **件数制限**（limit + after_id / offset で続きから再開）
+   - **クライアント側ループ**（シェルが短リクエストを繰り返す）
+3. 「動くから一発」は禁止。タイムアウト後に分割するのは手戻りなので、
+   **新規の管理API・バッチは設計時点で分割済み**にする。
+4. ユーザー向けコマンドも「1本で全部」より、
+   **途中再開可能なスクリプト**（続きから / 残り0まで）を標準にする。
+
 
 ## 5. 運用ルール・やってはいけないこと
 
