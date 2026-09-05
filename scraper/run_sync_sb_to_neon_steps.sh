@@ -29,10 +29,11 @@ for i in range(5):
 }
 
 # 続き専用: purchases / skipped を last_id 進めながら完了まで
+# 第2引数で開始after_idを指定すれば途中から再開できる(同期済み分はスキップ)
 run_chunked() {
   local step="$1"
-  local after=0
-  for i in $(seq 1 80); do
+  local after="${2:-0}"
+  for i in $(seq 1 400); do
     echo "=== $step round $i after_id=$after ==="
     out=$(python3 -c "
 import requests, re
@@ -59,14 +60,14 @@ print(r.text[-2000:] if r.text else '')
 START_FROM="${1:-all}"
 
 if [ "$START_FROM" = "skipped" ]; then
-  run_chunked skipped
+  run_chunked skipped "${2:-0}"
   run_step bankroll
   echo "=== DONE from skipped ==="
   exit 0
 fi
 if [ "$START_FROM" = "purchases" ]; then
-  run_chunked purchases
-  run_chunked skipped
+  run_chunked purchases "${2:-0}"
+  run_chunked skipped 0
   run_step bankroll
   echo "=== DONE from purchases ==="
   exit 0
