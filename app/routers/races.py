@@ -821,9 +821,18 @@ def replay_settled_targets(
     since: str = None,
     limit: int = 5000,
     after_race_id: int = None,
+    exclude_already_replayed: bool = True,
     db: Session = Depends(get_db),
 ):
-    """再投票対象のrace_id一覧（進捗付きクライアント用）。"""
+    """
+    再投票対象のrace_id一覧（進捗付きクライアント用）。
+
+    exclude_already_replayed=True(既定): そのレースに現行基準
+    (purchases.CALIBRATION_SWITCH_AT)以降のPurchase/SkippedBetが既にあれば
+    「現行ロジックで再投票済み」とみなして自動的に除外する。
+    これにより、after_race_idを手動で覚えて指定しなくても、同じコマンドを
+    繰り返し実行するだけで未処理の旧レースだけが順番に対象になる。
+    """
     from . import purchases as purchases_router
     from sqlalchemy import or_
 
@@ -861,11 +870,26 @@ def replay_settled_targets(
     if after_race_id is not None:
         q = q.filter(models.Race.id > after_race_id)
 
+    if exclude_already_replayed:
+        switch_at = purchases_router.CALIBRATION_SWITCH_AT
+        already_purchased = (
+            db.query(models.Purchase.id)
+            .filter(models.Purchase.race_id == models.Race.id)
+            .filter(models.Purchase.purchased_at >= switch_at)
+        )
+        already_skipped = (
+            db.query(models.SkippedBet.id)
+            .filter(models.SkippedBet.race_id == models.Race.id)
+            .filter(models.SkippedBet.created_at >= switch_at)
+        )
+        q = q.filter(~already_purchased.exists()).filter(~already_skipped.exists())
+
     ids = [row[0] for row in q.limit(limit).all()]
 
     return {
         "since": since_out,
         "after_race_id": after_race_id,
+        "exclude_already_replayed": exclude_already_replayed,
         "total": len(ids),
         "race_ids": ids,
     }

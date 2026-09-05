@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# 使い方: bash scraper/run_replay_continue.sh [件数] [間隔秒] [証拠金] [続きのafter_race_id]
-# 旧データを少しずつ再投票する場合、最後の出力に出る
-# 「続きから: --after-race-id XXXX」の数字を第4引数に渡せば途中から再開できる。
+# 使い方: bash scraper/run_replay_continue.sh [件数] [間隔秒] [証拠金] [after_race_id(通常不要)]
+# 旧データの再投票は「既に現行基準で再投票済みのレース」を自動で除外するので、
+# 同じコマンドを繰り返し実行するだけで続きから進む(after_race_idの手動指定は不要)。
 set -e
 API="${API_BASE:-https://keirin-ev-tool.onrender.com}"
 LIMIT="${1:-50}"
