@@ -1,0 +1,456 @@
+"""
+oddspark.comスクレイパー(scraper/keirin_oddspark_scraper.py)が出力したJSONを
+Race/Entry/Oddsテーブルに取り込むためのルーター。
+
+のんの要望「予想→結果記録→検証の流れができるようにデータ登録してほしい」を受けて追加。
+
+設計方針:
+- 同一レースの再取り込みはexternal_ref(例:"oddspark:44:20260818:12")で冪等にする
+  (同じレースを二重登録しない)
+- 出走表(entry)・結果(result)は取れている分をそのまま取り込む
+  (賭け金に直結しないため、多少の欠けがあっても価値がある)
+- オッズ(odds)は券種ごとにis_complete=Trueのものだけ取り込む
+  (is_complete=通信エラーなく取得できたかを表す。理論上の組み合わせ数との
+  一致は求めない。人気のない組み合わせに1票も入らずオッズが存在しない
+  ことは正常であり、欠損ではないと判明したため)
+  (欠損・誤った組み合わせのオッズがEV計算に混入するとベット判断を誤らせるため、
+  不完全なデータは安全側に倒して取り込まない)
+- jo_code(場コード)がJO_CODE_VERIFIED_BLOCKSに無い場合は取り込みを拒否せず、
+  レスポンスに警告を含めて手動確認を促す(未検証コードを黙って信用しない)
+"""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from datetime import datetime
+
+from ..database import get_db
+from .. import models
+from ..keirin_data import venue_name_from_jo_code
+
+router = APIRouter(prefix="/scraper-import", tags=["scraper-import"])
+
+# oddspark表記→アプリ内表記の脚質マッピング(不明な値はそのまま素通しする)
+LEG_STYLE_MAP = {"逃": "逃げ", "追": "追込", "両": "両方"}
+
+# 過去(修正前)のインポートで文字化けしたまま保存されてしまった脚質データの復旧用。
+# 原因: 本来「逃げ/追込/両方」という文字列がEntryテーブルに保存されるべきところ、
+# 当時のコードの文字コード不整合により、UTF-8のバイト列がCyrillic系の文字コード
+# (cp1251)として誤って解釈された状態で保存されてしまっていた
+# (のんの実機運用で発覚。現在のコードは正常)。
+MOJIBAKE_LEG_STYLE_FIX = {
+    "逃".encode("utf-8").decode("cp1251"): "逃げ",
+    "追".encode("utf-8").decode("cp1251"): "追込",
+    "両".encode("utf-8").decode("cp1251"): "両方",
+    # ドキュメントで確認された、上記とは微妙に異なる化け方のパターンも念のため含める
+    "йҖғ": "逃げ",
+    "иҝҪ": "追込",
+    "дёЎ": "両方",
+}
+
+
+@router.post("/fix-leg-style-mojibake")
+def fix_leg_style_mojibake(db: Session = Depends(get_db)):
+    """
+    過去に文字化けした状態で保存されてしまったEntry.leg_styleを復旧する
+    (のんの指摘により追加。1回実行すれば十分)。
+    """
+    entries = (
+        db.query(models.Entry)
+        .filter(models.Entry.leg_style.in_(list(MOJIBAKE_LEG_STYLE_FIX.keys())))
+        .all()
+    )
+    fixed = 0
+    for e in entries:
+        correct = MOJIBAKE_LEG_STYLE_FIX.get(e.leg_style)
+        if correct:
+            e.leg_style = correct
+            fixed += 1
+    db.commit()
+    return {"fixed_count": fixed}
+
+
+def _to_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_odds_float(v):
+    """
+    オッズ値を数値に変換する。ワイドは「8.7-10.1」のような範囲表記のことがあり、
+    その場合は下限値を使う(実際の払い戻しがどちらに転ぶか分からないため、
+    期待値を過大評価しない安全側の選択。のんの実機検証を受けて追加)。
+    """
+    if v is None:
+        return None
+    s = str(v)
+    if "-" in s:
+        s = s.split("-")[0]
+    return _to_float(s)
+
+
+def _season_from_date(dt):
+    """開催日から季節を自動算出する(3-5月=春、6-8月=夏、9-11月=秋、12-2月=冬)。"""
+    if dt is None:
+        return None
+    m = dt.month
+    if m in (3, 4, 5):
+        return "春"
+    if m in (6, 7, 8):
+        return "夏"
+    if m in (9, 10, 11):
+        return "秋"
+    return "冬"
+
+
+def _normalize_race_stage(raw):
+    """
+    スクレイパーが取得した「Ｓ級準決勝」等の全角表記を、既存データの表記
+    (半角)に揃える。空なら None のまま返す
+    (のんの指摘=バンク・グレード等の未設定を受けて追加)。
+    """
+    if not raw:
+        return None
+    return (
+        raw.replace("Ｓ", "S").replace("Ａ", "A").replace("Ｌ", "L")
+        .replace("Ⅰ", "1").replace("Ⅱ", "2").replace("Ⅲ", "3")
+    )
+
+
+@router.post("/race")
+def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
+    jo_code = str(payload.get("jo_code", ""))
+    kaisai_bi = str(payload.get("kaisai_bi", ""))
+    race_no = payload.get("race_no")
+    if not (jo_code and kaisai_bi and race_no):
+        raise HTTPException(status_code=400, detail="jo_code/kaisai_bi/race_noが不足しています")
+
+    warnings = []
+    venue_info = venue_name_from_jo_code(jo_code)
+    if venue_info is None:
+        # 未知のjo_codeでもデータ収集自体は止めない(仮の会場名で登録を続ける)。
+        # 以前はここで即400エラーにしていたため、未知の場コードが1つ混ざる
+        # だけで、その日のバッチ全体(同じ開催の他レースも含む)が失敗していた
+        # (のんの実機運用で判明・修正)。正しい会場名が分かったら
+        # app/keirin_data.pyのJO_CODE_TO_VENUEに追加し、該当レースを
+        # 再予想(reset-for-reanalysis)すれば会場名も直る。
+        venue_name, verified = f"不明会場(場コード{jo_code})", False
+        warnings.append(
+            f"jo_code={jo_code}は未知の場コードのため仮の会場名で登録しました。"
+            "app/keirin_data.pyのJO_CODE_TO_VENUEに正しい会場名を追加してください"
+        )
+    else:
+        venue_name, verified = venue_info
+        if not verified:
+            warnings.append(f"jo_code={jo_code}({venue_name})は場コード対応が未検証(推定)です。念のため会場名をご確認ください")
+
+    external_ref = f"oddspark:{jo_code}:{kaisai_bi}:{race_no}"
+    race = db.query(models.Race).filter(models.Race.external_ref == external_ref).first()
+
+    entry = payload.get("entry") or {}
+    riders = entry.get("riders") or []
+    lines = entry.get("lines") or entry.get("lines_data") or None
+    if race is None and not riders:
+        # そのjo/rnに出走選手が1人もいない(=レース自体が存在しない枠)場合は、
+        # 空のレコードを作らずにスキップする。
+        #
+        # 以前は「出走表・オッズ・結果が全て空の場合のみ」スキップする条件にしていたが、
+        # 実際にはriders=0のレースでもオッズ取得処理自体は動作し、券種ごとの空の枠
+        # (matrix=0件)がpayloadに残るため、この条件は常にFalseになり実質機能して
+        # いなかった。riders(出走選手)の有無だけで判定するよう修正した
+        # (のんの実機運用で判明。「レースが無い場合は予想と検証の元になるデータに
+        # 含まない」という明確な要望に基づく)。
+        return {
+            "race_id": None,
+            "external_ref": external_ref,
+            "venue_name": venue_name,
+            "skipped": True,
+            "reason": "出走選手がいない(レースが存在しない枠)ため、レースを作成せずスキップしました",
+        }
+
+    race_date = None
+    try:
+        race_date = datetime.strptime(kaisai_bi, "%Y%m%d")
+    except ValueError:
+        pass
+
+    season = _season_from_date(race_date)
+    bank = db.query(models.BankMaster).filter(models.BankMaster.name == venue_name).first()
+    if bank is None:
+        warnings.append(f"バンクマスタに「{venue_name}」が見つからず、バンク特性(先行有利度等)は未設定のままです")
+    grade = entry.get("grade")
+    race_stage = _normalize_race_stage(entry.get("race_name"))
+    event_title = entry.get("event_title") or entry.get("race_name")
+    post_time = None
+    post_time_iso = entry.get("post_time_iso")
+    if post_time_iso:
+        try:
+            post_time = datetime.fromisoformat(post_time_iso).replace(tzinfo=None)
+        except ValueError:
+            warnings.append(f"発走時刻(post_time_iso)の形式が想定外でした: {post_time_iso}")
+
+    if race is None:
+        race = models.Race(
+            venue_name=venue_name,
+            race_number=int(race_no),
+            event_title=event_title,
+            race_date=race_date,
+            post_time=post_time,
+            source_app="oddspark_scraper",
+            external_ref=external_ref,
+            season=season,
+            bank_id=bank.id if bank else None,
+            grade=grade,
+            race_stage=race_stage,
+            lines_data=lines if lines else None,
+        )
+        db.add(race)
+        db.flush()
+    else:
+        # 再取り込み時は出走表由来の情報だけ更新する(手動で編集した他の項目は上書きしない)
+        # race_date / external_ref 由来の日付はDB切替や初回欠落時のため常に補完する
+        if race_date is not None:
+            race.race_date = race_date
+        if event_title:
+            race.event_title = event_title
+        if post_time and not race.post_time:
+            race.post_time = post_time
+        if season:
+            race.season = season
+        if bank and not race.bank_id:
+            race.bank_id = bank.id
+        if grade and not race.grade:
+            race.grade = grade
+        if race_stage and not race.race_stage:
+            race.race_stage = race_stage
+        if lines:
+            race.lines_data = lines
+
+    # --- 出走表(entry)の取り込み ---
+    entries_created = 0
+    entries_updated = 0
+    if riders:
+        existing_entries = {e.car_number: e for e in db.query(models.Entry).filter(models.Entry.race_id == race.id).all()}
+        for r in riders:
+            car_no = _to_int(r.get("車番"))
+            if car_no is None or not r.get("選手名"):
+                continue
+            leg_style_raw = r.get("脚質") or ""
+            leg_style = LEG_STYLE_MAP.get(leg_style_raw, leg_style_raw or None)
+            finish = r.get("直近着順") or {}
+            if not isinstance(finish, dict):
+                finish = {}
+            fields = dict(
+                player_name=r.get("選手名"),
+                region=r.get("地区") or None,
+                player_class=r.get("級班") or None,
+                age=_to_int(r.get("年齢")),
+                period=r.get("期") or None,
+                race_score=_to_float(r.get("競走得点")),
+                leg_style=leg_style,
+                waku_number=_to_int(r.get("枠番")),
+                s_count=_to_int(r.get("S")),
+                h_count=_to_int(r.get("H")),
+                b_count=_to_int(r.get("B")),
+                kimarite_nige=_to_int(r.get("逃")),
+                kimarite_makuri=_to_int(r.get("捲")),
+                kimarite_sashi=_to_int(r.get("差")),
+                kimarite_mark=_to_int(r.get("マ")),
+                finish_1st=_to_int(finish.get("1着")),
+                finish_2nd=_to_int(finish.get("2着")),
+                finish_3rd=_to_int(finish.get("3着")),
+                app_win_rate=_to_float(r.get("勝率")),
+                app_2nd_rate=_to_float(r.get("2連対率")),
+                app_3rd_rate=_to_float(r.get("3連対率")),
+                gear_ratio=_to_float(r.get("ギア倍数")),
+            )
+            existing = existing_entries.get(car_no)
+            if existing:
+                for k, v in fields.items():
+                    if v is not None:
+                        setattr(existing, k, v)
+                entries_updated += 1
+            else:
+                db.add(models.Entry(
+                    race_id=race.id,
+                    car_number=car_no,
+                    **{k: v for k, v in fields.items()},
+                ))
+                entries_created += 1
+    else:
+        warnings.append("出走表データが空でした(スクレイパー側でentry_errorが出ていないか確認してください)")
+
+    # --- オッズ(odds)の取り込み: 通信エラーなく取得できた券種のみ ---
+    # (件数が理論値より少ないのは、票が入らなかった組み合わせがあるだけで正常)
+    odds_created = 0
+    odds_skipped_bet_types = []
+    odds_payload = payload.get("odds") or {}
+    if odds_payload:
+        # 同一レースの既存オッズは一旦洗い替える(再取り込み時に古い不完全データを残さないため)
+        db.query(models.Odds).filter(models.Odds.race_id == race.id).delete()
+        for bet_type, info in odds_payload.items():
+            if not info.get("is_complete"):
+                odds_skipped_bet_types.append({
+                    "bet_type": bet_type,
+                    "got": info.get("matrix_count"),
+                    "expected": info.get("expected_count"),
+                })
+                continue
+            for item in info.get("matrix", []):
+                odds_v = _to_odds_float(item.get("オッズ"))
+                if odds_v is None:
+                    continue
+                if bet_type == "3連単" or bet_type == "3連複":
+                    combo = f"{item['1着']}-{item['2着']}-{item['3着']}"
+                else:
+                    combo = f"{item['1着']}-{item['2着']}"
+                db.add(models.Odds(
+                    race_id=race.id,
+                    bet_type=bet_type,
+                    combination=combo,
+                    odds_value=odds_v,
+                ))
+                odds_created += 1
+        if odds_skipped_bet_types:
+            warnings.append(f"以下の券種は通信エラーのため取り込みませんでした: {odds_skipped_bet_types}")
+
+    # --- 結果(result)の取り込み ---
+    result_payload = payload.get("result") or {}
+    race_results = result_payload.get("results") or []
+    if race_results:
+        by_place = {r["着順"]: r["車番"] for r in race_results}
+        try:
+            parts = [by_place[str(p)] for p in (1, 2, 3) if str(p) in by_place]
+            if len(parts) == 3:
+                race.actual_result = "-".join(parts)
+        except Exception:
+            warnings.append("結果の着順データの形式が想定外でした。手動でご確認ください")
+    else:
+        warnings.append("結果データが空でした(レース未確定、またはresult_errorが出ていないか確認してください)")
+
+    db.commit()
+    db.refresh(race)
+
+    return {
+        "race_id": race.id,
+        "external_ref": external_ref,
+        "venue_name": venue_name,
+        "venue_code_verified": verified,
+        "entries_created": entries_created,
+        "entries_updated": entries_updated,
+        "odds_created": odds_created,
+        "odds_skipped_bet_types": odds_skipped_bet_types,
+        "actual_result_recorded": race.actual_result,
+        "warnings": warnings,
+    }
+
+
+@router.post("/refresh-odds/{race_id}")
+def refresh_odds_now(race_id: int, db: Session = Depends(get_db)):
+    """
+    指定レースのオッズだけをその場でoddspark.comから取り直す(出走表・結果は触らない)。
+    投票直前に「このレースのオッズだけ今すぐ更新したい」というのんの要望を受けて追加。
+
+    従来のバッチ取り込み(Termux側スクレイパーが取得→/scraper-import/raceに送信)とは別経路で、
+    このエンドポイント自身がoddspark.comへ直接アクセスする。Termux側のスクレイパー
+    (scraper/keirin_oddspark_scraper.py)の券種別オッズ取得関数をそのまま流用し、
+    実装を二重に持たないようにしている。
+    """
+    race = db.get(models.Race, race_id)
+    if race is None:
+        raise HTTPException(status_code=404, detail="レースが見つかりません")
+
+    ref_parts = (race.external_ref or "").split(":")
+    if len(ref_parts) != 4 or ref_parts[0] != "oddspark":
+        raise HTTPException(status_code=400, detail="このレースはoddspark由来のデータではないため、その場でのオッズ再取得はできません")
+    _, jo_code, kaisai_bi, race_no_str = ref_parts
+    try:
+        race_no = int(race_no_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"external_refのレース番号が不正です: {race_no_str}")
+
+    # 遅延importにしてある(起動時の依存読み込みを増やさないため。Render無料プランのメモリ対策)
+    from scraper.keirin_oddspark_scraper import parse_odds_simple, parse_odds_axis_based, BET_TYPES
+
+    n_riders = db.query(models.Entry).filter(models.Entry.race_id == race.id).count() or None
+
+    odds_payload = {}
+    for code in (5, 6, 7):  # 2車複・2車単・ワイド(1ページ完結)
+        name = BET_TYPES[code]
+        try:
+            odds_payload[name] = parse_odds_simple(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
+        except Exception as e:
+            odds_payload[name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
+    for code in (8, 9):  # 3連複・3連単(軸車番ごと)
+        name = BET_TYPES[code]
+        try:
+            odds_payload[name] = parse_odds_axis_based(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
+        except Exception as e:
+            odds_payload[name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
+
+    odds_created = 0
+    odds_skipped_bet_types = []
+    db.query(models.Odds).filter(models.Odds.race_id == race.id).delete()
+    for bet_type, info in odds_payload.items():
+        if not info.get("is_complete"):
+            odds_skipped_bet_types.append({
+                "bet_type": bet_type,
+                "got": info.get("matrix_count"),
+                "expected": info.get("expected_count"),
+            })
+            continue
+        for item in info.get("matrix", []):
+            odds_v = _to_odds_float(item.get("オッズ"))
+            if odds_v is None:
+                continue
+            if bet_type in ("3連単", "3連複"):
+                combo = f"{item['1着']}-{item['2着']}-{item['3着']}"
+            else:
+                combo = f"{item['1着']}-{item['2着']}"
+            db.add(models.Odds(
+                race_id=race.id,
+                bet_type=bet_type,
+                combination=combo,
+                odds_value=odds_v,
+            ))
+            odds_created += 1
+
+    db.commit()
+
+    return {
+        "race_id": race.id,
+        "odds_created": odds_created,
+        "odds_skipped_bet_types": odds_skipped_bet_types,
+        "refreshed_at": datetime.now().isoformat(),
+    }
+
+
+@router.post("/batch")
+def import_scraped_batch(payload: dict, db: Session = Depends(get_db)):
+    """
+    複数レース分をまとめて取り込む。payload = {"races": [race_json, race_json, ...]}
+    1レースの取り込み失敗が他のレースを止めないよう、レースごとにtry/exceptする。
+    """
+    races_payload = payload.get("races") or []
+    results = []
+    for race_json in races_payload:
+        try:
+            result = import_scraped_race(race_json, db)
+            results.append({"ok": True, **result})
+        except HTTPException as e:
+            results.append({"ok": False, "error": e.detail, "jo_code": race_json.get("jo_code"), "kaisai_bi": race_json.get("kaisai_bi"), "race_no": race_json.get("race_no")})
+        except Exception as e:
+            results.append({"ok": False, "error": str(e), "jo_code": race_json.get("jo_code"), "kaisai_bi": race_json.get("kaisai_bi"), "race_no": race_json.get("race_no")})
+    return {
+        "total": len(races_payload),
+        "succeeded": sum(1 for r in results if r["ok"]),
+        "failed": sum(1 for r in results if not r["ok"]),
+        "results": results,
+    }

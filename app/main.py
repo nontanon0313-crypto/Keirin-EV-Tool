@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
-from .routers import analyze, races, ev, purchases, simulation, bank, bankroll, scraper_import, admin_sync, purchase_diagnostics, revenue
+from .routers import analyze, races, ev, purchases, simulation, bank, bankroll, scraper_import, admin_sync, purchase_diagnostics
 
 app = FastAPI(title="競輪 期待値検証ツール API")
 
@@ -25,7 +25,6 @@ app.include_router(purchase_diagnostics.router)
 app.include_router(simulation.router)
 app.include_router(scraper_import.router)
 app.include_router(admin_sync.router)
-app.include_router(revenue.router)
 
 
 @app.on_event("startup")
