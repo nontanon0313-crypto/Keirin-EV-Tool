@@ -252,7 +252,7 @@ async function fetchTodayRaces(force) {
   const data = await res.json();
   const races = (data || []).map(r => ({
     id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
-    entry_count: r.riders_count, odds_count: null,
+    entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
     label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}${r.actual_result ? " ・結果確定済み" : ""}`,
   }));
   raceListCache.today = { at: Date.now(), races };
@@ -266,7 +266,7 @@ async function fetchUpcomingRaces(force) {
   const data = await res.json();
   const races = (data || []).map(r => ({
     id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
-    entry_count: r.riders_count, odds_count: null,
+    entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
     label_extra: `あと${r.mins_to_post}分(${r.post_time}) ${_planLabel(r)}`,
   }));
   raceListCache.upcoming = { at: Date.now(), races };
@@ -297,8 +297,10 @@ async function loadRaces(selectRaceId, options) {
     if (!races.length) {
       select.innerHTML = `<option value="">(該当レースなし)</option>`;
     } else {
+      // 投票プランがあるレースは選択肢自体に色を付けて一目で分かるようにする
+      // (のんの指摘により追加。テキストだけだと目立たず見落としやすいため)
       select.innerHTML = races.map(r =>
-        `<option value="${r.id}">${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R${r.label_extra ? " " + r.label_extra : ` (選手${r.entry_count}/オッズ${r.odds_count})`}</option>`
+        `<option value="${r.id}"${r.has_plan ? ' style="background-color:#052e1b;color:#4ade80;font-weight:bold;"' : ""}>${r.has_plan ? "🟢 " : ""}${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R${r.label_extra ? " " + r.label_extra : ` (選手${r.entry_count}/オッズ${r.odds_count})`}</option>`
       ).join("");
     }
     const target = selectRaceId ?? previousValue;
@@ -384,13 +386,14 @@ async function loadFavoritesList(force) {
     html += `<table><tr><th>会場</th><th>R</th><th>発走</th><th>車番</th><th>選手</th><th>勝率</th><th>投票プラン</th></tr>`;
     for (const row of data) {
       const rid = row.race_id;
-      const planLabel = row.has_plan ? `あり(${row.num_bets}点)` : "なし";
-      const planColor = row.has_plan ? "#22c55e" : "#94a3b8";
-      html += `<tr data-favorite-race-id="${rid}" title="タップしてこのレースを選択">` +
+      const planLabel = row.has_plan ? `🟢あり(${row.num_bets}点)` : "なし";
+      const planColor = row.has_plan ? "#4ade80" : "#94a3b8";
+      const rowBg = row.has_plan ? "background-color:#052e1b;" : "";
+      html += `<tr data-favorite-race-id="${rid}" title="タップしてこのレースを選択" style="${rowBg}">` +
         `<td>${row.venue_name}</td><td>${row.race_number}R</td>` +
         `<td>${row.post_time || "-"}</td><td>${row.car_number}</td>` +
         `<td>${row.player_name || "-"}</td><td>${row.win_prob_pct != null ? row.win_prob_pct + "%" : "-"}</td>` +
-        `<td style="color:${planColor};">${planLabel}</td></tr>`;
+        `<td style="color:${planColor};font-weight:${row.has_plan ? "bold" : "normal"};">${planLabel}</td></tr>`;
     }
     html += `</table>`;
     box.innerHTML = html;
