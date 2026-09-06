@@ -117,12 +117,13 @@
 <div id="tab-revenue" class="tab-content">
   <section class="card">
     <h2>📈 収益(実資金)</h2>
-    <p class="note">検証タブ・Purchaseとは別データです。投票プランをここに記録し、実投票後に投資額・的中・払戻を手入力します。未投票・プラン外の買い目も管理できます。</p>
+    <p class="note">検証タブ・Purchaseとは別データです。プラン通りに買う前提なら「収益タブへ記録」だけで投資額まで登録されます。的中した行だけ「的中」で払戻を書き、残りは「未確定を外れに」で一括処理してください。</p>
     <label>開始資産(円)</label>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
       <input type="number" id="revenueStartAssetsInput" placeholder="例: 100000" style="flex:1;min-width:120px;">
       <button id="revenueSaveStartBtn" style="width:auto;background:#0ea5e9;">保存</button>
       <button id="revenueRefreshBtn" style="width:auto;background:#475569;">再読込</button>
+      <button id="revenueMarkLoseBtn" style="width:auto;background:#f59e0b;">未確定を外れに</button>
     </div>
     <div id="revenueStatsBox" class="result-box" style="margin-top:10px;">集計を読み込み中...</div>
   </section>
@@ -141,7 +142,7 @@
 
   <section class="card">
     <h2>履歴一覧・実績入力</h2>
-    <p class="note">vote_status: planned=未反映 / voted=実投票 / not_voted=未投票。的中は win / lose / pending。</p>
+    <p class="note">通常は「的中」ボタン(払戻入力)と「未確定を外れに」だけで足ります。詳細編集が必要なときだけ状態・実額を手で変えて保存してください。</p>
     <div id="revenueListBox" class="result-box"></div>
   </section>
 

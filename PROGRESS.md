@@ -28,21 +28,18 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-07(Grok) — 収益タブ(実資金)追加。Purchase/検証とは完全分離
+最終更新: 2026-09-07(Grok) — 収益タブの入力を省力化(的中だけ手入力)
 
 ### 直近の作業（2026-09-07）
-- **収益タブを新規追加。** 実資金の投票実績を、既存のPurchase/SkippedBet/検証集計と完全に分離して管理する。
-- 新規モデル: `LiveBet`(想定+実績)、`RevenueSettings`(開始資産)
-- 新規API: `/revenue/from-plan` `/revenue/manual` `/revenue/{id}` `/revenue/list` `/revenue/stats` `/revenue/equity-curve` `/revenue/settings`
-- フロント: タブ「収益」、投票プラン後の「収益タブへ記録(実資金)」ボタン、想定vs実績表、累計投資額×累積損益グラフ(canvas)、履歴の手入力・未投票・プラン外追加
-- 既存の「まとめて購入記録」(検証用Purchase)は残し、ラベルを「検証用」に明示。検証ロジック・race-plan・Purchase集計は変更していない
-- `create_all`で`live_bets`/`revenue_settings`が起動時に作成される(既存ALTERマイグレーション方式と両立)
-- 構文チェック: `python3 -m py_compile app/models.py app/schemas.py app/routers/revenue.py app/main.py` 成功
+- **収益タブ省力化:** プラン通り購入が前提のため、`/revenue/from-plan` は既定で `mark_as_voted=true`(実額=予定額・voted)で登録。
+- 的中は行の「的中」ボタンで払戻だけ入力(`/revenue/{id}/win`)。
+- 残りpendingは「未確定を外れに」で一括 lose(`/revenue/mark-pending-lose`)。
+- Purchase/検証とは引き続き完全分離。投票ロジック変更なし。
+- 本番 `/health`・`/revenue/stats` 疎通済み(空データOK)。
 
 ### 次にやること(ユーザー側)
-1. 下記zip反映→commit→push→Renderデプロイ待ち
-2. デプロイ後: 投票タブでプラン作成→「収益タブへ記録」→収益タブで実績入力→集計・グラフ確認
-3. (任意) 開始資産を収益タブで設定
+1. 本zip反映→commit→push→Renderデプロイ
+2. 運用: プラン作成→収益タブへ記録→(当たったら的中+払戻)→未確定を外れに
 
 ### 注意
 - Purchaseへの自動混入はしない設計。検証タブの集計に実資金は入らない

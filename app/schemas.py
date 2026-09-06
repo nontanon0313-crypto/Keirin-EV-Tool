@@ -125,6 +125,14 @@ class LiveBetPlanItem(BaseModel):
 class LiveBetFromPlanCreate(BaseModel):
     race_id: int
     items: List[LiveBetPlanItem]
+    # True(既定): プラン通り投票前提で実額=予定額・voted登録
+    mark_as_voted: bool = True
+
+
+class LiveBetWinUpdate(BaseModel):
+    """的中時だけ払戻を書く。実額未設定なら planned_stake を採用。"""
+    actual_payout: float
+    actual_stake: Optional[float] = None
 
 
 class LiveBetManualCreate(BaseModel):

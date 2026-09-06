@@ -731,7 +731,7 @@ document.getElementById("thresholdTableBtn").addEventListener("click", async () 
 
 async function recordRacePlanToRevenue() {
   if (!lastRacePlan || !lastRacePlan.items.length) return;
-  if (!confirm(`${lastRacePlan.items.length}点を収益タブ(実資金)へ記録します。\n検証用のPurchaseには書き込みません。よろしいですか？`)) return;
+  if (!confirm(`${lastRacePlan.items.length}点を収益タブへ記録します。\nプラン通り投票前提で実額=予定額で登録します。\n的中時だけ「的中」で払戻入力、残りは「未確定を外れに」で一括OK。`)) return;
   const items = lastRacePlan.items
     .filter((it) => it.stake && it.stake > 0)
     .map((it) => {
@@ -753,11 +753,11 @@ async function recordRacePlanToRevenue() {
     const res = await fetch(apiUrl("/revenue/from-plan"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ race_id: lastRacePlan.raceId, items }),
+      body: JSON.stringify({ race_id: lastRacePlan.raceId, items, mark_as_voted: true }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    alert(`収益タブへ${data.created_count}件を記録しました。実績は「収益」タブで手入力してください。`);
+    alert(`収益タブへ${data.created_count}件を記録(投票済み・実額=予定額)。\n的中時だけ「的中」ボタンで払戻を入力してください。`);
     if (typeof loadRevenueTab === "function") loadRevenueTab();
   } catch (e) {
     alert("エラー: " + e.message);
@@ -2027,6 +2027,7 @@ async function loadRevenueList() {
         </td>` +
         `<td><input type="number" class="rev-payout" value="${it.actual_payout != null ? it.actual_payout : 0}" step="10" style="width:80px;"></td>` +
         `<td>
+          <button class="rev-win-btn" data-id="${it.id}" style="width:auto;padding:4px 8px;font-size:12px;background:#22c55e;">的中</button>
           <button class="rev-save-btn" data-id="${it.id}" style="width:auto;padding:4px 8px;font-size:12px;background:#0ea5e9;">保存</button>
           <button class="rev-del-btn" data-id="${it.id}" style="width:auto;padding:4px 8px;font-size:12px;background:#64748b;">削除</button>
         </td>` +
@@ -2067,6 +2068,29 @@ async function loadRevenueList() {
           await loadRevenueTab();
         } catch (e) {
           alert("削除エラー: " + e.message);
+        }
+      });
+    });
+    box.querySelectorAll(".rev-win-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const payoutStr = prompt("的中の払戻額(円)を入力");
+        if (payoutStr == null || payoutStr === "") return;
+        const payout = parseFloat(payoutStr);
+        if (Number.isNaN(payout) || payout < 0) {
+          alert("払戻額が不正です");
+          return;
+        }
+        try {
+          const res = await fetch(apiUrl(`/revenue/${btn.dataset.id}/win`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ actual_payout: payout }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(JSON.stringify(data));
+          await loadRevenueTab();
+        } catch (e) {
+          alert("的中登録エラー: " + e.message);
         }
       });
     });
@@ -2169,6 +2193,21 @@ if (revenueSaveStartBtn) {
 const revenueRefreshBtn = document.getElementById("revenueRefreshBtn");
 if (revenueRefreshBtn) {
   revenueRefreshBtn.addEventListener("click", () => loadRevenueTab());
+}
+const revenueMarkLoseBtn = document.getElementById("revenueMarkLoseBtn");
+if (revenueMarkLoseBtn) {
+  revenueMarkLoseBtn.addEventListener("click", async () => {
+    if (!confirm("未確定(pending)の投票済みをすべて外れ(払戻0)にします。的中分は先に「的中」登録してください。")) return;
+    try {
+      const res = await fetch(apiUrl("/revenue/mark-pending-lose"), { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(JSON.stringify(data));
+      alert(`${data.updated_count}件を外れにしました`);
+      await loadRevenueTab();
+    } catch (e) {
+      alert("エラー: " + e.message);
+    }
+  });
 }
 const revManualAddBtn = document.getElementById("revManualAddBtn");
 if (revManualAddBtn) {

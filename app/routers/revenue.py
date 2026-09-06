@@ -73,11 +73,16 @@ def _row_to_dict(row: models.LiveBet) -> dict:
 
 @router.post("/from-plan")
 def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Depends(get_db)):
-    """投票プランの内容を収益管理へ記録する(想定値のみ。実績は後から手入力)。"""
+    """
+    投票プランを収益管理へ記録。
+    mark_as_voted=True(既定): プラン通り購入前提で実額=予定額・voted。
+    的中時だけ払戻を書き、残りは mark-pending-lose で一括 lose。
+    """
     if not payload.items:
         raise HTTPException(status_code=400, detail="items is empty")
     meta = _race_meta(db, payload.race_id)
     created = []
+    mark_voted = bool(payload.mark_as_voted)
     for it in payload.items:
         planned_exp = it.planned_expected_profit
         if planned_exp is None and it.planned_stake and it.planned_win_prob is not None and it.planned_odds is not None:
@@ -94,8 +99,8 @@ def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Dep
             planned_odds=it.planned_odds,
             planned_ev_pct=it.planned_ev_pct,
             planned_expected_profit=planned_exp,
-            vote_status="planned",
-            actual_stake=None,
+            vote_status="voted" if mark_voted else "planned",
+            actual_stake=(it.planned_stake if mark_voted else None),
             actual_result="pending",
             actual_payout=0.0,
             source="from_plan",
@@ -108,8 +113,53 @@ def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Dep
     return {
         "created_count": len(created),
         "race_id": payload.race_id,
+        "mark_as_voted": mark_voted,
         "items": [_row_to_dict(r) for r in created],
     }
+
+
+@router.post("/mark-pending-lose")
+def mark_pending_lose(
+    race_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    """pending の投票済み行を一括 lose(払戻0)。的中入力後の残り処理用。"""
+    q = db.query(models.LiveBet).filter(
+        models.LiveBet.vote_status == "voted",
+        models.LiveBet.actual_result == "pending",
+    )
+    if race_id is not None:
+        q = q.filter(models.LiveBet.race_id == race_id)
+    rows = q.all()
+    now = datetime.utcnow()
+    for r in rows:
+        r.actual_result = "lose"
+        if r.actual_payout is None:
+            r.actual_payout = 0.0
+        if r.actual_stake is None and r.planned_stake is not None:
+            r.actual_stake = r.planned_stake
+        r.updated_at = now
+    db.commit()
+    return {"updated_count": len(rows), "race_id": race_id}
+
+
+@router.post("/{live_bet_id}/win")
+def mark_win(live_bet_id: int, payload: schemas.LiveBetWinUpdate, db: Session = Depends(get_db)):
+    """的中1件。払戻だけ書いて win。実額未設定なら予定額。"""
+    row = db.query(models.LiveBet).filter(models.LiveBet.id == live_bet_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="live_bet not found")
+    row.vote_status = "voted"
+    if payload.actual_stake is not None:
+        row.actual_stake = payload.actual_stake
+    elif row.actual_stake is None and row.planned_stake is not None:
+        row.actual_stake = row.planned_stake
+    row.actual_result = "win"
+    row.actual_payout = payload.actual_payout
+    row.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(row)
+    return _row_to_dict(row)
 
 
 @router.post("/manual")
