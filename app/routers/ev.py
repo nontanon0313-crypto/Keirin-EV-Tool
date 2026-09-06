@@ -974,11 +974,37 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     if not candidates:
         n_skip = _save_skipped_bets(db, race_id, skipped_for_verification)
+        # 2026-09-06修正: 0件時のreturnにフロントが表示で使うフィールドが
+        # 無く、画面に「undefined」が並んでしまっていた(のんの指摘により発覚)。
+        # 「見送り寸前」の候補(EVプラスだが閾値未満)も参考表示できるようにする。
+        preview_candidates_0 = []
+        for e, reason in sorted(
+            skipped_for_verification, key=lambda x: -x[0].get("ev_pct", -999)
+        )[:15]:
+            preview_candidates_0.append({
+                "bet_type": e.get("bet_type"),
+                "combination": e.get("combination"),
+                "estimated_win_prob_pct": round(e["win_prob"] * 100, 2) if e.get("win_prob") is not None else None,
+                "odds_value": None,  # all_evaluatedにはオッズを保持していないため参考値なし
+                "ev_pct": e.get("ev_pct"),
+                "reason": reason,
+            })
         return {
             "race_id": race_id,
             "message": "閾値(勝率・EV)を満たす買い示唆がありませんでした(見送り推奨)",
             "items": [],
             "total_stake": 0,
+            "race_budget_cap": round(bankroll * req.max_race_pct, 0),
+            "exclude_low_prob_warning_requested": req.exclude_low_prob_warning,
+            "excluded_low_prob_count": excluded_low_prob_count,
+            "excluded_by_min_stake_count": 0,
+            "excluded_by_garami_count": 0,
+            "excluded_by_budget_count": 0,
+            "garami_free": None,
+            "race_roi_pct": 0,
+            "total_expected_profit": 0,
+            "race_hit_prob_pct": 0,
+            "preview_candidates": preview_candidates_0,
             "skipped_saved_count": n_skip,
             "skipped_candidate_count": len(skipped_for_verification),
         }
