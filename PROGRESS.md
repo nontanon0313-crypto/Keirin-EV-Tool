@@ -28,85 +28,26 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-06(Claude) — 投票タブ改善(Grok案統合)・「投票プランあり」の見える化・検証タブ集計を3段階(予想/想定/実)比較に拡張
+最終更新: 2026-09-07(Grok) — 収益タブ(実資金)追加。Purchase/検証とは完全分離
 
-### 直近の作業（2026-09-06）
-- **race-plan 500エラーの重大バグを修正:** `_select_portfolio()` 内で `rejected_garami` が初期化されないまま、`avoid_garami=True` 時に `rejected_garami += 1` が実行されるため `UnboundLocalError` になる問題を確認。`rejected_garami = 0` を `if avoid_garami:` の直前に追加して修正済み。
-- 修正後 `python -m py_compile app/routers/ev.py` は成功済み。
-- **本番race-plan実動確認済み:** 2026-09-06、本番 `POST /ev/race-plan/344` に `race_id=344, bankroll=1000000, avoid_garami=true` を指定して実行。HTTP 200、`num_bets=20`、`total_stake=56200`、`garami_free=true`、`excluded_by_garami_count=0` を確認。`_select_portfolio()` が `rejected_garami` を正常に返却しており、今回の `UnboundLocalError` によるrace-plan 500は解消済み。
-- **注意:** 現在の作業ツリーには過去のバックアップ、replayログ、`__pycache__`、一時ファイル等が多数あるため、今回のコミット対象には含めない。
-- **次回再開時の最初の作業:** `git log -1 --oneline -- app/routers/ev.py` と `git status --short` で `rejected_garami` 修正のコミット状態を確認し、未コミットなら `app/routers/ev.py` と `PROGRESS.md` のみをcommit/pushする。commit済みならpush状態だけ確認する。その後、race-plan実動確認へ進む。
+### 直近の作業（2026-09-07）
+- **収益タブを新規追加。** 実資金の投票実績を、既存のPurchase/SkippedBet/検証集計と完全に分離して管理する。
+- 新規モデル: `LiveBet`(想定+実績)、`RevenueSettings`(開始資産)
+- 新規API: `/revenue/from-plan` `/revenue/manual` `/revenue/{id}` `/revenue/list` `/revenue/stats` `/revenue/equity-curve` `/revenue/settings`
+- フロント: タブ「収益」、投票プラン後の「収益タブへ記録(実資金)」ボタン、想定vs実績表、累計投資額×累積損益グラフ(canvas)、履歴の手入力・未投票・プラン外追加
+- 既存の「まとめて購入記録」(検証用Purchase)は残し、ラベルを「検証用」に明示。検証ロジック・race-plan・Purchase集計は変更していない
+- `create_all`で`live_bets`/`revenue_settings`が起動時に作成される(既存ALTERマイグレーション方式と両立)
+- 構文チェック: `python3 -m py_compile app/models.py app/schemas.py app/routers/revenue.py app/main.py` 成功
 
-### 直近の作業（2026-09-06 続行）
-- **Odds取り込みのデータ消失防止を修正:** `app/routers/scraper_import.py` の2つのOdds取り込み経路で、従来はレース単位で既存Oddsを全削除してから処理していたため、一部券種の取得失敗・`is_complete=False` が発生すると、正常取得済みの他券種までDBから削除される状態だった。
-- 修正後は、`is_complete=False` の券種では既存Oddsを保持し、`is_complete=True` の券種だけ `race_id + bet_type` 単位で既存Oddsを削除して洗い替える。
-- `scraper/keirin_oddspark_scraper.py` の3連単・3連複の軸別オッズ positional mapping 修正済み。
-- 今回の修正ではEV計算、確率補正、購入閾値、`is_complete` の意味は変更しない。
-- **検証上の注意:** 現在DBに存在しない的中組合せを `OddsParkに元々存在しなかった` と断定することはできない。過去のレースについては、取り込み時の削除バグの影響を受けた可能性があるため、`odds_unavailable` / `site_combo_absent` の解釈は別途切り分ける。
-
-### 直近の事実
-- **Supabase→Neon同期は中断中。理由: Neon無料プランの月間転送量上限に
-  ほぼ到達(4.11/5GB)。上限到達するとcompute停止=本番アプリごと止まるため
-  停止した。上限は2026年10月初旬にリセット予定。それまで同期関連コマンド
-  (sync-supabase-to-neon、大量replay等)は実行しないこと。**
-- 同期の再開位置は after_id=94436（skipped）。10月リセット後、
-  `bash "$HOME/Keirin-EV-Tool/scraper/run_sync_sb_to_neon_steps.sh" skipped 94436`
-  で再開できる（run_chunkedはafter_id指定での再開に対応済み・2026-09-06修正）。
-- 同期を止めても実運用(予想・投票判断)には支障なし。実運用が読み書きするのは
-  Neon(DATABASE_URL)のみで、Supabaseは障害時フォールバック用のため。
-  同期していない期間はキャリブレーションのサンプル母数が僅かに減るだけ。
-- **のんの判断で実資金投票を開始する。** investment-readinessの4基準
-  (サンプル数・統計的有意性・実績収支率黒字・破産確率10%以下)は
-  まだ全て達成していないが、のんはこれを承知の上で実運用へ移行する判断をした。
-  今後の運用: その日のデータ収集→予想→実際に投票→結果確認、を1日サイクルで回す。
-- `/purchases/stats`(検証タブ「集計を表示」)にsinceフィルタが元々無く、
-  投票ロジック変更前の旧データまで「現行基準」として表示されていた不具合を修正。
-  既定でCALIBRATION_SWITCH_AT以降だけに絞り込むようにした。
-- **CALIBRATION_SWITCH_AT関連で2つバグがあり、両方修正済み:**
-  1. UTC/JST取り違え(Grokが発見): `datetime.utcnow()`保存に対しnaiveな
-     日付0時をJSTの0時と取り違え、JST当日早朝(〜9時頃)のデータが
-     集計から消える不具合。JST基準の時刻をUTCに変換して設定するよう修正。
-  2. 基準日そのものが「今日」になっていた: 実際に投票ロジックを最後に変えたのは
-     2026-09-05(高オッズ帯の確率縮小係数にHIGH_ODDS_BANDS「300-1000倍」を追加)
-     だったため、CALIBRATION_SWITCH_ATをJST 2026-09-05 00:00
-     (`datetime(2026, 9, 4, 15, 0, 0)` UTC)に修正し、有効なデータを増やした。
-- 検証タブの`/purchases/stats`以外のボタンにも同じ`since`絞り込みを適用済み:
-  `/calibration-compare`・`/profit-concentration`・`/car-pick-accuracy`
-  (Purchaseを見ない指標のため、CALIBRATION_SWITCH_AT以降に
-  Purchase/SkippedBetが存在するレースだけに限定する形で対応)・
-  `/investment-readiness`(既定値をsince=Noneからcalibration_switchに変更)。
-  `/calibration`(自動補正の状態を確認)は元々「直近3/7/14日」の窓を主指標に
-  しているため据え置き。
-- 検証タブの集計を「予想的中率/回収率(補正前)・想定的中率/回収率(補正後)・
-  実的中率/実績(結果)」の3段階比較に拡張。列順は左から予想→想定→実。
-  「件数」列は廃止し、代わりに「投票割合」(見送りも含む評価対象のうち
-  実際にお金を賭けた割合)を表示するようにした(のんの要望)。
-- **投票タブを改善(Grokの案をベースに、最新コードとの整合性を確認して統合。
-  PROGRESS.mdを含むGrokのzipで直近の記録が上書き消失していたため復元した):**
-  - 「本日」「直前30分」のレース一覧を5分キャッシュ(タブ切替のたびに
-    再取得しない。Neon転送量節約にも寄与)。🔄更新ボタンで強制再取得。
-  - 本命(お気に入り)一覧の行をタップするとそのままレース選択できるように。
-  - race-planが0件の時も、EVプラスだが落ちた候補を「参考」として表示する
-    ように(のんの「投票プランありが分からない」という指摘の一因が
-    「0件の時に何も表示されない」ことだったため)。
-  - **本質的な修正: 「予想済み」(AI勝率算出済み)と「投票プランあり」
-    (実際に買い目がある)は別物なのに区別されていなかった問題を解消。**
-    `/races/today`・`/races/upcoming`・`/races/favorites`に
-    `has_plan`・`num_bets`を追加(該当レースにstake_amount>0のPurchaseが
-    あるかで判定。日次パイプラインは予想後に自動でPurchaseとして記録する
-    仕様のため、この判定で正確に「投票プランあり」を検出できる)。
-    ドロップダウンのラベルと本命一覧の両方に反映済み。
-
-### 次にやること
-- 実資金運用フロー(race-plan生成→実購入記録→confirm-result)のソースレビューを実施中。
-- Neon転送量を無駄に消費しないよう、運用中はreplay/診断系エンドポイントの
-  多用を避けること。
+### 次にやること(ユーザー側)
+1. 下記zip反映→commit→push→Renderデプロイ待ち
+2. デプロイ後: 投票タブでプラン作成→「収益タブへ記録」→収益タブで実績入力→集計・グラフ確認
+3. (任意) 開始資産を収益タブで設定
 
 ### 注意
-- zip ダウンロード不可時は sed / git push で反映（運用済み）
-- 大量処理は最初から90秒以内・再開可能にすること
-- **Neon転送量に余裕が無いため、10月初旬まで大量データ処理系
-  (同期・大量replay・全件診断)は実行しない。**
+- Purchaseへの自動混入はしない設計。検証タブの集計に実資金は入らない
+- Neon転送量に余裕が無いため、同期・大量replayは10月初旬まで実行しない
+- zip ダウンロード不可時は該当ファイルを個別に反映してもよい
 
 ## 2. プロジェクト概要
 

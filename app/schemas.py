@@ -108,3 +108,50 @@ class RacePlanRequest(BaseModel):
 
 class BankrollSet(BaseModel):
     initial_balance: float
+
+
+# --- 収益タブ(実資金・Purchaseとは完全分離) ---
+
+class LiveBetPlanItem(BaseModel):
+    bet_type: str
+    combination: str
+    planned_stake: Optional[float] = None
+    planned_win_prob: Optional[float] = None  # 0-1
+    planned_odds: Optional[float] = None
+    planned_ev_pct: Optional[float] = None
+    planned_expected_profit: Optional[float] = None
+
+
+class LiveBetFromPlanCreate(BaseModel):
+    race_id: int
+    items: List[LiveBetPlanItem]
+
+
+class LiveBetManualCreate(BaseModel):
+    race_id: Optional[int] = None
+    race_date: Optional[datetime] = None
+    venue_name: Optional[str] = None
+    race_number: Optional[int] = None
+    bet_type: str
+    combination: str
+    actual_stake: float
+    planned_stake: Optional[float] = None
+    planned_win_prob: Optional[float] = None
+    planned_odds: Optional[float] = None
+    planned_ev_pct: Optional[float] = None
+    vote_status: str = "voted"  # voted / not_voted
+    actual_result: str = "pending"  # pending / win / lose / not_voted
+    actual_payout: float = 0.0
+    memo: Optional[str] = None
+
+
+class LiveBetUpdate(BaseModel):
+    vote_status: Optional[str] = None
+    actual_stake: Optional[float] = None
+    actual_result: Optional[str] = None
+    actual_payout: Optional[float] = None
+    memo: Optional[str] = None
+
+
+class RevenueSettingsSet(BaseModel):
+    starting_assets: float
