@@ -202,42 +202,98 @@ document.getElementById("uploadBtn").addEventListener("click", async () => {
 });
 
 // ---------- ② レース選択・期待値計算 ----------
-let raceListScope = "today"; // "today" | "upcoming"
+let raceListScope = "today"; // "today" | "upcoming" | "favorites"
+const RACE_LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 画面更新のたびに再取得しない
+const raceListCache = {
+  today: { at: 0, races: null },
+  upcoming: { at: 0, races: null },
+  favorites: { at: 0, minProb: null, html: "", items: null },
+};
 
-async function loadRaces(selectRaceId) {
+function _cacheValid(entry) {
+  return entry && entry.races && (Date.now() - entry.at) < RACE_LIST_CACHE_TTL_MS;
+}
+
+function hideFavoritesPanel() {
+  const box = document.getElementById("favoritesResult");
+  if (!box) return;
+  // 中身はキャッシュに残し、表示だけ消す(本日選択時に消えてほしい)
+  if (box.innerHTML && box.style.display !== "none") {
+    raceListCache.favorites.html = box.innerHTML;
+  }
+  box.style.display = "none";
+}
+
+function showFavoritesPanelFromCacheOrFetch(force) {
+  const box = document.getElementById("favoritesResult");
+  if (!box) return;
+  const minProb = (parseFloat(document.getElementById("favoritesMinProb").value) || 25);
+  const c = raceListCache.favorites;
+  if (!force && c.html && c.minProb === minProb && (Date.now() - c.at) < RACE_LIST_CACHE_TTL_MS) {
+    box.innerHTML = c.html;
+    box.style.display = "";
+    bindFavoriteRaceClicks(box);
+    return;
+  }
+  loadFavoritesList(force);
+}
+
+async function fetchTodayRaces(force) {
+  const c = raceListCache.today;
+  if (!force && _cacheValid(c)) return c.races;
+  const res = await fetch(apiUrl("/races/today"));
+  const data = await res.json();
+  const races = (data || []).map(r => ({
+    id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
+    entry_count: r.riders_count, odds_count: null,
+    label_extra: `${r.post_time ? r.post_time + " " : ""}${r.predicted ? "予想済み" : "未予想"}${r.actual_result ? " ・結果確定済み" : ""}`,
+  }));
+  raceListCache.today = { at: Date.now(), races };
+  return races;
+}
+
+async function fetchUpcomingRaces(force) {
+  const c = raceListCache.upcoming;
+  if (!force && _cacheValid(c)) return c.races;
+  const res = await fetch(apiUrl("/races/upcoming?within_min=30"));
+  const data = await res.json();
+  const races = (data || []).map(r => ({
+    id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
+    entry_count: r.riders_count, odds_count: null,
+    label_extra: `あと${r.mins_to_post}分(${r.post_time}) ${r.predicted ? "予想済み" : "未予想"}`,
+  }));
+  raceListCache.upcoming = { at: Date.now(), races };
+  return races;
+}
+
+async function loadRaces(selectRaceId, options) {
+  const force = !!(options && options.force);
   const select = document.getElementById("raceSelect");
   const previousValue = select.value;
+  // 本命パネルは「本日」「直前30分」切替時に隠す
+  if (raceListScope === "today" || raceListScope === "upcoming") {
+    hideFavoritesPanel();
+  }
+  select.innerHTML = `<option value="">読み込み中...</option>`;
   try {
     let races;
     if (raceListScope === "today") {
-      const res = await fetch(apiUrl("/races/today"));
-      const data = await res.json();
-      races = data.map(r => ({
-        id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
-        entry_count: r.riders_count, odds_count: null,
-        label_extra: `${r.post_time ? r.post_time + " " : ""}${r.predicted ? "予想済み" : "未予想"}${r.actual_result ? " ・結果確定済み" : ""}`,
-      }));
+      races = await fetchTodayRaces(force);
     } else if (raceListScope === "upcoming") {
-      const res = await fetch(apiUrl("/races/upcoming?within_min=30"));
-      const data = await res.json();
-      races = data.map(r => ({
-        id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
-        entry_count: r.riders_count, odds_count: null,
-        label_extra: `あと${r.mins_to_post}分(${r.post_time}) ${r.predicted ? "予想済み" : "未予想"}`,
-      }));
+      races = await fetchUpcomingRaces(force);
     } else {
       const res = await fetch(apiUrl("/races/"));
       const data = await res.json();
       races = data.map(r => ({ ...r, label_extra: null }));
     }
-    races.sort((a, b) => venueSortKey(a.venue_name) - venueSortKey(b.venue_name) || a.race_number - b.race_number);
-    select.innerHTML = races.map(r =>
-      `<option value="${r.id}">${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R${r.label_extra ? " " + r.label_extra : ` (選手${r.entry_count}/オッズ${r.odds_count})`}</option>`
-    ).join("");
+    races = races.slice().sort((a, b) => venueSortKey(a.venue_name) - venueSortKey(b.venue_name) || a.race_number - b.race_number);
     if (!races.length) {
       select.innerHTML = `<option value="">(該当レースなし)</option>`;
+    } else {
+      select.innerHTML = races.map(r =>
+        `<option value="${r.id}">${r.race_date ? r.race_date + " " : ""}${r.venue_name} ${r.race_number}R${r.label_extra ? " " + r.label_extra : ` (選手${r.entry_count}/オッズ${r.odds_count})`}</option>`
+      ).join("");
     }
-    // アップロード直後は今回反映したレースを、それ以外は元々選ばれていたレースを維持する
     const target = selectRaceId ?? previousValue;
     if (target && races.some(r => String(r.id) === String(target))) {
       select.value = target;
@@ -245,45 +301,99 @@ async function loadRaces(selectRaceId) {
     await checkRace();
   } catch (e) {
     console.error(e);
+    select.innerHTML = `<option value="">読み込み失敗</option>`;
   }
 }
 
 function setRaceFilterButtons(active) {
-  const map = { today: "raceFilterTodayBtn", upcoming: "raceFilterUpcomingBtn" };
+  const map = { today: "raceFilterTodayBtn", upcoming: "raceFilterUpcomingBtn", favorites: "loadFavoritesBtn" };
   for (const [key, id] of Object.entries(map)) {
-    document.getElementById(id).style.background = key === active ? "" : "#475569";
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.style.background = key === active ? "" : "#475569";
   }
 }
+
 document.getElementById("raceFilterTodayBtn").addEventListener("click", () => {
-  raceListScope = "today"; setRaceFilterButtons("today"); loadRaces();
+  raceListScope = "today";
+  setRaceFilterButtons("today");
+  // キャッシュがあれば即表示(再取得しない)
+  loadRaces(undefined, { force: false });
 });
 document.getElementById("raceFilterUpcomingBtn").addEventListener("click", () => {
-  raceListScope = "upcoming"; setRaceFilterButtons("upcoming"); loadRaces();
+  raceListScope = "upcoming";
+  setRaceFilterButtons("upcoming");
+  loadRaces(undefined, { force: false });
 });
 
-document.getElementById("loadFavoritesBtn").addEventListener("click", async () => {
+function bindFavoriteRaceClicks(box) {
+  box.querySelectorAll("[data-favorite-race-id]").forEach((el) => {
+    el.style.cursor = "pointer";
+    el.onclick = async () => {
+      const rid = el.getAttribute("data-favorite-race-id");
+      if (!rid) return;
+      // 本命からレース選択
+      raceListScope = "today";
+      setRaceFilterButtons("today");
+      await loadRaces(rid, { force: false });
+      const select = document.getElementById("raceSelect");
+      if (select && [...select.options].some(o => o.value === String(rid))) {
+        select.value = String(rid);
+        await checkRace();
+      } else {
+        // 本日一覧に無い場合でも直接詳細を開く
+        select.innerHTML = `<option value="${rid}">本命から選択 (ID:${rid})</option>`;
+        select.value = String(rid);
+        await checkRace();
+      }
+      // プラン作成まで誘導するヒント
+      const detail = document.getElementById("raceDetailResult");
+      if (detail) {
+        detail.insertAdjacentHTML("beforeend",
+          `<p class="note">本命一覧から選択しました。「このレースの自動投票プランを作成」で投票候補を確認できます。</p>`);
+      }
+    };
+  });
+}
+
+async function loadFavoritesList(force) {
   const box = document.getElementById("favoritesResult");
+  const minProbPct = (parseFloat(document.getElementById("favoritesMinProb").value) || 25);
+  const minProb = minProbPct / 100;
+  box.style.display = "";
   box.textContent = "読み込み中...";
-  const minProb = (parseFloat(document.getElementById("favoritesMinProb").value) || 25) / 100;
+  raceListScope = "favorites";
+  setRaceFilterButtons("favorites");
   try {
     const res = await fetch(apiUrl(`/races/favorites?min_win_prob=${minProb}`));
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
     if (!data.length) {
       box.textContent = "該当する本命候補はありません。";
+      raceListCache.favorites = { at: Date.now(), minProb: minProbPct, html: box.innerHTML, items: [] };
       return;
     }
-    let html = `<table><tr><th>会場</th><th>発走</th><th>車番</th><th>選手名</th><th>勝率</th></tr>`;
-    for (const f of data) {
-      html += `<tr><td>${f.venue_name}${f.race_number}R</td><td>${f.post_time || "-"}</td><td>${f.car_number}</td><td>${f.player_name}</td><td>${f.win_prob_pct}%</td></tr>`;
+    let html = `<p><strong>本命候補</strong>（タップでレース選択） 最低勝率${minProbPct}%</p>`;
+    html += `<table><tr><th>会場</th><th>R</th><th>発走</th><th>車番</th><th>選手</th><th>勝率</th></tr>`;
+    for (const row of data) {
+      const rid = row.race_id;
+      html += `<tr data-favorite-race-id="${rid}" title="タップしてこのレースを選択">` +
+        `<td>${row.venue_name}</td><td>${row.race_number}R</td>` +
+        `<td>${row.post_time || "-"}</td><td>${row.car_number}</td>` +
+        `<td>${row.player_name || "-"}</td><td>${row.win_prob_pct != null ? row.win_prob_pct + "%" : "-"}</td></tr>`;
     }
-    html += "</table>";
+    html += `</table>`;
     box.innerHTML = html;
+    bindFavoriteRaceClicks(box);
+    raceListCache.favorites = { at: Date.now(), minProb: minProbPct, html, items: data };
   } catch (e) {
     box.textContent = "エラー: " + e.message;
   }
-});
+}
 
+document.getElementById("loadFavoritesBtn").addEventListener("click", () => {
+  showFavoritesPanelFromCacheOrFetch(false);
+});
 
 document.getElementById("deleteRaceBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
@@ -417,7 +527,7 @@ async function checkRace() {
   }
 }
 document.getElementById("raceSelect").addEventListener("change", checkRace);
-document.getElementById("refreshRaceListBtn").addEventListener("click", () => loadRaces());
+document.getElementById("refreshRaceListBtn").addEventListener("click", () => loadRaces(undefined, { force: true }));
 
 function getBankrollOverride() {
   // 証拠金は常に証拠金タブの残高を使う(のんの要望により上書き欄を廃止)
@@ -493,12 +603,12 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    if (!data.items || data.items.length === 0) {
-      resultBox.textContent = data.message || "買い示唆がありませんでした(見送り推奨)";
-      return;
+    data.items = data.items || [];
+    let html = "";
+    if (data.items.length === 0) {
+      html += `<p style="color:#f59e0b;"><strong>${data.message || "買い示唆がありませんでした(見送り推奨)"}</strong></p>`;
     }
-
-    let html = `<p><strong>合計投票額: ${data.total_stake}円</strong>(上限${data.race_budget_cap}円)`;
+    html += `<p><strong>合計投票額: ${data.total_stake || 0}円</strong>(上限${data.race_budget_cap || "-"}円)`;
     html += `<br><span class="note">大穴帯除外設定: ${data.exclude_low_prob_warning_requested ? "ON" : "OFF"}(除外件数${data.excluded_low_prob_count}件)</span>`;
     if (data.excluded_by_min_stake_count > 0) html += `<br>理論上の賭け金が最低単位(100円)未満のため${data.excluded_by_min_stake_count}件を見送りました`;
     if (data.excluded_by_garami_count > 0) html += `<br>ガミり回避のため${data.excluded_by_garami_count}件を除外しました`;
@@ -513,6 +623,11 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     }
     html += `</p>`;
     html += `<p>レース全体の回収率: ${data.race_roi_pct}%(期待利益 約${data.total_expected_profit}円) / レース全体の的中率: 約${data.race_hit_prob_pct}%</p>`;
+    if (!data.items || data.items.length === 0) {
+      html += `<p style="color:#f59e0b;"><strong>投票候補は0件</strong>です。下に「見送り寸前」の候補があれば参考表示します。</p>`;
+    } else {
+      html += `<p style="color:#22c55e;"><strong>投票候補 ${data.items.length}件</strong>（安全マージン・ガミり回避を通過）</p>`;
+    }
     html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>回収率%</th><th>投票額</th><th>予想精度</th><th>充足度</th></tr>`;
     for (const it of data.items) {
       const probLabel = `${it.estimated_win_prob_pct}%${it.low_prob_warning ? " ⚠️低確率帯(未補正)" : ""}`;
@@ -530,15 +645,26 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
     }
     html += "</table>";
     html += `<p class="note">予想精度は、その勝率帯の予想確率と実績的中率がどれだけ一致しているか(🟢90%以上=よく一致、🟡中間、🔴70%以下=ズレ大)を示す指標です。充足度は、その一致度がどれだけ実績データに裏付けられているか(🟢90%以上=十分な実績あり、🟡中間、🔴10%以下=ほぼ未検証)を示します。データ無=まだその勝率帯の実績が0件。どちらも表示専用で、確率計算や投票内容には影響しません。</p>`;
+    if (data.preview_candidates && data.preview_candidates.length) {
+      html += `<p style="margin-top:10px;"><strong>参考: EVプラスだが今回のプランに入らなかった候補</strong>（安全マージン・予算・ガミり等）</p>`;
+      html += `<table><tr><th>券種</th><th>買い目</th><th>勝率</th><th>オッズ</th><th>EV%</th><th>理由</th></tr>`;
+      for (const it of data.preview_candidates) {
+        html += `<tr><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.estimated_win_prob_pct}%</td><td>${it.odds_value}</td><td>${it.ev_pct}</td><td>${it.reason || "-"}</td></tr>`;
+      }
+      html += `</table>`;
+    }
+
     resultBox.innerHTML = html;
 
     // 「まとめて購入記録する」ボタンを動的に追加(このプランの内容を保持しておく)
     lastRacePlan = { raceId: parseInt(raceId), items: data.items };
-    const bulkBtn = document.createElement("button");
-    bulkBtn.textContent = `この${data.items.length}点をまとめて購入記録する`;
-    bulkBtn.style.background = "#f59e0b";
-    bulkBtn.addEventListener("click", recordRacePlanAsPurchases);
-    resultBox.appendChild(bulkBtn);
+    if (data.items.length > 0) {
+      const bulkBtn = document.createElement("button");
+      bulkBtn.textContent = `この${data.items.length}点をまとめて購入記録する`;
+      bulkBtn.style.background = "#f59e0b";
+      bulkBtn.addEventListener("click", recordRacePlanAsPurchases);
+      resultBox.appendChild(bulkBtn);
+    }
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }

@@ -972,7 +972,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         n_skip = _save_skipped_bets(db, race_id, skipped_for_verification)
         return {
             "race_id": race_id,
-            "message": "安全マージンを満たす買い示唆がありませんでした(見送り推奨)",
+            "message": "閾値(勝率・EV)を満たす買い示唆がありませんでした(見送り推奨)",
             "items": [],
             "total_stake": 0,
             "skipped_saved_count": n_skip,
@@ -1086,12 +1086,36 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         "skipped_candidate_count": len(skipped_for_verification),
     }
 
+    # プラン0件でも「1件でも見える化」するため、落ちた候補の上位を返す
+    preview_candidates = []
+    for c in sorted(candidates, key=lambda x: -x.get("ev_pct", 0))[:15]:
+        key = (c["bet_type"], c["combination"])
+        if key in selected_keys:
+            continue
+        reason = "ポートフォリオで未採用"
+        if c.get("_stake") is None or c.get("_stake", 0) <= 0:
+            reason = "最低投票額未満の可能性"
+        preview_candidates.append({
+            "bet_type": c["bet_type"],
+            "combination": c["combination"],
+            "estimated_win_prob_pct": c.get("estimated_win_prob_pct"),
+            "odds_value": c.get("odds_value"),
+            "ev_pct": c.get("ev_pct"),
+            "reason": reason,
+        })
+    if not items and preview_candidates:
+        msg_extra = f"（EVプラス候補は{len(candidates)}件あるが、予算・ガミり・最低単位で0件になった）"
+    else:
+        msg_extra = None
+
     return {
         "race_id": race_id,
+        "message": msg_extra,
         "num_bets": len(items),
         "total_stake": round(total_stake, 0),
         "skipped_saved_count": n_skip,
         "skipped_candidate_count": len(skipped_for_verification),
+        "preview_candidates": preview_candidates,
         "race_budget_cap": round(race_cap, 0),
         "excluded_by_budget_count": excluded_by_budget_count,
         "excluded_by_garami_count": excluded_by_garami_count,
