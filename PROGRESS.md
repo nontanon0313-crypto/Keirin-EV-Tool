@@ -33,7 +33,7 @@
 ### 直近の作業（2026-09-06）
 - **race-plan 500エラーの重大バグを修正:** `_select_portfolio()` 内で `rejected_garami` が初期化されないまま、`avoid_garami=True` 時に `rejected_garami += 1` が実行されるため `UnboundLocalError` になる問題を確認。`rejected_garami = 0` を `if avoid_garami:` の直前に追加して修正済み。
 - 修正後 `python -m py_compile app/routers/ev.py` は成功済み。
-- **次に確認すること:** 修正を本番へpush後、`race-plan` が500にならず正常に投票プランを生成できることを確認する。特に `avoid_garami=True` の通常経路で `_select_portfolio()` が完走し、`rejected_garami` が正常に返却されることを確認する。
+- **本番race-plan実動確認済み:** 2026-09-06、本番 `POST /ev/race-plan/344` に `race_id=344, bankroll=1000000, avoid_garami=true` を指定して実行。HTTP 200、`num_bets=20`、`total_stake=56200`、`garami_free=true`、`excluded_by_garami_count=0` を確認。`_select_portfolio()` が `rejected_garami` を正常に返却しており、今回の `UnboundLocalError` によるrace-plan 500は解消済み。
 - **注意:** 現在の作業ツリーには過去のバックアップ、replayログ、`__pycache__`、一時ファイル等が多数あるため、今回のコミット対象には含めない。
 - **次回再開時の最初の作業:** `git log -1 --oneline -- app/routers/ev.py` と `git status --short` で `rejected_garami` 修正のコミット状態を確認し、未コミットなら `app/routers/ev.py` と `PROGRESS.md` のみをcommit/pushする。commit済みならpush状態だけ確認する。その後、race-plan実動確認へ進む。
 
