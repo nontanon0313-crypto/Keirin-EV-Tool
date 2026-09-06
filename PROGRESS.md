@@ -30,6 +30,13 @@
 
 最終更新: 2026-09-06(Claude) — 投票タブ改善(Grok案統合)・「投票プランあり」の見える化・検証タブ集計を3段階(予想/想定/実)比較に拡張
 
+### 直近の作業（2026-09-06）
+- **race-plan 500エラーの重大バグを修正:** `_select_portfolio()` 内で `rejected_garami` が初期化されないまま、`avoid_garami=True` 時に `rejected_garami += 1` が実行されるため `UnboundLocalError` になる問題を確認。`rejected_garami = 0` を `if avoid_garami:` の直前に追加して修正済み。
+- 修正後 `python -m py_compile app/routers/ev.py` は成功済み。
+- **次に確認すること:** 修正を本番へpush後、`race-plan` が500にならず正常に投票プランを生成できることを確認する。特に `avoid_garami=True` の通常経路で `_select_portfolio()` が完走し、`rejected_garami` が正常に返却されることを確認する。
+- **注意:** 現在の作業ツリーには過去のバックアップ、replayログ、`__pycache__`、一時ファイル等が多数あるため、今回のコミット対象には含めない。
+- **次回再開時の最初の作業:** `git log -1 --oneline -- app/routers/ev.py` と `git status --short` で `rejected_garami` 修正のコミット状態を確認し、未コミットなら `app/routers/ev.py` と `PROGRESS.md` のみをcommit/pushする。commit済みならpush状態だけ確認する。その後、race-plan実動確認へ進む。
+
 ### 直近の事実
 - **Supabase→Neon同期は中断中。理由: Neon無料プランの月間転送量上限に
   ほぼ到達(4.11/5GB)。上限到達するとcompute停止=本番アプリごと止まるため
