@@ -546,22 +546,34 @@ def _parse_raw_grid(soup, debug=False, exclude_car=None):
         if numeric_vals and all(re.fullmatch(r"\d+", t) and int(t) < 10 for t in numeric_vals):
             continue  # ヘッダー行そのもの(車番の並びだけの行)は除外
 
-        # この行で有効な列(=本来データがあるはずの車番)を、ヘッダー順に求める
+        # 実ページでは data_cells の各セル位置が header の車番位置に
+        # そのまま対応している。
+        #
+        # 例:
+        # header     = [1, 2, 3, 4, 5, 6, 7, ...]
+        # row_car=1  = [blank, 47.8, blank, 79.6, 20.3, 81.1, 14.0, ...]
+        #
+        # したがって「見つかったオッズを順番に詰める」のではなく、
+        # header の車番位置と data_cells の位置を対応させて取得する。
         expected_cols = [h for h in header if h != row_car and h != exclude_car]
 
-        # 空白の幅に依存せず、実データ(オッズ値)を見つかった順に抽出する
         found_values = []
-        i = 0
-        while i < len(data_cells):
-            t = data_cells[i]
-            if ODDS_RE.match(t):
-                found_values.append(t)
-                i += 2  # (オッズ値, 人気順位)のペア。人気順位は読み飛ばす
-            else:
-                i += 1  # 空白は1セルずつ進める(幅を仮定しない)
-
         row_grid_entries = []
-        for col_car, odds_val in zip(expected_cols, found_values):
+
+        for col_car in expected_cols:
+            try:
+                col_index = header.index(col_car)
+            except ValueError:
+                continue
+
+            if col_index >= len(data_cells):
+                continue
+
+            odds_val = data_cells[col_index]
+            if not ODDS_RE.match(odds_val):
+                continue
+
+            found_values.append(odds_val)
             entry = {"col_car": col_car, "row_car": row_car, "odds": odds_val}
             grid.append(entry)
             row_grid_entries.append(entry)

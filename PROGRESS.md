@@ -37,6 +37,13 @@
 - **注意:** 現在の作業ツリーには過去のバックアップ、replayログ、`__pycache__`、一時ファイル等が多数あるため、今回のコミット対象には含めない。
 - **次回再開時の最初の作業:** `git log -1 --oneline -- app/routers/ev.py` と `git status --short` で `rejected_garami` 修正のコミット状態を確認し、未コミットなら `app/routers/ev.py` と `PROGRESS.md` のみをcommit/pushする。commit済みならpush状態だけ確認する。その後、race-plan実動確認へ進む。
 
+### 直近の作業（2026-09-06 続行）
+- **Odds取り込みのデータ消失防止を修正:** `app/routers/scraper_import.py` の2つのOdds取り込み経路で、従来はレース単位で既存Oddsを全削除してから処理していたため、一部券種の取得失敗・`is_complete=False` が発生すると、正常取得済みの他券種までDBから削除される状態だった。
+- 修正後は、`is_complete=False` の券種では既存Oddsを保持し、`is_complete=True` の券種だけ `race_id + bet_type` 単位で既存Oddsを削除して洗い替える。
+- `scraper/keirin_oddspark_scraper.py` の3連単・3連複の軸別オッズ positional mapping 修正済み。
+- 今回の修正ではEV計算、確率補正、購入閾値、`is_complete` の意味は変更しない。
+- **検証上の注意:** 現在DBに存在しない的中組合せを `OddsParkに元々存在しなかった` と断定することはできない。過去のレースについては、取り込み時の削除バグの影響を受けた可能性があるため、`odds_unavailable` / `site_combo_absent` の解釈は別途切り分ける。
+
 ### 直近の事実
 - **Supabase→Neon同期は中断中。理由: Neon無料プランの月間転送量上限に
   ほぼ到達(4.11/5GB)。上限到達するとcompute停止=本番アプリごと止まるため
