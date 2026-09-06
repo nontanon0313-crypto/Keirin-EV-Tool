@@ -3619,7 +3619,9 @@ def _compute_purchase_stats(db: Session, since_dt=None):
             b = buckets.setdefault(key, {
                 "stake": 0.0, "payout": 0.0, "count": 0, "wins": 0,
                 "win_prob_sum": 0.0, "win_prob_count": 0,
+                "win_prob_raw_sum": 0.0, "win_prob_raw_count": 0,
                 "ev_pct_sum": 0.0, "ev_pct_count": 0,
+                "raw_roi_sum": 0.0, "raw_roi_count": 0,
                 "purchased_count": 0,
             })
             b["count"] += 1
@@ -3630,6 +3632,21 @@ def _compute_purchase_stats(db: Session, since_dt=None):
             if p.win_prob_at_purchase is not None:
                 b["win_prob_sum"] += p.win_prob_at_purchase
                 b["win_prob_count"] += 1
+            # 2026-09-06追加: win_prob_raw は補正前(生)の予想確率。
+            # 想定的中率(補正後)と実的中率(実績)だけだと、補正がどれだけ効いたか
+            # (補正前→補正後→実績)の3段階比較ができなかったため追加
+            # (のんの要望により追加)。
+            raw_prob = getattr(p, "win_prob_raw", None)
+            if raw_prob is not None:
+                b["win_prob_raw_sum"] += raw_prob
+                b["win_prob_raw_count"] += 1
+            odds = getattr(p, "odds_at_purchase", None)
+            if raw_prob is not None and odds:
+                # ev_pct_at_purchase(補正後・保存済み)と同じ「0%が損益分岐点」の
+                # 表現に揃える。リベート等は個別購入に保存されていないため簡易計算
+                # (参考値である旨をラベル側に明記する)。
+                b["raw_roi_sum"] += (raw_prob * odds - 1) * 100
+                b["raw_roi_count"] += 1
             # 見送り(SkippedBet)は実際にお金を賭けていない(stake=0固定)ため、
             # 的中率の検証には使うが、収支(実績金額)の集計には混ぜない
             # (のんの指摘により修正。以前は見送りのstake=0がそのまま平均に混ざり、
@@ -3653,23 +3670,31 @@ def _compute_purchase_stats(db: Session, since_dt=None):
             expected_win_rate_pct = (
                 round(v["win_prob_sum"] / v["win_prob_count"] * 100, 1) if v["win_prob_count"] else None
             )
+            predicted_win_rate_pct = (
+                round(v["win_prob_raw_sum"] / v["win_prob_raw_count"] * 100, 1) if v["win_prob_raw_count"] else None
+            )
             # ev_pct_at_purchaseは「0%が損益分岐点」表現のため、+100して実績(roi_pct)と
             # 同じ「100%が損益分岐点」表現に揃える。実際に賭けたか否かに関係なく
             # 全件の単純平均を使う(のんの指摘により修正。予想精度の比較には使わない)。
             expected_roi_pct = (
                 round(v["ev_pct_sum"] / v["ev_pct_count"] + 100, 2) if v["ev_pct_count"] else None
             )
+            predicted_roi_pct = (
+                round(v["raw_roi_sum"] / v["raw_roi_count"] + 100, 2) if v["raw_roi_count"] else None
+            )
             expected_profit = None
             out[k] = {
                 "count": v["count"],
                 "purchased_count": v["purchased_count"],
                 "win_rate_pct": round(v["wins"] / v["count"] * 100, 1),
+                "predicted_win_rate_pct": predicted_win_rate_pct,
                 "expected_win_rate_pct": expected_win_rate_pct,
                 # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
                 # 実際に購入した件数が0件(見送りのみ)の場合はNone(集計不可)にする。
                 "roi_pct": round(expectancy + 100, 2) if expectancy is not None else None,
                 "expectancy_pct": round(expectancy, 2) if expectancy is not None else None,
                 "profit": round(v["payout"] - v["stake"], 0) if has_purchase else None,
+                "predicted_roi_pct": predicted_roi_pct,
                 "expected_roi_pct": expected_roi_pct,
                 "expected_profit": expected_profit,
             }
@@ -3875,6 +3900,30 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     overall_win_count = sum(1 for p in purchases if p.result == "win")
     overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1) if purchases else 0.0
 
+    # 2026-09-06追加: 補正前(生)の予想確率の全体平均・想定回収率。
+    # 「予想的中率(補正前)→想定的中率(補正後)→実的中率(実績)」の3段階、
+    # 「予想回収率(補正前)→想定回収率(補正後)→実績(実績)」の3段階で、
+    # 補正がどれだけ効いているかを比較できるようにする(のんの要望により追加)。
+    # expected_roi_pct と同様、金額加重で計算する。
+    raw_prob_values = [
+        getattr(p, "win_prob_raw", None) for p in purchases if getattr(p, "win_prob_raw", None) is not None
+    ]
+    predicted_win_rate_pct = round(sum(raw_prob_values) / len(raw_prob_values) * 100, 1) if raw_prob_values else None
+    raw_ev_purchases = [
+        p for p in purchases
+        if getattr(p, "win_prob_raw", None) is not None
+        and getattr(p, "odds_at_purchase", None)
+        and p.stake_amount > 0
+    ]
+    predicted_stake_sum = sum(p.stake_amount for p in raw_ev_purchases)
+    predicted_profit_sum = sum(
+        p.stake_amount * (p.win_prob_raw * p.odds_at_purchase - 1) for p in raw_ev_purchases
+    )
+    predicted_roi_pct = (
+        round((predicted_profit_sum / predicted_stake_sum + 1) * 100, 2) if predicted_stake_sum else None
+    )
+    predicted_profit_total = round(predicted_profit_sum, 0) if raw_ev_purchases else None
+
     # 資金管理シミュレーション用の勝率・オッズ。
     # 【バグ修正】以前は「全買い目の投資額加重平均オッズ」(外れ含む)をモンテカルロに
     # 渡していた。モデルは「的中率pでオッズO倍」なので、全件平均オッズ×的中率だと
@@ -3981,9 +4030,12 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         "overall_expectancy_pct": round(overall_expectancy_pct, 2),
         "overall_roi_pct": round(overall_expectancy_pct + 100, 2),
         "overall_profit_total": round(total_payout - total_stake, 0),
+        "predicted_roi_pct": predicted_roi_pct,
+        "predicted_profit_total": predicted_profit_total,
         "expected_roi_pct": expected_roi_pct,
         "expected_profit_total": expected_profit_total,
         "overall_win_rate_pct": overall_win_rate_pct,
+        "predicted_win_rate_pct": predicted_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
         "avg_odds_weighted": avg_odds_weighted,
         "sim_overall": sim_overall,

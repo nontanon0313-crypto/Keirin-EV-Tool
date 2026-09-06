@@ -1275,10 +1275,10 @@ document.getElementById("recommendRacePctBtn").addEventListener("click", () => {
 // ---------- ⑤ 実績検証 ----------
 function renderBucketTable(title, bucketObj) {
   if (!bucketObj || Object.keys(bucketObj).length === 0) return "";
-  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>的中率</th><th>想定的中率</th><th>実績</th><th>想定回収率</th></tr>`;
+  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>予想的中率</th><th>実的中率</th><th>想定的中率</th><th>予想回収率</th><th>実績</th><th>想定回収率</th></tr>`;
   for (const [key, v] of Object.entries(bucketObj)) {
     const cls = v.expectancy_pct > 0 ? "ev-positive" : "";
-    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.win_rate_pct}%</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct ?? "-"}${v.expectancy_pct !== null ? "%" : ""}</td><td>${v.expected_roi_pct ?? "-"}${v.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
+    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.predicted_win_rate_pct ?? "-"}${v.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${v.win_rate_pct}%</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.predicted_roi_pct ?? "-"}${v.predicted_roi_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct ?? "-"}${v.expectancy_pct !== null ? "%" : ""}</td><td>${v.expected_roi_pct ?? "-"}${v.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
   }
   html += "</table>";
   return html;
@@ -1294,8 +1294,8 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       resultBox.textContent = data.message;
       return;
     }
-    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(実績損益: ${data.overall_profit_total}円 / 100%が損益分岐点。想定回収率: ${data.expected_roi_pct ?? "-"}${data.expected_roi_pct !== null ? "%" : ""}(想定損益: ${data.expected_profit_total ?? "-"}円)・同じく100%が損益分岐点。総ベット数: ${data.total_bets}件)</p>`;
-    html += `<p>的中率: ${data.overall_win_rate_pct}%(想定的中率: ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}、AIが購入時点で見積もっていた平均勝率)</p>`;
+    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(実績損益: ${data.overall_profit_total}円 / 100%が損益分岐点。想定回収率: ${data.expected_roi_pct ?? "-"}${data.expected_roi_pct !== null ? "%" : ""}(想定損益: ${data.expected_profit_total ?? "-"}円)・予想回収率(補正前): ${data.predicted_roi_pct ?? "-"}${data.predicted_roi_pct !== null ? "%" : ""}(予想損益: ${data.predicted_profit_total ?? "-"}円)・いずれも100%が損益分岐点。総ベット数: ${data.total_bets}件)</p>`;
+    html += `<p>実的中率: ${data.overall_win_rate_pct}%(想定的中率[補正後]: ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}・予想的中率[補正前]: ${data.predicted_win_rate_pct ?? "-"}${data.predicted_win_rate_pct !== null ? "%" : ""}、AIが購入時点で見積もっていた平均勝率)</p>`;
     if (data.calibration_significance) {
       const cs = data.calibration_significance;
       const cls = cs.p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (cs.p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
@@ -1308,17 +1308,17 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
 
     if (data.best_conditions_ranking && data.best_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>🏆 好調な条件(実績が高い順)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>想定的中率</th><th>実績</th><th>想定回収率</th></tr>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>予想的中率</th><th>実的中率</th><th>想定的中率</th><th>予想回収率</th><th>実績</th><th>想定回収率</th></tr>`;
       for (const r of data.best_conditions_ranking) {
-        html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
+        html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.predicted_win_rate_pct ?? "-"}${r.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.predicted_roi_pct ?? "-"}${r.predicted_roi_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
       }
       html += `</table>`;
     }
     if (data.worst_conditions_ranking && data.worst_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>⚠️ 不調な条件(見直しの手がかり)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>的中率</th><th>想定的中率</th><th>実績</th><th>想定回収率</th></tr>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>予想的中率</th><th>実的中率</th><th>想定的中率</th><th>予想回収率</th><th>実績</th><th>想定回収率</th></tr>`;
       for (const r of data.worst_conditions_ranking) {
-        html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
+        html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.predicted_win_rate_pct ?? "-"}${r.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.predicted_roi_pct ?? "-"}${r.predicted_roi_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
       }
       html += `</table>`;
     }
