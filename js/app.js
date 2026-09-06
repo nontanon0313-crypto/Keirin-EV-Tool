@@ -214,6 +214,13 @@ function _cacheValid(entry) {
   return entry && entry.races && (Date.now() - entry.at) < RACE_LIST_CACHE_TTL_MS;
 }
 
+function _planLabel(r) {
+  // 「予想済み」(AI勝率算出済み)と「投票プランあり」(買い目が実際にある)は別物なので
+  // 両方をラベルに出す(のんの指摘により追加)
+  if (!r.predicted) return "未予想";
+  return r.has_plan ? `投票プランあり(${r.num_bets}点)` : "予想済み・プランなし";
+}
+
 function hideFavoritesPanel() {
   const box = document.getElementById("favoritesResult");
   if (!box) return;
@@ -246,7 +253,7 @@ async function fetchTodayRaces(force) {
   const races = (data || []).map(r => ({
     id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
     entry_count: r.riders_count, odds_count: null,
-    label_extra: `${r.post_time ? r.post_time + " " : ""}${r.predicted ? "予想済み" : "未予想"}${r.actual_result ? " ・結果確定済み" : ""}`,
+    label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}${r.actual_result ? " ・結果確定済み" : ""}`,
   }));
   raceListCache.today = { at: Date.now(), races };
   return races;
@@ -260,7 +267,7 @@ async function fetchUpcomingRaces(force) {
   const races = (data || []).map(r => ({
     id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
     entry_count: r.riders_count, odds_count: null,
-    label_extra: `あと${r.mins_to_post}分(${r.post_time}) ${r.predicted ? "予想済み" : "未予想"}`,
+    label_extra: `あと${r.mins_to_post}分(${r.post_time}) ${_planLabel(r)}`,
   }));
   raceListCache.upcoming = { at: Date.now(), races };
   return races;
@@ -374,13 +381,16 @@ async function loadFavoritesList(force) {
       return;
     }
     let html = `<p><strong>本命候補</strong>（タップでレース選択） 最低勝率${minProbPct}%</p>`;
-    html += `<table><tr><th>会場</th><th>R</th><th>発走</th><th>車番</th><th>選手</th><th>勝率</th></tr>`;
+    html += `<table><tr><th>会場</th><th>R</th><th>発走</th><th>車番</th><th>選手</th><th>勝率</th><th>投票プラン</th></tr>`;
     for (const row of data) {
       const rid = row.race_id;
+      const planLabel = row.has_plan ? `あり(${row.num_bets}点)` : "なし";
+      const planColor = row.has_plan ? "#22c55e" : "#94a3b8";
       html += `<tr data-favorite-race-id="${rid}" title="タップしてこのレースを選択">` +
         `<td>${row.venue_name}</td><td>${row.race_number}R</td>` +
         `<td>${row.post_time || "-"}</td><td>${row.car_number}</td>` +
-        `<td>${row.player_name || "-"}</td><td>${row.win_prob_pct != null ? row.win_prob_pct + "%" : "-"}</td></tr>`;
+        `<td>${row.player_name || "-"}</td><td>${row.win_prob_pct != null ? row.win_prob_pct + "%" : "-"}</td>` +
+        `<td style="color:${planColor};">${planLabel}</td></tr>`;
     }
     html += `</table>`;
     box.innerHTML = html;
@@ -394,6 +404,7 @@ async function loadFavoritesList(force) {
 document.getElementById("loadFavoritesBtn").addEventListener("click", () => {
   showFavoritesPanelFromCacheOrFetch(false);
 });
+
 
 document.getElementById("deleteRaceBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
@@ -653,7 +664,6 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
       }
       html += `</table>`;
     }
-
     resultBox.innerHTML = html;
 
     // 「まとめて購入記録する」ボタンを動的に追加(このプランの内容を保持しておく)
@@ -1401,10 +1411,11 @@ document.getElementById("recommendRacePctBtn").addEventListener("click", () => {
 // ---------- ⑤ 実績検証 ----------
 function renderBucketTable(title, bucketObj) {
   if (!bucketObj || Object.keys(bucketObj).length === 0) return "";
-  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>件数</th><th>予想的中率</th><th>実的中率</th><th>想定的中率</th><th>予想回収率</th><th>実績</th><th>想定回収率</th></tr>`;
+  let html = `<p style="margin-top:10px;"><strong>${title}</strong></p><table><tr><th>区分</th><th>投票割合</th><th>予想的中率</th><th>想定的中率</th><th>実的中率</th><th>予想回収率</th><th>想定回収率</th><th>実績</th></tr>`;
   for (const [key, v] of Object.entries(bucketObj)) {
     const cls = v.expectancy_pct > 0 ? "ev-positive" : "";
-    html += `<tr class="${cls}"><td>${key}</td><td>${v.count}</td><td>${v.predicted_win_rate_pct ?? "-"}${v.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${v.win_rate_pct}%</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.predicted_roi_pct ?? "-"}${v.predicted_roi_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct ?? "-"}${v.expectancy_pct !== null ? "%" : ""}</td><td>${v.expected_roi_pct ?? "-"}${v.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
+    const voteRatePct = v.count ? Math.round((v.purchased_count / v.count) * 1000) / 10 : 0;
+    html += `<tr class="${cls}"><td>${key}</td><td>${voteRatePct}%(${v.purchased_count}/${v.count})</td><td>${v.predicted_win_rate_pct ?? "-"}${v.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${v.expected_win_rate_pct ?? "-"}${v.expected_win_rate_pct !== null ? "%" : ""}</td><td>${v.win_rate_pct}%</td><td>${v.predicted_roi_pct ?? "-"}${v.predicted_roi_pct !== null ? "%" : ""}</td><td>${v.expected_roi_pct ?? "-"}${v.expected_roi_pct !== null ? "%" : ""}</td><td>${v.expectancy_pct ?? "-"}${v.expectancy_pct !== null ? "%" : ""}</td></tr>`;
   }
   html += "</table>";
   return html;
@@ -1434,17 +1445,19 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
 
     if (data.best_conditions_ranking && data.best_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>🏆 好調な条件(実績が高い順)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>予想的中率</th><th>実的中率</th><th>想定的中率</th><th>予想回収率</th><th>実績</th><th>想定回収率</th></tr>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>投票割合</th><th>予想的中率</th><th>想定的中率</th><th>実的中率</th><th>予想回収率</th><th>想定回収率</th><th>実績</th></tr>`;
       for (const r of data.best_conditions_ranking) {
-        html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.predicted_win_rate_pct ?? "-"}${r.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.predicted_roi_pct ?? "-"}${r.predicted_roi_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
+        const voteRatePct = r.count ? Math.round((r.purchased_count / r.count) * 1000) / 10 : 0;
+        html += `<tr class="ev-positive"><td>${r.category}</td><td>${r.condition}</td><td>${voteRatePct}%(${r.purchased_count}/${r.count})</td><td>${r.predicted_win_rate_pct ?? "-"}${r.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.win_rate_pct}%</td><td>${r.predicted_roi_pct ?? "-"}${r.predicted_roi_pct !== null ? "%" : ""}</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td></tr>`;
       }
       html += `</table>`;
     }
     if (data.worst_conditions_ranking && data.worst_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>⚠️ 不調な条件(見直しの手がかり)</strong></p>`;
-      html += `<table><tr><th>切り口</th><th>条件</th><th>件数</th><th>予想的中率</th><th>実的中率</th><th>想定的中率</th><th>予想回収率</th><th>実績</th><th>想定回収率</th></tr>`;
+      html += `<table><tr><th>切り口</th><th>条件</th><th>投票割合</th><th>予想的中率</th><th>想定的中率</th><th>実的中率</th><th>予想回収率</th><th>想定回収率</th><th>実績</th></tr>`;
       for (const r of data.worst_conditions_ranking) {
-        html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${r.count}</td><td>${r.predicted_win_rate_pct ?? "-"}${r.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${r.win_rate_pct}%</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.predicted_roi_pct ?? "-"}${r.predicted_roi_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td></tr>`;
+        const voteRatePct = r.count ? Math.round((r.purchased_count / r.count) * 1000) / 10 : 0;
+        html += `<tr><td>${r.category}</td><td>${r.condition}</td><td>${voteRatePct}%(${r.purchased_count}/${r.count})</td><td>${r.predicted_win_rate_pct ?? "-"}${r.predicted_win_rate_pct !== null ? "%" : ""}</td><td>${r.expected_win_rate_pct ?? "-"}${r.expected_win_rate_pct !== null ? "%" : ""}</td><td>${r.win_rate_pct}%</td><td>${r.predicted_roi_pct ?? "-"}${r.predicted_roi_pct !== null ? "%" : ""}</td><td>${r.expected_roi_pct ?? "-"}${r.expected_roi_pct !== null ? "%" : ""}</td><td>${r.expectancy_pct}%</td></tr>`;
       }
       html += `</table>`;
     }

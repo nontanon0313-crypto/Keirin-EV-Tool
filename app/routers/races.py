@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func
 from datetime import datetime, timedelta
 import time as _time
 
@@ -356,11 +356,33 @@ def _jst_now_naive():
     return datetime.now(ZoneInfo("Asia/Tokyo")).replace(tzinfo=None)
 
 
+def _plan_bet_counts_by_race(db: Session, race_ids: list):
+    """
+    指定レースIDごとに、実際にお金を賭ける対象として記録されたPurchase
+    (stake_amount>0)の件数を返す。「予想済み(AI勝率算出済み)」と
+    「投票プランあり(買い目が実際にある)」は別物であるため、
+    ドロップダウン・本命一覧の両方で後者を明示するために使う
+    (のんの指摘「投票プランありが分からない」により追加)。
+    """
+    if not race_ids:
+        return {}
+    rows = (
+        db.query(models.Purchase.race_id, func.count(models.Purchase.id))
+        .filter(models.Purchase.race_id.in_(race_ids))
+        .filter(models.Purchase.stake_amount > 0)
+        .group_by(models.Purchase.race_id)
+        .all()
+    )
+    return {race_id: count for race_id, count in rows}
+
+
 @router.get("/today")
 def list_races_today(db: Session = Depends(get_db)):
     """
     本日(JST)のレース一覧。発走時刻順に並べる。
-    予想済みか(AI勝率が入っているか)も含める(のんの要望により追加)。
+    予想済みか(AI勝率が入っているか)、投票プランが実際にあるか(のんの指摘により
+    追加。「予想済み」は分析しただけで買い目が0件のケースもあり、
+    投票プランの有無とは別物のため)も含める。
     """
     now = _jst_now_naive()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -371,10 +393,13 @@ def list_races_today(db: Session = Depends(get_db)):
         .filter(models.Race.actual_result.is_(None))
         .all()
     )
+    race_ids = [r.id for r in races]
+    plan_counts = _plan_bet_counts_by_race(db, race_ids)
     result = []
     for r in races:
         entries = r.entries
         predicted = any(e.blended_win_prob is not None for e in entries)
+        num_bets = plan_counts.get(r.id, 0)
         result.append({
             "race_id": r.id,
             "venue_name": r.venue_name,
@@ -383,6 +408,8 @@ def list_races_today(db: Session = Depends(get_db)):
             "post_time": r.post_time.strftime("%H:%M") if r.post_time else None,
             "riders_count": len(entries),
             "predicted": predicted,
+            "has_plan": num_bets > 0,
+            "num_bets": num_bets,
             "actual_result": r.actual_result,
         })
     result.sort(key=lambda x: (x["post_time"] is None, x["post_time"] or ""))
@@ -402,11 +429,14 @@ def list_races_upcoming(within_min: int = 30, db: Session = Depends(get_db)):
         .order_by(models.Race.post_time.asc())
         .all()
     )
+    race_ids = [r.id for r in races]
+    plan_counts = _plan_bet_counts_by_race(db, race_ids)
     result = []
     for r in races:
         entries = r.entries
         predicted = any(e.blended_win_prob is not None for e in entries)
         mins_to_post = int((r.post_time - now).total_seconds() // 60)
+        num_bets = plan_counts.get(r.id, 0)
         result.append({
             "race_id": r.id,
             "venue_name": r.venue_name,
@@ -415,6 +445,8 @@ def list_races_upcoming(within_min: int = 30, db: Session = Depends(get_db)):
             "mins_to_post": mins_to_post,
             "riders_count": len(entries),
             "predicted": predicted,
+            "has_plan": num_bets > 0,
+            "num_bets": num_bets,
         })
     return result
 
@@ -441,12 +473,14 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
             models.Race.race_date < today_end,
         ).all()
     } if race_ids else {}
+    plan_counts = _plan_bet_counts_by_race(db, list(races_by_id.keys()))
 
     result = []
     for e in entries:
         race = races_by_id.get(e.race_id)
         if race is None:
             continue  # 結果確定済み、または存在しないレースは除外
+        num_bets = plan_counts.get(race.id, 0)
         result.append({
             "race_id": race.id,
             "venue_name": race.venue_name,
@@ -455,6 +489,8 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
             "car_number": e.car_number,
             "player_name": e.player_name,
             "win_prob_pct": round(e.blended_win_prob * 100, 1),
+            "has_plan": num_bets > 0,
+            "num_bets": num_bets,
         })
     result.sort(key=lambda x: -x["win_prob_pct"])
     return result

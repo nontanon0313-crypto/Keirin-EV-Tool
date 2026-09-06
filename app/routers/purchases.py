@@ -3869,8 +3869,10 @@ def _compute_purchase_stats(db: Session, since_dt=None):
                     "count": v["count"],
                     "purchased_count": v["purchased_count"],
                     "win_rate_pct": v["win_rate_pct"],
+                    "predicted_win_rate_pct": v["predicted_win_rate_pct"],
                     "expected_win_rate_pct": v["expected_win_rate_pct"],
                     "expectancy_pct": v["expectancy_pct"],
+                    "predicted_roi_pct": v["predicted_roi_pct"],
                     "expected_roi_pct": v["expected_roi_pct"],
                 })
     # 見送りのみ(実績算出不可=expectancy_pct が None)の条件はランキングに含めない

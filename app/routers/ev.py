@@ -1087,13 +1087,14 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     }
 
     # プラン0件でも「1件でも見える化」するため、落ちた候補の上位を返す
+    # (のんの指摘「投票プランありが分からない」への対応の一環。Grok案を統合)
     preview_candidates = []
     for c in sorted(candidates, key=lambda x: -x.get("ev_pct", 0))[:15]:
         key = (c["bet_type"], c["combination"])
         if key in selected_keys:
             continue
         reason = "ポートフォリオで未採用"
-        if c.get("_stake") is None or c.get("_stake", 0) <= 0:
+        if c.get("raw_stake") is None or c.get("raw_stake", 0) <= 0:
             reason = "最低投票額未満の可能性"
         preview_candidates.append({
             "bet_type": c["bet_type"],
@@ -1103,6 +1104,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "ev_pct": c.get("ev_pct"),
             "reason": reason,
         })
+
     if not items and preview_candidates:
         msg_extra = f"（EVプラス候補は{len(candidates)}件あるが、予算・ガミり・最低単位で0件になった）"
     else:
