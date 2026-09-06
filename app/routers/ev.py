@@ -441,6 +441,8 @@ def _select_portfolio(
 
         total_stake += best["_stake"]
 
+    rejected_garami = 0
+
     if avoid_garami:
         selected_keys = {
             (c["bet_type"], c["combination"])

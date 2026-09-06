@@ -334,3 +334,10 @@ python3 -c "import requests,json; print(json.dumps(requests.get('https://keirin-
 
 日付ごとの具体的な実験結果・数値の推移は `PROGRESS_ARCHIVE.md` を参照。
 (2026-09-04時点までの校正調整の経緯・券種別/オッズ帯別の詳細な数値はそちらに移動済み)
+
+### 2026-09-06 race-plan 500エラー根本原因修正
+- `app/routers/ev.py` の `_select_portfolio()` で `rejected_garami` が初期化されないまま `avoid_garami=True` 時に `rejected_garami += 1` される重大な `UnboundLocalError` を確認。
+- `avoid_garami=True` は既定値で、フロントエンド・日次パイプライン双方から使用されるため、race-plan 500エラーの直接原因になっていた可能性が高い。
+- `if avoid_garami:` の直前に `rejected_garami = 0` を追加。
+- `python -m py_compile app/routers/ev.py` 成功済み。
+- 次工程: commit → push → デプロイ後に race-plan の正常応答を確認。
