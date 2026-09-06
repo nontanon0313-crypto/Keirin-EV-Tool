@@ -486,6 +486,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
         )
 
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
+    max_race_pct = req.max_race_pct if req.max_race_pct is not None else bankroll_router.get_race_cap_pct(db)
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     if not odds_rows:
         raise HTTPException(400, "オッズデータがありません。オッズ画面(全券種)のスクショを読み込ませてください")
@@ -697,6 +698,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         raise HTTPException(400, "選手の勝率データが揃っていません")
 
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
+    max_race_pct = req.max_race_pct if req.max_race_pct is not None else bankroll_router.get_race_cap_pct(db)
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     _t1 = _time.time()  # ここまで: レース・出走表・オッズ取得
     if not odds_rows:
@@ -1003,7 +1005,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "message": "閾値(勝率・EV)を満たす買い示唆がありませんでした(見送り推奨)",
             "items": [],
             "total_stake": 0,
-            "race_budget_cap": round(bankroll * req.max_race_pct, 0),
+            "race_budget_cap": round(bankroll * max_race_pct, 0),
             "exclude_low_prob_warning_requested": req.exclude_low_prob_warning,
             "excluded_low_prob_count": excluded_low_prob_count,
             "excluded_by_min_stake_count": 0,
@@ -1018,7 +1020,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "skipped_candidate_count": len(skipped_for_verification),
         }
 
-    race_cap = bankroll * req.max_race_pct
+    race_cap = bankroll * max_race_pct
 
     # --- ガミり(的中はしたのに合計投票額を下回る)を避けるための「起こりうる結果」の洗い出し ---
     # 券種をまたいで買い目を選ぶと、同じ結果で複数券が同時的中したり、逆に1つしか

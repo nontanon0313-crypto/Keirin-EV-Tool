@@ -180,6 +180,12 @@ class BankrollState(Base):
     current_balance = Column(Float, nullable=False)
     initial_balance = Column(Float, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # 1レースあたりの上限比率(0-1)。資金管理シミュレーション(破産確率)で
+    # 確認した安全な値をここに保存し、race-plan(画面・日次パイプライン共通)の
+    # 既定値として使う。以前は画面の手入力欄(既定100%=証拠金全額)と
+    # パイプラインの固定値(10%)がズレており、実運用として危険だった
+    # (のんの指摘により2026-09-06に統一)。
+    race_cap_pct = Column(Float, nullable=False, default=0.10)
 
 
 class SkippedBet(Base):

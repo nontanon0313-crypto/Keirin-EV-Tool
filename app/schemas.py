@@ -84,12 +84,16 @@ class EvCalcRequest(BaseModel):
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
 
 
+class RaceCapSet(BaseModel):
+    race_cap_pct: float  # 0.10 = 10%。資金管理シミュレーションで確認した安全な値を設定する
+
+
 class RacePlanRequest(BaseModel):
     race_id: int
     bankroll: Optional[float] = None  # 未指定なら証拠金残高を自動使用
     fractional_coefficient: float = 0.25  # 固定値として運用(通常は変更不要)
     max_bet_pct_per_bet: float = 0.05  # 1点あたりの上限比率
-    max_race_pct: float = 0.10  # 1レース合計の上限比率(証拠金残高に対して)
+    max_race_pct: Optional[float] = None  # 未指定なら資金管理シミュレーションで確認した値(bankroll_state.race_cap_pct)を自動使用
     min_win_prob: float = 0.005
     min_ev_pct: float = 5.0
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定

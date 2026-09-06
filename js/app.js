@@ -597,20 +597,20 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         fractional_coefficient: kellyCoef,
         min_win_prob: minProb,
         min_ev_pct: minEvPct,
-        max_race_pct: (function() {
-          const useSim = document.getElementById("useSimRaceCapCheckbox") && document.getElementById("useSimRaceCapCheckbox").checked;
-          if (useSim) {
-            const v = parseFloat(document.getElementById("simRacePct") && document.getElementById("simRacePct").value);
-            if (!Number.isNaN(v) && v > 0) return v / 100;
-          }
-          return parseFloat(document.getElementById("maxRacePctInput").value) / 100;
-        })(),
+        // max_race_pctは送らない。サーバー側が証拠金タブに保存された
+        // race_cap_pct(資金管理シミュレーションで確認した値)を自動で使う。
+        // 画面の手入力欄(既定100%=証拠金全額)と日次パイプラインの固定値(10%)が
+        // ズレていて実運用として危険だったため、単一の情報源に統一した
+        // (のんの指摘により2026-09-06に修正)。
         rebate_pct: getRebatePct(),
         max_items: parseInt(document.getElementById("maxItemsInput").value) || 20,
         apply_calibration: isCalibrationApplyEnabled(),
         apply_performance_gates: document.getElementById("applyPerformanceGatesCheckbox")
           ? document.getElementById("applyPerformanceGatesCheckbox").checked : true,
-        exclude_low_prob_warning: document.getElementById("excludeLowProbCheckbox").checked,
+        // exclude_low_prob_warningも送らない(既定False)。大穴帯は予想段階の
+        // 最低勝率・EV閾値で既にふるいにかけられており、この二重フィルターは
+        // 日次パイプラインには無く画面だけにあったため結果が食い違っていた
+        // (のんの指摘により2026-09-06に削除・統一)。
         avoid_garami: document.getElementById("avoidGaramiCheckbox").checked,
       }),
     });
@@ -1252,23 +1252,7 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
       `<p class="note">試行${data.num_trials}回` +
       (data.trials_capped ? `（計算量上限のため要求より削減。レース数が多いほど自動で間引きます）` : ``) +
       ` × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>` +
-      `<p class="note">この「1レース上限%」を投票プランの上限に使う場合は、下のボタンで詳細設定へ反映し、投票タブの「検証タブの投資上限を使う」をオンにしてください。</p>` +
-      `<button type="button" id="applySimRacePctBtn" style="background:#16a34a;width:auto;padding:8px 14px;">この1レース上限${(racePct * 100).toFixed(0)}%を詳細設定に反映する</button>`;
-    const applyBtn = document.getElementById("applySimRacePctBtn");
-    if (applyBtn) {
-      applyBtn.addEventListener("click", () => {
-        const pct = parseFloat(document.getElementById("simRacePct").value);
-        const maxInput = document.getElementById("maxRacePctInput");
-        if (maxInput && !Number.isNaN(pct)) {
-          maxInput.value = pct;
-          if (typeof saveSettingsToStorage === "function") saveSettingsToStorage();
-        }
-        const useSim = document.getElementById("useSimRaceCapCheckbox");
-        if (useSim) useSim.checked = true;
-        alert(`1レース上限を${pct}%に反映しました。実投票のプラン作成時のみ使われます(検証集計には影響しません)。`);
-      });
-    }
-
+      `<p class="note">この「1レース上限%」を実際の投票プラン作成(画面・日次パイプライン共通)の上限として使いたい場合は、下の「この上限%を実投票の上限として保存する」ボタンを押してください。</p>`;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
@@ -1388,27 +1372,55 @@ async function runRecommendRacePct(silent) {
       `<p><strong>${data["メッセージ"]}</strong></p>` +
       `<p>その上限での破産確率: ${data["その上限での破産確率%"]}% ／ 黒字化率: ${data["黒字化率%"]}%</p>` +
       `<p>平均最終資金: ${data["平均最終資金"]}円</p>` +
-      `<p class="note">下のボタンで詳細設定へ反映し、実投票のプラン作成時のみ使います。</p>` +
-      `<button type="button" id="applySimRacePctBtn" style="background:#16a34a;width:auto;padding:8px 14px;">この1レース上限${pct}%を詳細設定に反映する</button>`;
-    const applyBtn = document.getElementById("applySimRacePctBtn");
-    if (applyBtn) {
-      applyBtn.addEventListener("click", () => {
-        const maxInput = document.getElementById("maxRacePctInput");
-        if (maxInput) {
-          maxInput.value = pct;
-          if (typeof saveSettingsToStorage === "function") saveSettingsToStorage();
-        }
-        const useSim = document.getElementById("useSimRaceCapCheckbox");
-        if (useSim) useSim.checked = true;
-        alert(`1レース上限を${pct}%に反映しました。実投票のプラン作成時のみ使われます。`);
-      });
-    }
+      `<p class="note">下の「この上限%を実投票の上限として保存する」ボタンを押すまでは反映されません。</p>`;
   } catch (e) {
     if (!silent) resultBox.textContent = "エラー: " + e.message;
   }
 }
 
 document.getElementById("recommendRacePctBtn").addEventListener("click", () => { saveSimInputs(); runRecommendRacePct(false); });
+
+document.getElementById("saveRaceCapBtn").addEventListener("click", async () => {
+  const statusEl = document.getElementById("raceCapSaveStatus");
+  const pct = parseFloat(document.getElementById("simRacePct").value);
+  if (Number.isNaN(pct) || pct <= 0 || pct > 100) {
+    alert("1レースあたりの投資上限(%)を1〜100の範囲で正しく入力してください。");
+    return;
+  }
+  try {
+    const res = await fetch(apiUrl("/bankroll/set-race-cap"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ race_cap_pct: pct / 100 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    if (statusEl) statusEl.textContent = `保存しました: 1レース上限${pct}%(画面・日次パイプライン共通で使われます)`;
+    refreshRaceCapDisplay();
+    alert(`1レース上限を${pct}%として保存しました。今後の投票プラン作成(画面・日次パイプライン共通)はこの値を使います。`);
+  } catch (e) {
+    alert("保存に失敗しました: " + e.message);
+  }
+});
+
+// 「投票」タブに現在の1レース上限%を表示する(のんの指摘=画面と日次パイプラインの
+// 上限がズレていた問題への対応の一環。今どの値が使われるか常に見えるようにする)
+async function refreshRaceCapDisplay() {
+  const el = document.getElementById("raceCapDisplay");
+  if (!el) return;
+  try {
+    const res = await fetch(apiUrl("/bankroll/"));
+    const data = await res.json();
+    if (data.race_cap_pct != null) {
+      el.textContent = `1レース上限%: ${(data.race_cap_pct * 100).toFixed(1)}%(資金管理シミュレーションタブで設定・保存)`;
+    } else {
+      el.textContent = `1レース上限%: 未設定(資金管理シミュレーションタブで設定してください)`;
+    }
+  } catch (e) {
+    el.textContent = `1レース上限%: 取得失敗`;
+  }
+}
+refreshRaceCapDisplay();
 
 
 // ---------- ⑤ 実績検証 ----------
@@ -1842,7 +1854,7 @@ document.getElementById("loadReadinessBtn").addEventListener("click", async () =
 
 // ---------- 詳細設定(localStorageに保存・復元) ----------
 const SETTINGS_STORAGE_KEY = "keirinEvToolSettings";
-const SETTINGS_INPUT_IDS = ["minProbInput", "minEvInput", "maxRacePctInput", "maxItemsInput", "thresholdLimitInput"];
+const SETTINGS_INPUT_IDS = ["minProbInput", "minEvInput", "maxItemsInput", "thresholdLimitInput"];
 
 function loadSettingsFromStorage() {
   try {

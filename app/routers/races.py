@@ -356,6 +356,35 @@ def _jst_now_naive():
     return datetime.now(ZoneInfo("Asia/Tokyo")).replace(tzinfo=None)
 
 
+@router.post("/backfill-post-time")
+def backfill_post_time(items: list[dict], db: Session = Depends(get_db)):
+    """
+    発走時刻(post_time)が未取得のまま登録されてしまったレースを後から埋める。
+    parse_entry自体に発走時刻取得が無かった不具合(2026-09-06修正)により、
+    それ以前に取り込んだレースはpost_timeがNULLのまま残っているため、
+    その分をバックフィルするための一時的なエンドポイント。
+    items: [{"race_id": int, "post_time_iso": "2026-09-06T14:30:00"}, ...]
+    """
+    updated = 0
+    not_found = 0
+    for item in items:
+        race_id = item.get("race_id")
+        post_time_iso = item.get("post_time_iso")
+        if not race_id or not post_time_iso:
+            continue
+        race = db.query(models.Race).get(race_id)
+        if race is None:
+            not_found += 1
+            continue
+        try:
+            race.post_time = datetime.fromisoformat(post_time_iso).replace(tzinfo=None)
+            updated += 1
+        except ValueError:
+            continue
+    db.commit()
+    return {"updated": updated, "not_found": not_found}
+
+
 def _plan_bet_counts_by_race(db: Session, race_ids: list):
     """
     指定レースIDごとに、実際にお金を賭ける対象として記録されたPurchase

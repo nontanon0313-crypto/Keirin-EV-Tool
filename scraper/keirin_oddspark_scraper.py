@@ -166,10 +166,38 @@ def parse_entry(jo_code, kaisai_bi, race_no):
         if r["車番"] not in seen and r["選手名"]:
             seen.add(r["車番"])
             unique.append(r)
+    # 発走時刻・締切予定時刻を抽出(以前はここで取得しておらず、DBのpost_timeが
+    # 常にNULLのままだったため「直前30分」機能が機能しない不具合があった。
+    # 既に取得済みのsoupから抽出するだけなので追加リクエストは不要。
+    # のんの実機運用で「直前30分のレースが表示されない」指摘により2026-09-06追加。
+    page_text = soup.get_text(" ", strip=True)
+    post_time_str = close_time_str = None
+    post_time_iso = close_time_iso = None
+    m_post = re.search(r"発走時間\s*(\d{1,2}:\d{2})", page_text)
+    if m_post:
+        post_time_str = m_post.group(1)
+    m_close = re.search(r"締切予定\s*(\d{1,2}:\d{2})", page_text)
+    if m_close:
+        close_time_str = m_close.group(1)
+    try:
+        y, mo, d = int(kaisai_bi[:4]), int(kaisai_bi[4:6]), int(kaisai_bi[6:8])
+        if post_time_str:
+            hh, mm = map(int, post_time_str.split(":"))
+            post_time_iso = datetime(y, mo, d, hh, mm).isoformat()
+        if close_time_str:
+            hh, mm = map(int, close_time_str.split(":"))
+            close_time_iso = datetime(y, mo, d, hh, mm).isoformat()
+    except (ValueError, TypeError):
+        pass
+
     return {
         "race_name": race_name, "grade": grade, "event_title": event_title,
         "riders": sorted(unique, key=lambda x: int(x["車番"])),
         "url": f"{url}?joCode={jo_code}&kaisaiBi={kaisai_bi}&raceNo={race_no}",
+        "post_time": post_time_str,
+        "close_time": close_time_str,
+        "post_time_iso": post_time_iso,
+        "close_time_iso": close_time_iso,
     }
 
 
@@ -546,34 +574,22 @@ def _parse_raw_grid(soup, debug=False, exclude_car=None):
         if numeric_vals and all(re.fullmatch(r"\d+", t) and int(t) < 10 for t in numeric_vals):
             continue  # ヘッダー行そのもの(車番の並びだけの行)は除外
 
-        # 実ページでは data_cells の各セル位置が header の車番位置に
-        # そのまま対応している。
-        #
-        # 例:
-        # header     = [1, 2, 3, 4, 5, 6, 7, ...]
-        # row_car=1  = [blank, 47.8, blank, 79.6, 20.3, 81.1, 14.0, ...]
-        #
-        # したがって「見つかったオッズを順番に詰める」のではなく、
-        # header の車番位置と data_cells の位置を対応させて取得する。
+        # この行で有効な列(=本来データがあるはずの車番)を、ヘッダー順に求める
         expected_cols = [h for h in header if h != row_car and h != exclude_car]
 
+        # 空白の幅に依存せず、実データ(オッズ値)を見つかった順に抽出する
         found_values = []
+        i = 0
+        while i < len(data_cells):
+            t = data_cells[i]
+            if ODDS_RE.match(t):
+                found_values.append(t)
+                i += 2  # (オッズ値, 人気順位)のペア。人気順位は読み飛ばす
+            else:
+                i += 1  # 空白は1セルずつ進める(幅を仮定しない)
+
         row_grid_entries = []
-
-        for col_car in expected_cols:
-            try:
-                col_index = header.index(col_car)
-            except ValueError:
-                continue
-
-            if col_index >= len(data_cells):
-                continue
-
-            odds_val = data_cells[col_index]
-            if not ODDS_RE.match(odds_val):
-                continue
-
-            found_values.append(odds_val)
+        for col_car, odds_val in zip(expected_cols, found_values):
             entry = {"col_car": col_car, "row_car": row_car, "odds": odds_val}
             grid.append(entry)
             row_grid_entries.append(entry)

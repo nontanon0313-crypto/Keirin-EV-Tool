@@ -63,11 +63,6 @@
       <input type="number" id="rebatePctInput" value="5" step="0.5">
     </div>
 
-    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
-      <input type="checkbox" id="excludeLowProbCheckbox" checked style="width:auto;margin:0;">
-      自動投票プランから大穴帯(推定勝率0-5%・実績未検 証)を除外する(推奨)
-    </label>
-
     <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
       <input type="checkbox" id="avoidGaramiCheckbox" checked style="width:auto;margin:0;">
       券種をまたいだ「ガミり」(的中しても合計投票額を 下回る結果)が起きないように選ぶ(推奨)
@@ -78,10 +73,7 @@
       実績ゲートを使う(不調ステージの見送りのみ。券種 の除外やマルチ制限はしません)。検証集計には影響しませ ん
     </label>
 
-        <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
-      <input type="checkbox" id="useSimRaceCapCheckbox" checked style="width:auto;margin:0;">
-      検証タブの「1レースあたりの投資上限%」を<strong>実投票のプラン作成時のみ</strong>合計上限に使う(オフなら詳細設定の上限)。検証・再集計には使いません
-    </label>
+    <p class="note" id="raceCapDisplay">1レース上限%: 読み込み中...(資金管理シミュレーションタブで設定)</p>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <p class="note">AI予想がまだなら自動で実行してからプランを作成します(数十秒かかる場合があります)。</p>
     <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>
@@ -165,7 +157,9 @@
     <button id="runSimBootstrapBtn" style="background:#0ea5e9;">指定した上限%でシミュレーション実行(実績データを使用・推奨)</button>
     <p class="note">「実績データを使用」は、勝率・オッズを平均値として組み合わせず、実際の購入履歴(勝ち負けとその時の倍率のペア)をそのまま抽出してシミュレートするため、大穴と本命が混ざった実際の券種構成をより正確に反映します。20件以上の確定済み購入が必要です。</p>
     <button id="recommendRacePctBtn" style="background:#16a34a;">許容破産確率から1レース上限%を自動計算</button>
-    <p class="note">手で上限%を合わせる必要はありませ ん。「自動計算」を押すと、許容破産確率以下になる最大の1レース上限%を探します(実績データが20件以上あれば自動的に実績ベースの方式を使います)。結果を詳細設定へ反映してから<strong>実投票</strong>してください。検証集計には使いま せん。</p>
+    <p class="note">「自動計算」を押すと、許容破産確率以下になる最大の1レース上限%を探します(実績データが20件以上あれば自動的に実績ベースの方式を使います)。</p>
+    <button id="saveRaceCapBtn" style="background:#a855f7;">この上限%を実投票の上限として保存する</button>
+    <p class="note" id="raceCapSaveStatus">上の欄の数値を「実投票プラン作成」(画面・日次パイプライン共通)の1レース上限%として保存します。保存するまでは反映されません。</p>
     <div style="display:flex;gap:6px;margin-top:8px;">
       <button type="button" id="copySimBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">📋 コピー</button>
       <button type="button" id="downloadSimBtn" style="width:auto;padding:5px 12px;font-size:12px;background:#475569;">💾 テキスト保存</button>
@@ -200,9 +194,6 @@
     <label>安全マージン(最低期待値%、オッズ変動対策)</label>
     <input type="number" id="minEvInput" value="5" step="1">
     <button id="suggestMarginBtn" style="background:#06b6d4;">実績から自動算出する</button>
-
-    <label>1レースあたりの上限比率(%、証拠金に対して。資金に余裕が出たら10%程度に絞る運用を推奨)</label>
-    <input type="number" id="maxRacePctInput" value="100" step="1">
 
     <label>自動投票プランの最大件数(投票アプリへの手入力にかかる時間の目安。多すぎると締切に間に合わない)</label>
     <input type="number" id="maxItemsInput" value="20" step="1">

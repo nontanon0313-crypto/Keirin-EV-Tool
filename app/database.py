@@ -308,6 +308,7 @@ def init_db():
         "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS win_prob_raw FLOAT",
         "ALTER TABLE skipped_bets ADD COLUMN IF NOT EXISTS win_prob_raw FLOAT",
         "ALTER TABLE ev_results ADD COLUMN IF NOT EXISTS estimated_win_prob_raw FLOAT",
+        "ALTER TABLE bankroll_state ADD COLUMN IF NOT EXISTS race_cap_pct FLOAT DEFAULT 0.10",
     ]
     with engine.connect() as conn:
         for stmt in migrations:
