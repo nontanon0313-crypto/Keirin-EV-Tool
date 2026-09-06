@@ -1,5 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+import traceback
 
 from .database import init_db
 from .routers import analyze, races, ev, purchases, simulation, bank, bankroll, scraper_import, admin_sync, purchase_diagnostics
@@ -14,6 +16,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 2026-09-06追加(一時的な診断用): 通常はFastAPIが未処理の例外を
+# 「Internal Server Error」という中身の無いテキストにしてしまい、原因調査が
+# できない。Renderのログを直接見られない実機運用のため、暫定的に
+# エラー内容とtracebackをそのままレスポンスに含めるようにする。
+# 原因が分かって直したら、このハンドラごと削除すること(本来は開発中のみ使う設定)。
+@app.exception_handler(Exception)
+async def debug_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": str(exc),
+            "type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
+        },
+    )
 
 app.include_router(bank.router)
 app.include_router(bankroll.router)
