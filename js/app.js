@@ -267,7 +267,7 @@ async function fetchUpcomingRaces(force) {
   const races = (data || []).map(r => ({
     id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
     entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
-    label_extra: `あと${r.mins_to_post}分(${r.post_time}) ${_planLabel(r)}`,
+    label_extra: `${r.mins_to_post >= 0 ? "あと" + r.mins_to_post + "分" : "発走済み" + (-r.mins_to_post) + "分前"}(${r.post_time}) ${_planLabel(r)}`,
   }));
   raceListCache.upcoming = { at: Date.now(), races };
   return races;

@@ -257,6 +257,10 @@ def _select_portfolio(
 ):
     """固定ケリー額を使い、ガラミ制約を満たす期待利益最大のポートフォリオを構成する。"""
     prepared = []
+    # avoid_garami=True(既定値)の時、関数末尾でこの変数を使うが初期化されていなかった
+    # ため、avoid_garami有効時は必ずUnboundLocalErrorで race-plan が500エラーになる
+    # 重大なバグがあった(のんの「投票プランありが分からない」調査で発覚・2026-09-06修正)。
+    rejected_garami = 0
 
     # 候補ごとの払戻対象結果を事前計算する。
     # 選択ループ内で judge_purchase_result を繰り返さない。
@@ -440,8 +444,6 @@ def _select_portfolio(
             payout[outcome] += payout_gain
 
         total_stake += best["_stake"]
-
-    rejected_garami = 0
 
     if avoid_garami:
         selected_keys = {
