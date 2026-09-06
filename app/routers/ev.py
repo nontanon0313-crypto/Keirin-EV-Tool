@@ -981,11 +981,19 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         for e, reason in sorted(
             skipped_for_verification, key=lambda x: -x[0].get("ev_pct", -999)
         )[:15]:
+            # skipped_for_verificationには形の異なる2種類の候補が混在する:
+            # (a) candidates由来(odds_value/estimated_win_prob_pctを保持)
+            # (b) all_evaluated由来(win_prob[小数]のみでodds_valueは無い)
+            # 一律にNoneへ決め打ちしていたため、(a)の場合までオッズがnullに
+            # 表示される不具合があった(のんの指摘により修正)。
+            win_prob_pct = e.get("estimated_win_prob_pct")
+            if win_prob_pct is None and e.get("win_prob") is not None:
+                win_prob_pct = round(e["win_prob"] * 100, 2)
             preview_candidates_0.append({
                 "bet_type": e.get("bet_type"),
                 "combination": e.get("combination"),
-                "estimated_win_prob_pct": round(e["win_prob"] * 100, 2) if e.get("win_prob") is not None else None,
-                "odds_value": None,  # all_evaluatedにはオッズを保持していないため参考値なし
+                "estimated_win_prob_pct": win_prob_pct,
+                "odds_value": e.get("odds_value"),
                 "ev_pct": e.get("ev_pct"),
                 "reason": reason,
             })
