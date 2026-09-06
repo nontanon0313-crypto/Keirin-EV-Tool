@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from typing import Optional
 from datetime import datetime, timedelta
 
@@ -897,7 +897,7 @@ def warm_calibration(db: Session = Depends(get_db)):
 
 
 @router.get("/investment-readiness")
-def investment_readiness(since: Optional[str] = None, db: Session = Depends(get_db)):
+def investment_readiness(since: Optional[str] = "calibration_switch", db: Session = Depends(get_db)):
     """
     「実資金を投資してよいか」を、具体的な数値基準で自動判定する
     (のんの要望により追加)。
@@ -1198,13 +1198,22 @@ def calibration_status(db: Session = Depends(get_db)):
 
 
 @router.get("/calibration-compare")
-def calibration_compare(db: Session = Depends(get_db)):
+def calibration_compare(since: Optional[str] = "calibration_switch", db: Session = Depends(get_db)):
     """
     条件別に「補正前(raw)」と「補正後(calibrated)」の予想精度・乖離・p値を並べる。
     rawが無い旧レコードは before 側から除外し、件数を note で明示する。
+
+    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT以降(現行の投票基準)だけに
+    絞り込むようにした。全期間を見たい場合は since=all を指定する。
     """
-    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
-    skipped = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None)).all()
+    since_dt = _parse_since_param(since) if since != "all" else None
+    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
+    if since_dt is not None:
+        pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+        sq = sq.filter(models.SkippedBet.created_at >= since_dt)
+    purchases = pq.all()
+    skipped = sq.all()
 
     race_ids = {p.race_id for p in purchases} | {s.race_id for s in skipped}
     races_by_id = {
@@ -1448,12 +1457,19 @@ TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 # 予想ロジック・確率補正・運用ゲートなど投票の中身に関わる修正を入れたら、
 # 必ずこの値を修正日の日付に更新すること(更新を忘れると、新旧ロジックの
 # 混在データが「現行基準」として集計されてしまい、精度検証の意味が壊れる)。
-CALIBRATION_SWITCH_AT = datetime(2026, 9, 5, 15, 0, 0)
-# ↑ JST 2026-09-06 00:00:00 を UTC で表現。
-# Purchase.purchased_at は datetime.utcnow() のため、naive の「日付の0時」を
-# 日本の暦日の始まりと取り違えると、JST 当日の再投票が集計から消える。
-# (2026-09-06 修正: UTC 9/6 0:00 だと JST 9/6 0:00〜9:00 の購入が除外されるバグ)
-
+# 集計・診断系エンドポイントが「現行の投票基準」とみなす基準日時。
+# 予想ロジック・確率補正・運用ゲートなど投票の中身に関わる修正を入れたら、
+# 必ずこの値を修正日の日付に更新すること(更新を忘れると、新旧ロジックの
+# 混在データが「現行基準」として集計されてしまい、精度検証の意味が壊れる)。
+#
+# 2026-09-06: 「今日の日付」ではなく「最後に実際の投票ロジックを変更した日時」に
+# 設定し直した。直近の実質的な変更は2026-09-05の高オッズ帯確率縮小係数
+# (HIGH_ODDS_BANDSに「300-1000倍」を追加)。JST 2026-09-05 00:00をUTCで表現。
+#
+# Purchase.purchased_at は datetime.utcnow() で保存されるため、naiveな
+# 「日付の0時」をJSTの暦日の始まりと取り違えると、JST当日早朝(〜9時頃)の
+# データが集計から抜け落ちる(Grokが2026-09-06に発見・修正した不具合)。
+CALIBRATION_SWITCH_AT = datetime(2026, 9, 4, 15, 0, 0)
 
 
 def _parse_since_param(since: Optional[str]) -> Optional[datetime]:
@@ -3136,14 +3152,25 @@ def stage_diagnostic(stages: str = "S級特秀,S級選抜,S級準決勝,S級決�
 
 
 @router.get("/profit-concentration")
-def profit_concentration(db: Session = Depends(get_db)):
+def profit_concentration(since: Optional[str] = "calibration_switch", db: Session = Depends(get_db)):
     """
     利益がごく一部の大穴的中に偏っていないかを確認する
     (欠落していたエンドポイントをのんの指摘により復旧・再実装)。
+
+    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT以降(現行の投票基準)だけに
+    絞り込むようにした。全期間を見たい場合は since=all を指定する。
     """
-    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    since_dt = _parse_since_param(since) if since != "all" else None
+    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+    purchases = pq.all()
     if not purchases:
-        return {"message": "まだ確定した購入履歴がありません"}
+        return {
+            "message": "まだ確定した購入履歴がありません",
+            "since": since,
+            "since_resolved": since_dt.isoformat() if since_dt else None,
+        }
 
     hits = [p for p in purchases if p.result == "win"]
     misses = [p for p in purchases if p.result != "win"]
@@ -3291,20 +3318,34 @@ def profit_concentration(db: Session = Depends(get_db)):
 
 
 @router.get("/car-pick-accuracy")
-def car_pick_accuracy(db: Session = Depends(get_db)):
+def car_pick_accuracy(since: Optional[str] = "calibration_switch", db: Session = Depends(get_db)):
     """
     券種の組み合わせによるノイズを除き、「そのレースでAIが最有力とした車番」が
     実際に1着/上位3着に来たかどうかだけを追跡する。
     同一レース内の複数買い目が、実質同じ車番予想を券種違いで何度も張っているだけ
     (相関が強く、独立試行として扱えない)という問題を避けた、より純粋な予測精度の指標。
     「1レース=1試行」なので、二項検定もそのまま正しく使える(のんの指摘により追加)。
+
+    2026-09-06修正: このエンドポイントはPurchaseではなくEntry.blended_win_probを
+    直接見るため、CALIBRATION_SWITCH_AT以降にPurchase/SkippedBetを持たない
+    (=現行ロジックで一度も投票・見送り判定されていない=再投票されていない)
+    古いレースは既定で除外するようにした。全期間を見たい場合は since=all。
     """
-    races = (
-        db.query(models.Race)
-        .filter(models.Race.actual_result.isnot(None))
-        .options(joinedload(models.Race.entries))
-        .all()
-    )
+    since_dt = _parse_since_param(since) if since != "all" else None
+    rq = db.query(models.Race).filter(models.Race.actual_result.isnot(None))
+    if since_dt is not None:
+        already_purchased = (
+            db.query(models.Purchase.id)
+            .filter(models.Purchase.race_id == models.Race.id)
+            .filter(models.Purchase.purchased_at >= since_dt)
+        )
+        already_skipped = (
+            db.query(models.SkippedBet.id)
+            .filter(models.SkippedBet.race_id == models.Race.id)
+            .filter(models.SkippedBet.created_at >= since_dt)
+        )
+        rq = rq.filter(or_(already_purchased.exists(), already_skipped.exists()))
+    races = rq.options(joinedload(models.Race.entries)).all()
     items = []
     for race in races:
         entries = [e for e in race.entries if e.blended_win_prob is not None]
@@ -3448,7 +3489,7 @@ def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_sw
     勝率帯別・券種別の回収率など、複数の切り口で集計する。
     単一要素だけで結論づけないためのFX版ルールを踏襲。
 
-    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT(現行の投票基準の開始・UTC)以降の
+    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT(現行の投票基準の開始日時)以降の
     データだけに絞り込むようにした。以前はsinceの絞り込みが無く、投票ロジックが
     変わる前の旧データまで「現行基準の集計」として表示されていた(のんの指摘で発覚)。
     全期間を見たい場合は since=all を指定する。
