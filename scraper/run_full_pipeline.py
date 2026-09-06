@@ -365,6 +365,26 @@ def _lightweight_confirm_sweep(files):
     log(f"--- 結果確定スイープ: 確定/確認{confirmed}件・結果まだ無し{still_pending}件・エラー{error}件 ---")
 
 
+def warm_calibration():
+    """
+    予想(race-plan)で使う校正係数・ステージ/券種ゲート集計を先にまとめて計算・
+    キャッシュしておく。これらはPurchase全件スキャンを伴う重い処理で、
+    未キャッシュのままだと1レースごとのrace-plan呼び出しの中で毎回(しかも
+    concurrency>1なら複数レース分が同時に)再計算されてしまい、
+    1レースあたり約50秒かかる主因になっていた(2026-09-03調査で判明済みだが
+    パイプライン側での呼び出しが漏れていたため、2026-09-06に追加)。
+    キャッシュは60分有効なので、1日分の処理なら最初に1回呼べば十分。
+    """
+    log("校正係数をウォームアップ中(race-planの高速化のため)...")
+    try:
+        r = requests.post(f"{API_BASE}/purchases/warm-calibration", timeout=120)
+        r.raise_for_status()
+        data = r.json()
+        log(f"  ウォームアップ完了({data.get('total_seconds')}秒。以降のrace-planはこのキャッシュを使うため速くなるはず)")
+    except Exception as e:
+        log(f"  ウォームアップ失敗(続行します。race-plan側で都度計算されるため遅くなる可能性あり): {e}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", help="1レース分のJSONファイル")
@@ -379,6 +399,8 @@ def main():
     args = ap.parse_args()
 
     warmup_backend()
+    if not args.dry_run:
+        warm_calibration()
 
     bankroll = args.bankroll
     if bankroll is None and not args.dry_run:
