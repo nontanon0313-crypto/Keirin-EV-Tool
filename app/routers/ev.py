@@ -871,6 +871,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "combination": o.combination,
             "win_prob": est_prob,
             "win_prob_raw": est_prob_raw,
+            "odds_value": o.odds_value,
             "ev_pct": round(ev_pct, 2),
             "gate_reason": gate_reason,
             "effective_min_ev": effective_min_ev,
