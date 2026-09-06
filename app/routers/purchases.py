@@ -3613,80 +3613,73 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         return "人気分散型(17.8倍〜)"
 
     def bucket_stats(key_fn):
+        # 2026-09-07 指標を再定義(のんの指摘により変更):
+        #   予想 = 見送りも含む評価対象全件のAI見積り(補正後)。従来の「想定」の計算式を流用。
+        #   想定 = 実際に投票プランで投票した対象「だけ」のAI見積り(補正後)。
+        #   実績 = 実際に投票プランで投票した対象「だけ」の実際の結果(的中率・回収率)。
+        # 想定と実績の集計母集団を揃えることで、両者を直接比較できるようにする。
         buckets = {}
         for p in purchases:
             key = key_fn(p)
             b = buckets.setdefault(key, {
-                "stake": 0.0, "payout": 0.0, "count": 0, "wins": 0,
+                "stake": 0.0, "payout": 0.0, "count": 0,
                 "win_prob_sum": 0.0, "win_prob_count": 0,
-                "win_prob_raw_sum": 0.0, "win_prob_raw_count": 0,
                 "ev_pct_sum": 0.0, "ev_pct_count": 0,
-                "raw_roi_sum": 0.0, "raw_roi_count": 0,
-                "purchased_count": 0,
+                "purchased_count": 0, "purchased_wins": 0,
+                "purchased_win_prob_sum": 0.0, "purchased_win_prob_count": 0,
+                "purchased_ev_pct_sum": 0.0, "purchased_ev_pct_count": 0,
             })
             b["count"] += 1
-            if p.result == "win":
-                b["wins"] += 1
-            # win_prob_at_purchase / ev_pct_at_purchase は、購入時点でのAI予想値
-            # (実績ではなく「買った時、AIはどう見積もっていたか」のスナップショット)。
+            # 予想: win_prob_at_purchase / ev_pct_at_purchase(AI見積り・補正後)を
+            # 実際に投票したかどうかに関係なく全件単純平均する。
             if p.win_prob_at_purchase is not None:
                 b["win_prob_sum"] += p.win_prob_at_purchase
                 b["win_prob_count"] += 1
-            # 2026-09-06追加: win_prob_raw は補正前(生)の予想確率。
-            # 想定的中率(補正後)と実的中率(実績)だけだと、補正がどれだけ効いたか
-            # (補正前→補正後→実績)の3段階比較ができなかったため追加
-            # (のんの要望により追加)。
-            raw_prob = getattr(p, "win_prob_raw", None)
-            if raw_prob is not None:
-                b["win_prob_raw_sum"] += raw_prob
-                b["win_prob_raw_count"] += 1
-            odds = getattr(p, "odds_at_purchase", None)
-            if raw_prob is not None and odds:
-                # ev_pct_at_purchase(補正後・保存済み)と同じ「0%が損益分岐点」の
-                # 表現に揃える。リベート等は個別購入に保存されていないため簡易計算
-                # (参考値である旨をラベル側に明記する)。
-                b["raw_roi_sum"] += (raw_prob * odds - 1) * 100
-                b["raw_roi_count"] += 1
+            if p.ev_pct_at_purchase is not None:
+                b["ev_pct_sum"] += p.ev_pct_at_purchase
+                b["ev_pct_count"] += 1
             # 見送り(SkippedBet)は実際にお金を賭けていない(stake=0固定)ため、
-            # 的中率の検証には使うが、収支(実績金額)の集計には混ぜない
-            # (のんの指摘により修正。以前は見送りのstake=0がそのまま平均に混ざり、
-            # 見送りが大半を占める勝率帯[特に大穴]の「実績」が実態と無関係に0%表示に
-            # なっていた)。
+            # 想定・実績はどちらも実際に投票した対象だけを対象にする。
             if p.stake_amount > 0:
                 b["purchased_count"] += 1
                 b["stake"] += p.stake_amount
                 b["payout"] += p.payout_amount
-            # 「想定回収率」はAIが見積もった理論値であり、実際に賭けたかどうかに
-            # 関係なく計算できる(のんの指摘により修正。以前は購入分の投資額で
-            # 加重していたため、見送りしかない条件では計算不能=空欄になっていた)。
-            # 予想精度の比較には使わない値なので、購入分とは違い単純平均でよい。
-            if p.ev_pct_at_purchase is not None:
-                b["ev_pct_sum"] += p.ev_pct_at_purchase
-                b["ev_pct_count"] += 1
+                if p.result == "win":
+                    b["purchased_wins"] += 1
+                if p.win_prob_at_purchase is not None:
+                    b["purchased_win_prob_sum"] += p.win_prob_at_purchase
+                    b["purchased_win_prob_count"] += 1
+                if p.ev_pct_at_purchase is not None:
+                    b["purchased_ev_pct_sum"] += p.ev_pct_at_purchase
+                    b["purchased_ev_pct_count"] += 1
         out = {}
         for k, v in buckets.items():
             has_purchase = v["purchased_count"] > 0
             expectancy = ((v["payout"] - v["stake"]) / v["stake"] * 100) if has_purchase else None
-            expected_win_rate_pct = (
+            # 予想的中率/予想回収率: 見送りも含む評価対象全件の単純平均(旧「想定」と同じ計算式)。
+            predicted_win_rate_pct = (
                 round(v["win_prob_sum"] / v["win_prob_count"] * 100, 1) if v["win_prob_count"] else None
             )
-            predicted_win_rate_pct = (
-                round(v["win_prob_raw_sum"] / v["win_prob_raw_count"] * 100, 1) if v["win_prob_raw_count"] else None
-            )
-            # ev_pct_at_purchaseは「0%が損益分岐点」表現のため、+100して実績(roi_pct)と
-            # 同じ「100%が損益分岐点」表現に揃える。実際に賭けたか否かに関係なく
-            # 全件の単純平均を使う(のんの指摘により修正。予想精度の比較には使わない)。
-            expected_roi_pct = (
+            predicted_roi_pct = (
                 round(v["ev_pct_sum"] / v["ev_pct_count"] + 100, 2) if v["ev_pct_count"] else None
             )
-            predicted_roi_pct = (
-                round(v["raw_roi_sum"] / v["raw_roi_count"] + 100, 2) if v["raw_roi_count"] else None
+            # 想定的中率/想定回収率: 実際に投票した対象だけの単純平均(実績と同じ母集団)。
+            expected_win_rate_pct = (
+                round(v["purchased_win_prob_sum"] / v["purchased_win_prob_count"] * 100, 1)
+                if v["purchased_win_prob_count"] else None
             )
-            expected_profit = None
+            expected_roi_pct = (
+                round(v["purchased_ev_pct_sum"] / v["purchased_ev_pct_count"] + 100, 2)
+                if v["purchased_ev_pct_count"] else None
+            )
+            # 実的中率: 実際に投票した対象だけの実際の的中率(想定と同じ母集団)。
+            win_rate_pct = (
+                round(v["purchased_wins"] / v["purchased_count"] * 100, 1) if has_purchase else None
+            )
             out[k] = {
                 "count": v["count"],
                 "purchased_count": v["purchased_count"],
-                "win_rate_pct": round(v["wins"] / v["count"] * 100, 1),
+                "win_rate_pct": win_rate_pct,
                 "predicted_win_rate_pct": predicted_win_rate_pct,
                 "expected_win_rate_pct": expected_win_rate_pct,
                 # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
@@ -3696,7 +3689,7 @@ def _compute_purchase_stats(db: Session, since_dt=None):
                 "profit": round(v["payout"] - v["stake"], 0) if has_purchase else None,
                 "predicted_roi_pct": predicted_roi_pct,
                 "expected_roi_pct": expected_roi_pct,
-                "expected_profit": expected_profit,
+                "expected_profit": None,
             }
         # 実績が高い順に並べ替える(見送りのみで実績算出不可のものは末尾に回す)
         return dict(sorted(
@@ -3881,50 +3874,48 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     ranking = [r for r in ranking if r["expectancy_pct"] is not None]
     ranking.sort(key=lambda x: -x["expectancy_pct"])
 
-    # 全体の想定期待値・想定的中率(購入時点でAIが見積もっていた値の平均)
-    # 注意: ev_pct_at_purchaseは「0%が損益分岐点」の表現(calc_ev_pctの定義)で保存されている。
-    # 実績収支率(overall_roi_pct)は「100%が損益分岐点」の表現なので、そのまま並べて比較すると
-    # 単位が100ポイントずれる。+100して揃える(外部監査により発覚したバグを修正)。
+    # 2026-09-07 指標を再定義(のんの指摘により変更):
+    #   予想 = 見送りも含む評価対象全件のAI見積り(補正後)。従来の「想定」の計算式をそのまま流用。
+    #   想定 = 実際に投票プランで投票した対象「だけ」のAI見積り(補正後)。
+    #   実的中率 = 実際に投票プランで投票した対象「だけ」の実際の的中率。
+    # 想定と実的中率・実績収支率(overall_roi_pct)の集計母集団を揃えることで、
+    # 「想定通りの結果になっているか」を直接比較できるようにする。
     #
-    # さらに、レースごとに投資額が異なる(証拠金は日々変動するため)ため、単純平均では
-    # 少額のレースと高額のレースが同じ重みになってしまい、実際に得ていた/失っていた金額
-    # (想定収益)とズレる。実績収支率(payout/stake)が金額加重であるのに合わせ、
-    # 想定側も金額加重で計算する(のんの指摘により修正)。
+    # 予想(旧・想定の計算式): ev_pct_at_purchaseは「0%が損益分岐点」の表現(calc_ev_pctの定義)。
+    # 実績収支率(100%が損益分岐点)と単位を揃えるため+100する。レースごとに投資額が
+    # 異なるため、実績収支率(payout/stake)と同じ金額加重で計算する(のんの指摘により修正)。
     win_prob_values = [p.win_prob_at_purchase for p in purchases if p.win_prob_at_purchase is not None]
     ev_purchases = [p for p in purchases if p.ev_pct_at_purchase is not None]
-    expected_win_rate_pct = round(sum(win_prob_values) / len(win_prob_values) * 100, 1) if win_prob_values else None
-    expected_stake_sum = sum(p.stake_amount for p in ev_purchases)
-    expected_profit_sum = sum(p.stake_amount * p.ev_pct_at_purchase / 100 for p in ev_purchases)
-    expected_roi_pct = (
-        round((expected_profit_sum / expected_stake_sum + 1) * 100, 2) if expected_stake_sum else None
-    )
-    expected_profit_total = round(expected_profit_sum, 0) if ev_purchases else None
-    overall_win_count = sum(1 for p in purchases if p.result == "win")
-    overall_win_rate_pct = round(overall_win_count / len(purchases) * 100, 1) if purchases else 0.0
-
-    # 2026-09-06追加: 補正前(生)の予想確率の全体平均・想定回収率。
-    # 「予想的中率(補正前)→想定的中率(補正後)→実的中率(実績)」の3段階、
-    # 「予想回収率(補正前)→想定回収率(補正後)→実績(実績)」の3段階で、
-    # 補正がどれだけ効いているかを比較できるようにする(のんの要望により追加)。
-    # expected_roi_pct と同様、金額加重で計算する。
-    raw_prob_values = [
-        getattr(p, "win_prob_raw", None) for p in purchases if getattr(p, "win_prob_raw", None) is not None
-    ]
-    predicted_win_rate_pct = round(sum(raw_prob_values) / len(raw_prob_values) * 100, 1) if raw_prob_values else None
-    raw_ev_purchases = [
-        p for p in purchases
-        if getattr(p, "win_prob_raw", None) is not None
-        and getattr(p, "odds_at_purchase", None)
-        and p.stake_amount > 0
-    ]
-    predicted_stake_sum = sum(p.stake_amount for p in raw_ev_purchases)
-    predicted_profit_sum = sum(
-        p.stake_amount * (p.win_prob_raw * p.odds_at_purchase - 1) for p in raw_ev_purchases
-    )
+    predicted_win_rate_pct = round(sum(win_prob_values) / len(win_prob_values) * 100, 1) if win_prob_values else None
+    predicted_stake_sum = sum(p.stake_amount for p in ev_purchases)
+    predicted_profit_sum = sum(p.stake_amount * p.ev_pct_at_purchase / 100 for p in ev_purchases)
     predicted_roi_pct = (
         round((predicted_profit_sum / predicted_stake_sum + 1) * 100, 2) if predicted_stake_sum else None
     )
-    predicted_profit_total = round(predicted_profit_sum, 0) if raw_ev_purchases else None
+    predicted_profit_total = round(predicted_profit_sum, 0) if ev_purchases else None
+
+    # 想定: 実際に投票した対象だけに絞り込んだ上で、同じ計算式(金額加重)を適用する。
+    purchased_only_for_stats = [p for p in purchases if p.stake_amount > 0]
+    purchased_win_prob_values = [
+        p.win_prob_at_purchase for p in purchased_only_for_stats if p.win_prob_at_purchase is not None
+    ]
+    purchased_ev_purchases = [p for p in purchased_only_for_stats if p.ev_pct_at_purchase is not None]
+    expected_win_rate_pct = (
+        round(sum(purchased_win_prob_values) / len(purchased_win_prob_values) * 100, 1)
+        if purchased_win_prob_values else None
+    )
+    expected_stake_sum = sum(p.stake_amount for p in purchased_ev_purchases)
+    expected_profit_sum = sum(p.stake_amount * p.ev_pct_at_purchase / 100 for p in purchased_ev_purchases)
+    expected_roi_pct = (
+        round((expected_profit_sum / expected_stake_sum + 1) * 100, 2) if expected_stake_sum else None
+    )
+    expected_profit_total = round(expected_profit_sum, 0) if purchased_ev_purchases else None
+
+    # 実的中率: 実際に投票した対象だけの実際の的中率(想定と同じ母集団)。
+    overall_win_count = sum(1 for p in purchased_only_for_stats if p.result == "win")
+    overall_win_rate_pct = (
+        round(overall_win_count / len(purchased_only_for_stats) * 100, 1) if purchased_only_for_stats else None
+    )
 
     # 資金管理シミュレーション用の勝率・オッズ。
     # 【バグ修正】以前は「全買い目の投資額加重平均オッズ」(外れ含む)をモンテカルロに
