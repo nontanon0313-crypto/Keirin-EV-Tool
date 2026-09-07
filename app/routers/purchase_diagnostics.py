@@ -1959,6 +1959,108 @@ def diagnostics_gate_expectancy_detail(
     }
 
 
+@router.get("/pick-to-bet-funnel")
+def diagnostics_pick_to_bet_funnel(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    ChatGPT分析9項目の項目2: 本命予想→買い目確率→EVの変換過程の可視化
+    (読み取り専用)。
+
+    「本命車番の予測は比較的整っているのに、買い目として展開した段階で
+    収益予測が過大になる」可能性を検証する。本命車番自体の予測精度は
+    `/purchases/car-pick-accuracy` で確認済みのため、ここでは実購入
+    (3連単・2車単、着順を指定する券種)を「本命車番が1着位置の買い目」と
+    「本命以外が1着位置の買い目」に分け、それぞれの予測確率と実際の的中率の
+    比(キャリブレーション)を比較する。既存の予想ロジック(Harville型の
+    組み合わせ確率計算)は一切変更しない。
+    """
+    since_dt = purchases_router._parse_since_param(since) if since != "all" else None
+    q = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result.in_(("win", "lose")))
+        .filter(models.Purchase.bet_type.in_(("3連単", "2車単")))
+        .filter(models.Purchase.win_prob_at_purchase.isnot(None))
+    )
+    if since_dt is not None:
+        q = q.filter(models.Purchase.purchased_at >= since_dt)
+    purchases = q.all()
+
+    if not purchases:
+        return {"message": "対象データがありません(3連単・2車単の確定済み購入)"}
+
+    race_ids = {p.race_id for p in purchases}
+    races = db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()
+    honmei_by_race: Dict[int, Optional[int]] = {}
+    for r in races:
+        entries = [e for e in r.entries if e.blended_win_prob is not None]
+        if not entries:
+            honmei_by_race[r.id] = None
+            continue
+        top = max(entries, key=lambda e: e.blended_win_prob)
+        honmei_by_race[r.id] = top.car_number
+
+    def _first_car(combination: str) -> Optional[int]:
+        try:
+            return int(str(combination).split("-")[0])
+        except (ValueError, IndexError):
+            return None
+
+    def _stats(rows: List[models.Purchase]) -> Optional[Dict[str, Any]]:
+        n = len(rows)
+        if n == 0:
+            return None
+        wins = sum(1 for p in rows if p.result == "win")
+        pred_avg = sum(float(p.win_prob_at_purchase) for p in rows) / n
+        act = wins / n
+        p_value = calc.binomial_lower_tail_p(wins, n, pred_avg)
+        stake = sum(float(p.stake_amount or 0) for p in rows)
+        payout = sum(float(p.payout_amount or 0) for p in rows)
+        return {
+            "n": n,
+            "win_count": wins,
+            "predicted_win_rate_pct": round(pred_avg * 100, 2),
+            "actual_win_rate_pct": round(act * 100, 2),
+            "ratio_actual_over_predicted": round(act / pred_avg, 3) if pred_avg > 1e-12 else None,
+            "significance_p_value_pct": round(p_value * 100, 4),
+            "roi_pct": round(payout / stake * 100, 2) if stake > 0 else None,
+        }
+
+    by_bet_type = {}
+    for bt in ("3連単", "2車単"):
+        rows = [p for p in purchases if p.bet_type == bt]
+        honmei_first, other_first, unknown = [], [], 0
+        for p in rows:
+            honmei = honmei_by_race.get(p.race_id)
+            first = _first_car(p.combination)
+            if honmei is None or first is None:
+                unknown += 1
+                continue
+            (honmei_first if first == honmei else other_first).append(p)
+        by_bet_type[bt] = {
+            "本命車番が1着位置の買い目": _stats(honmei_first),
+            "本命以外が1着位置の買い目": _stats(other_first),
+            "本命車番不明で除外した件数": unknown,
+        }
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "by_bet_type": by_bet_type,
+        "note": (
+            "本命車番(そのレースでAIのblended_win_probが最も高い車番)が1着位置に"
+            "指定された買い目と、それ以外を分けて、予測確率と実際の的中率の比を"
+            "比較する。ratio_actual_over_predictedが1から離れているほど、その"
+            "区分での確率変換(本命確率→買い目確率)に偏りがある可能性を示す"
+            "(1未満=予測が楽観的、1超=予測が悲観的)。両区分でほぼ同じ比率なら"
+            "『買い目展開段階で収益予測が過大になっている』とは言えない。"
+            "本命車番自体の予測精度は /purchases/car-pick-accuracy を参照。"
+            "既存の予想ロジックは変更していない(読み取り専用の診断)。"
+        ),
+    }
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
