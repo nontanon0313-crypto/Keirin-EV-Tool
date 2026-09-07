@@ -232,13 +232,23 @@ def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) ->
                 "factor": 1.0,
             }
         raw = act / pred
-        # サンプルが少ないほど1.0に寄せる。nが増えたらほぼ生比率を使う。
-        required = 60
-        shrink = min(1.0, n / required)
+        # 2026-09-07修正(のんの指摘により変更): 信頼度の基準を「生の試行数n」から
+        # 「期待的中数(pred×n)」に変更した。
+        # 旧方式はnが80件を超えると一律floor=0.12まで縮小していたが、3連単のような
+        # 低確率高配当の券種はn=85でも期待的中数は1件未満で、実際の的中/外れの
+        # ブレだけで係数が0.12まで暴れる事故が発生した(実際は黒字の3連単が
+        # 大赤字と誤判定された)。二項分布で比率が意味を持つには「試行回数」ではなく
+        # 「期待される事象の発生回数」がある程度必要という統計的に妥当な基準に変更し、
+        # 低確率帯ほど多くの試行数が要求されるようにした。
+        expected_wins = pred * n
+        required_expected_wins = 15.0
+        shrink = min(1.0, expected_wins / required_expected_wins)
         factor = 1.0 + shrink * (raw - 1.0)
-        # 大規模サンプルで大きく楽観が残る帯は下限を下げて寄せる
-        # (2車単・10-30倍帯など。2026-09-04の6927件診断で確認)
-        floor = 0.08 if n >= 100 and raw < 0.5 else 0.12 if n >= 80 else 0.15
+        # 大規模サンプル(期待的中数ベース)で大きく楽観が残る帯は下限を下げて寄せる
+        # (2車単・10-30倍帯など。2026-09-04の6927件診断で確認。pred~15%×6927件で
+        # 期待的中数は1000件超のため、旧n基準・新expected_wins基準どちらでも
+        # floorが効く対象であることに変わりはない)。
+        floor = 0.08 if expected_wins >= 20 and raw < 0.5 else 0.15 if expected_wins >= 10 else 0.3
         factor = max(floor, min(1.5, factor))
         return {
             "n": n,
@@ -246,6 +256,7 @@ def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) ->
             "predicted_avg_pct": round(pred * 100, 4),
             "actual_hit_rate_pct": round(act * 100, 4),
             "raw_ratio": round(raw, 4),
+            "expected_wins": round(expected_wins, 2),
             "factor": round(factor, 4),
         }
 
