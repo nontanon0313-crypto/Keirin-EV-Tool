@@ -255,7 +255,19 @@ async function fetchTodayRaces(force) {
     entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
     label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}${r.actual_result ? " ・結果確定済み" : ""}`,
   }));
-  raceListCache.today = { at: Date.now(), races };
+  if (Array.isArray(races)) {
+    races = races.filter(r => {
+      const st = String(
+        r.status ?? r.race_status ?? r.raceStatus ?? ""
+      ).toLowerCase();
+      return !(
+        r.finished === true ||
+        r.completed === true ||
+        ["finished","completed","終了","確定"].includes(st)
+      );
+    });
+  }
+raceListCache.today = { at: Date.now(), races };
   return races;
 }
 
@@ -387,7 +399,7 @@ async function loadFavoritesList(force) {
     for (const row of data) {
       const rid = row.race_id;
       const planLabel = row.has_plan ? `🟢あり(${row.num_bets}点)` : "なし";
-      const planColor = row.has_plan ? "#4ade80" : "#94a3b8";
+      const planColor = row.has_plan ? "#4ade80" : "#facc15";
       const rowBg = row.has_plan ? "background-color:#052e1b;" : "";
       html += `<tr data-favorite-race-id="${rid}" title="タップしてこのレースを選択" style="${rowBg}">` +
         `<td>${row.venue_name}</td><td>${row.race_number}R</td>` +
@@ -477,14 +489,14 @@ async function checkRace() {
     if (data.lines_data && data.lines_data.length) {
       html += `<p>ライン構成: ${data.lines_data.map(l => l.join("-")).join(" / ")}</p>`;
     } else {
-      html += `<p style="color:#94a3b8;">ライン構成: 未取得(「並び予想」画面等を読み込ませると反映されます)</p>`;
+      html += `<p style="color:#facc15;">ライン構成: 未取得(「並び予想」画面等を読み込ませると反映されます)</p>`;
     }
 
     if (data.bank_info && data.bank_info.lead_advantage_score !== null) {
       const b = data.bank_info;
       html += `<p>バンク特性: 周長${b.lap_length_m}m / みなし直線${b.home_stretch_length_m}m / 先行有利度${b.lead_advantage_score}(0=差し有利〜1=先行絶対有利)</p>`;
     } else {
-      html += `<p style="color:#94a3b8;">バンク特性: データなし</p>`;
+      html += `<p style="color:#facc15;">バンク特性: データなし</p>`;
     }
 
     html += `<p>グレード: ${data.grade ?? "不明"} / ステージ: ${data.race_stage ?? "不明"}</p>`;
@@ -934,7 +946,7 @@ function renderRevenueList(data) {
           : ""
         }
         <button type="button" class="revenueDeleteBtn"
-          data-id="${r.id}" style="background:#64748b;width:auto;">
+          data-id="${r.id}" style="background:#facc15;width:auto;">
           削除
         </button>
       </div>`;
@@ -1223,7 +1235,7 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
         <label>実際の着順(例: 2-5-1 = 1着2番,2着5番,3着1番。同着は"="で区切る 例: 7-14=9)</label>
         <input type="text" placeholder="2-5-1(同着なら 7-14=9)" id="result_${raceId}">
         <button data-race="${raceId}" class="confirmResultBtn">この着順で一括確定する</button>
-        ${group.items.length ? `<button data-race="${raceId}" class="discardPendingBtn" style="background:#64748b;">実際は投票しなかった(この分を破棄)</button>` : ""}
+        ${group.items.length ? `<button data-race="${raceId}" class="discardPendingBtn" style="background:#facc15;">実際は投票しなかった(この分を破棄)</button>` : ""}
         <div id="confirmMsg_${raceId}" class="result-box"></div>
       `;
       box.appendChild(div);
@@ -2397,3 +2409,22 @@ loadSettingsFromStorage();
 setRaceFilterButtons("today");
 loadRaces();
 refreshBankrollDisplay();
+
+
+// 詳細設定保存ボタン
+document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
+  try {
+    const inputs = document.querySelectorAll("#tab-settings input, #tab-settings select");
+    inputs.forEach(el => {
+      if (!el.id) return;
+      if (el.type === "checkbox") {
+        localStorage.setItem(el.id, el.checked ? "true" : "false");
+      } else {
+        localStorage.setItem(el.id, el.value);
+      }
+    });
+    alert("設定を保存しました。");
+  } catch (e) {
+    alert("設定の保存に失敗しました: " + e.message);
+  }
+});

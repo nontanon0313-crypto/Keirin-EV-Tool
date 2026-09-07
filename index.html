@@ -15,7 +15,6 @@
 
 <nav class="tabbar">
   <button class="tab-btn active" data-tab="tab-vote"> 投票</button>
-  <button class="tab-btn" data-tab="tab-bankroll">証拠金</button>
   <button class="tab-btn" data-tab="tab-revenue">収益</button>
   <button class="tab-btn" data-tab="tab-verify">検証</button>
   <button class="tab-btn" data-tab="tab-settings">詳細設定</button>
@@ -25,7 +24,7 @@
 
 <div id="tab-vote" class="tab-content active">
 
-  
+
 
   <section class="card">
     <h2>② レース選択・期待値計算</h2>
@@ -75,7 +74,14 @@
   <section class="card">
     <h2>③ 購入記録</h2>
     <p class="note">上の一覧で購入した買い目を手動で記録してください。</p>
-    <input type="text" id="purchaseBetType" placeholder="券種(例: 3連単)">
+    <select id="purchaseBetType">
+        <option value="">券種を選択</option>
+        <option value="2車単">2車単</option>
+        <option value="2車複">2車複</option>
+        <option value="3連単">3連単</option>
+        <option value="3連複">3連複</option>
+        <option value="ワイド">ワイド</option>
+      </select>
     <input type="text" id="purchaseCombination" placeholder="買い目(例: 1-2-3)">
     <input type="number" id="purchaseStake" placeholder="購入金額(100円単位)" step="100">
     <button id="recordPurchaseBtn">記録する</button>
@@ -105,17 +111,6 @@
 </div>
 
 
-<div id="tab-bankroll" class="tab-content">
-  <section class="card">
-    <h2>💰 証拠金管理</h2>
-    <p class="note">購入記録・結果確定のたびに自動で増減します。実投票のプラン作成時のみ、残高に対する1レー ス上限比率で制限されます。検証集計には影響しません。</p>
-    <div id="bankrollDisplay" class="result-box">未設 定です。下から初期額を設定してください。</div>
-    <label>初期設定 / 入金・出金後のリセット(円)</label>
-    <input type="number" id="bankrollSetInput" placeholder="例: 10000">
-    <button id="bankrollSetBtn">証拠金を設定する</button>
-  </section>
-</div>
-
 <div id="tab-revenue" class="tab-content">
   <section class="card">
     <h2>📈 収益(実資金)</h2>
@@ -140,22 +135,29 @@
   </section>
 
   <section class="card">
-    <h2>履歴一覧・実績入力</h2>
-    <p class="note">通常は「的中」ボタン(払戻入力)と「未確定を外れに」だけで足ります。詳細編集が必要なときだけ状態・実額を手で変えて保存してください。</p>
-    <div id="revenueListBox" class="result-box"></div>
-  </section>
-
-  <section class="card">
     <h2>プラン外の買い目を追加</h2>
     <input type="number" id="revManualRaceId" placeholder="race_id(任意)">
     <input type="text" id="revManualVenue" placeholder="開催場(任意)">
     <input type="number" id="revManualRaceNo" placeholder="レース番号(任意)">
-    <input type="text" id="revManualBetType" placeholder="券種(例: 3連単)">
+    <select id="revManualBetType">
+        <option value="">券種を選択</option>
+        <option value="2車単">2車単</option>
+        <option value="2車複">2車複</option>
+        <option value="3連単">3連単</option>
+        <option value="3連複">3連複</option>
+        <option value="ワイド">ワイド</option>
+      </select>
     <input type="text" id="revManualCombo" placeholder="買い目(例: 1-2-3)">
     <input type="number" id="revManualStake" placeholder="実投資額" step="100">
     <input type="text" id="revManualMemo" placeholder="メモ(任意)">
     <button id="revManualAddBtn" style="background:#22c55e;">実績として追加</button>
     <div id="revManualResult" class="result-box"></div>
+  </section>
+
+  <section class="card">
+    <h2>履歴一覧・実績入力</h2>
+    <p class="note">通常は「的中」ボタン(払戻入力)と「未確定を外れに」だけで足ります。詳細編集が必要なときだけ状態・実額を手で変えて保存してください。</p>
+    <div id="revenueListBox" class="result-box"></div>
   </section>
 </div>
 
@@ -233,8 +235,19 @@
 </div>
 
 <div id="tab-settings" class="tab-content">
+
+<section class="card">
+
+    <h2>💰 証拠金管理</h2>
+    <p class="note">購入記録・結果確定のたびに自動で増減します。実投票のプラン作成時のみ、残高に対する1レー ス上限比率で制限されます。検証集計には影響しません。</p>
+    <div id="bankrollDisplay" class="result-box">未設 定です。下から初期額を設定してください。</div>
+    <label>初期設定 / 入金・出金後のリセット(円)</label>
+    <input type="number" id="bankrollSetInput" placeholder="例: 10000">
+    <button id="bankrollSetBtn">証拠金を設定する</button>
+  </section>
+
   <section class="card">
-    <h2>詳細設定(通常は変更不要)</h2>
+<h2>詳細設定(通常は変更不要)</h2>
     <p class="note">ここは滅多に変更しない項目です。変更するとレース選択タブでの計算・自動プラン作成に反映されます。値はこの端末のブラウザに自動保存され、次回起動時も維持されます。</p>
 
     <label>最低勝率フィルター(%、これを下回る大穴頼み の買い目は見送り)</label>
@@ -249,6 +262,12 @@
 
     <label>閾値表の表示件数</label>
     <input type="number" id="thresholdLimitInput" value="15" step="1">
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px;">
+      <button type="button" id="saveSettingsBtn" style="background:#16a34a;width:auto;">
+        設定を保存
+      </button>
+      <span id="settingsSaveStatus" class="note"></span>
+    </div>
   </section>
 </div>
 

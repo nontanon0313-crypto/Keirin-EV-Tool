@@ -164,4 +164,4 @@ class LiveBetUpdate(BaseModel):
 
 
 class RevenueSettingsSet(BaseModel):
-    starting_assets: float
+    pass
