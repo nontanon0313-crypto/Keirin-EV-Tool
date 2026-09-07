@@ -260,32 +260,6 @@ def list_live_bets(
     return {"count": len(rows), "items": [_row_to_dict(r) for r in rows]}
 
 
-@router.get("/settings")
-def get_settings(db: Session = Depends(get_db)):
-    row = db.query(models.RevenueSettings).filter(models.RevenueSettings.id == 1).first()
-    if not row:
-        return {"starting_assets": 0.0, "updated_at": None}
-    return {
-        "starting_assets": row.starting_assets,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
-
-
-@router.post("/settings")
-def set_settings(payload: schemas.RevenueSettingsSet, db: Session = Depends(get_db)):
-    row = db.query(models.RevenueSettings).filter(models.RevenueSettings.id == 1).first()
-    if not row:
-        row = models.RevenueSettings(id=1, starting_assets=payload.starting_assets)
-        db.add(row)
-    else:
-        row.starting_assets = payload.starting_assets
-        row.updated_at = datetime.utcnow()
-    db.commit()
-    return {
-        "starting_assets": row.starting_assets,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-    }
-
 
 def _iter_sorted(db: Session) -> List[models.LiveBet]:
     return (
@@ -388,11 +362,8 @@ def equity_curve(db: Session = Depends(get_db)):
     横軸=累計投資額、縦軸=累積損益。
     実績系列と、想定系列(プランの期待利益を累積)を返す。
     """
-    settings = db.query(models.RevenueSettings).filter(models.RevenueSettings.id == 1).first()
-    starting = settings.starting_assets if settings else 0.0
-
     rows = _iter_sorted(db)
-    points_actual = [{"cum_stake": 0.0, "cum_pnl": 0.0, "assets": starting}]
+    points_actual = [{"cum_stake": 0.0, "cum_pnl": 0.0, "assets": 0.0}]
     points_planned = [{"cum_stake": 0.0, "cum_pnl": 0.0}]
 
     cum_stake_a = 0.0
@@ -426,17 +397,16 @@ def equity_curve(db: Session = Depends(get_db)):
             points_actual.append({
                 "cum_stake": round(cum_stake_a, 0),
                 "cum_pnl": round(cum_pnl_a, 0),
-                "assets": round(starting + cum_pnl_a, 0),
+                "assets": round(cum_pnl_a, 0),
                 "id": r.id,
                 "result": r.actual_result,
                 "label": f"{r.venue_name or ''} {r.race_number or ''}R {r.bet_type} {r.combination}",
             })
 
     return {
-        "starting_assets": starting,
         "actual": points_actual,
         "planned": points_planned,
         "final_actual_pnl": round(cum_pnl_a, 0),
         "final_actual_stake": round(cum_stake_a, 0),
-        "final_assets": round(starting + cum_pnl_a, 0),
+        "final_assets": round(cum_pnl_a, 0),
     }

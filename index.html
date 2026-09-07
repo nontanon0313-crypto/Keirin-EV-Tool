@@ -120,10 +120,7 @@
   <section class="card">
     <h2>📈 収益(実資金)</h2>
     <p class="note">検証タブ・Purchaseとは別データです。プラン通りに買う前提なら「収益タブへ記録」だけで投資額まで登録されます。的中した行だけ「的中」で払戻を書き、残りは「未確定を外れに」で一括処理してください。</p>
-    <label>開始資産(円)</label>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-      <input type="number" id="revenueStartAssetsInput" placeholder="例: 100000" style="flex:1;min-width:120px;">
-      <button id="revenueSaveStartBtn" style="width:auto;background:#0ea5e9;">保存</button>
       <button id="revenueRefreshBtn" style="width:auto;background:#475569;">再読込</button>
       <button id="revenueMarkLoseBtn" style="width:auto;background:#f59e0b;">未確定を外れに</button>
     </div>
@@ -137,7 +134,7 @@
 
   <section class="card">
     <h2>資産推移(横軸:累計投資額 / 縦軸:累積損益)</h2>
-    <p class="note">青=実績、灰=想定。ゼロ損益ラインあり。開始資産+累積実績損益が現在資産です。</p>
+    <p class="note">青=実績、灰=想定。ゼロ損益ラインあり。累積実績損益が現在資産です。</p>
     <canvas id="revenueEquityCanvas" width="640" height="280" style="width:100%;max-width:640px;background:#0f172a;border-radius:8px;"></canvas>
     <div id="revenueEquitySummary" class="result-box" style="margin-top:8px;"></div>
   </section>

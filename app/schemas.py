@@ -158,7 +158,3 @@ class LiveBetUpdate(BaseModel):
     actual_result: Optional[str] = None
     actual_payout: Optional[float] = None
     memo: Optional[str] = None
-
-
-class RevenueSettingsSet(BaseModel):
-    starting_assets: float

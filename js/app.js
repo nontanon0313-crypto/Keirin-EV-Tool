@@ -768,40 +768,7 @@ function pct(v) {
   return `${Number(v).toFixed(2)}%`;
 }
 
-async function loadRevenueSettings() {
-  const input = document.getElementById("revenueStartAssetsInput");
-  if (!input) return;
-  try {
-    const res = await fetch(apiUrl("/revenue/settings"));
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-    input.value = data.starting_assets ?? "";
-  } catch (e) {
-    input.value = "";
-  }
-}
 
-async function saveRevenueStartAssets() {
-  const input = document.getElementById("revenueStartAssetsInput");
-  const value = parseFloat(input.value);
-  if (!Number.isFinite(value) || value < 0) {
-    alert("開始資産を正しく入力してください。");
-    return;
-  }
-
-  try {
-    const res = await fetch(apiUrl("/revenue/settings"), {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({starting_assets: value}),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-    await loadRevenue();
-  } catch (e) {
-    alert("開始資産の保存に失敗しました: " + e.message);
-  }
-}
 
 function renderRevenueStats(data) {
   const box = document.getElementById("revenueStatsBox");
@@ -917,7 +884,6 @@ function drawRevenueEquity(data) {
 
   if (summary) {
     summary.textContent =
-      `開始資産: ${yen(data.starting_assets)} / ` +
       `累積実績損益: ${yen(data.final_actual_pnl)} / ` +
       `現在資産: ${yen(data.final_assets)}`;
   }
@@ -1133,7 +1099,6 @@ async function registerLastPlanToRevenue() {
 
 async function loadRevenue() {
   await Promise.all([
-    loadRevenueSettings(),
     loadRevenueStats(),
     loadRevenueCompare(),
     loadRevenueEquity(),
@@ -1141,9 +1106,6 @@ async function loadRevenue() {
   ]);
 }
 
-document.getElementById("revenueSaveStartBtn")?.addEventListener(
-  "click", saveRevenueStartAssets
-);
 document.getElementById("revenueRefreshBtn")?.addEventListener(
   "click", loadRevenue
 );

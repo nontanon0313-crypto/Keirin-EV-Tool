@@ -243,12 +243,3 @@ class LiveBet(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-class RevenueSettings(Base):
-    """収益タブの設定(開始資産など)。常に1行想定。"""
-    __tablename__ = "revenue_settings"
-
-    id = Column(Integer, primary_key=True, default=1)
-    starting_assets = Column(Float, nullable=False, default=0.0)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
