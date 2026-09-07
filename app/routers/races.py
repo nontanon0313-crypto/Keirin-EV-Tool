@@ -405,6 +405,38 @@ def _plan_bet_counts_by_race(db: Session, race_ids: list):
     return {race_id: count for race_id, count in rows}
 
 
+@router.get("/today-all")
+def list_races_today_all(db: Session = Depends(get_db)):
+    """
+    診断用: 確定済み・未確定に関わらず、本日(JST)のレースを全件返す。
+    `/races/today`・`/races/upcoming`はどちらも「未確定のみ」を返す仕様のため、
+    「そもそもDBに存在しないのか」「確定済みで一覧から消えただけなのか」を
+    切り分けられない。この区別のために追加(のんの「いわき平・弥彦が出ない」
+    調査用・2026-09-07)。
+    """
+    now = _jst_now_naive()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.race_date >= today_start, models.Race.race_date < today_end)
+        .order_by(models.Race.venue_name.asc(), models.Race.race_number.asc())
+        .all()
+    )
+    return [
+        {
+            "race_id": r.id,
+            "venue_name": r.venue_name,
+            "race_number": r.race_number,
+            "post_time": r.post_time.strftime("%H:%M") if r.post_time else None,
+            "entries_count": len(r.entries),
+            "odds_count": len(r.odds_list),
+            "actual_result": r.actual_result,
+        }
+        for r in races
+    ]
+
+
 @router.get("/today")
 def list_races_today(db: Session = Depends(get_db)):
     """
