@@ -446,7 +446,7 @@ def list_races_today(db: Session = Depends(get_db)):
 
 
 @router.get("/upcoming")
-def list_races_upcoming(within_min: int = 30, db: Session = Depends(get_db)):
+def list_races_upcoming(within_min: int = 30, overdue_min: int = 5, db: Session = Depends(get_db)):
     """
     発走予定時刻まで指定分数(既定30分)以内のレース一覧(のんの要望により追加)。
 
@@ -454,10 +454,15 @@ def list_races_upcoming(within_min: int = 30, db: Session = Depends(get_db)):
     まさに今賭けたいレースが一覧から消える不具合を修正。「結果がまだ確定していない」
     ことを基準にし、下限は発走30分前を過ぎたレースまで含める形に緩めた
     (のんの「直前のレースが表示されない」指摘により修正)。
+
+    2026-09-07修正: 上の修正で「発走時刻を過ぎたレース」を最大30分も一覧に残す
+    ようになっていたが、投票締切(発走時刻)を過ぎたレースは実際には投票できない。
+    一覧に残す猶予を30分→既定5分(overdue_minで調整可)に短縮した
+    (のんの「締切を過ぎたレースが投票する扱いのまま表示される」指摘により修正)。
     """
     now = _jst_now_naive()
     until = now + timedelta(minutes=within_min)
-    overdue_from = now - timedelta(minutes=within_min)
+    overdue_from = now - timedelta(minutes=overdue_min)
     races = (
         db.query(models.Race)
         .filter(models.Race.post_time.isnot(None))

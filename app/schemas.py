@@ -104,10 +104,13 @@ class RacePlanRequest(BaseModel):
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
     apply_performance_gates: bool = True  # 過去のPurchase実績に基づくステージ・券種ゲートを適用するか
     apply_odds_safety_margin: bool = True  # 過去のPurchase実績から算出したオッズ安全マージンを適用するか
+    max_single_bet_pct_of_race_cap: float = 0.4  # 1点の投票額がレース予算(race_cap)に占める上限比率。
+    # 候補が1〜2点しかない時に予算全額を1点に集中させないための歯止め(既定40%)。
 
 
 class BankrollSet(BaseModel):
     initial_balance: float
+
 
 # --- 収益タブ(実資金・Purchaseとは完全分離) ---
 
@@ -158,3 +161,7 @@ class LiveBetUpdate(BaseModel):
     actual_result: Optional[str] = None
     actual_payout: Optional[float] = None
     memo: Optional[str] = None
+
+
+class RevenueSettingsSet(BaseModel):
+    starting_assets: float

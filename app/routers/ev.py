@@ -254,6 +254,7 @@ def _select_portfolio(
     avoid_garami,
     outcomes,
     odds_safety_margins,
+    max_single_bet_pct_of_race_cap=1.0,
 ):
     """固定ケリー額を使い、ガラミ制約を満たす期待利益最大のポートフォリオを構成する。"""
     prepared = []
@@ -262,12 +263,17 @@ def _select_portfolio(
     # 重大なバグがあった(のんの「投票プランありが分からない」調査で発覚・2026-09-06修正)。
     rejected_garami = 0
 
+    # 2026-09-07追加: 候補が1〜2点しかない時、その1点にレース予算全額が集中して
+    # しまう(のんの「1票でも投票可能であれば上限最大まで賭けてしまう」指摘)。
+    # 1点あたりの投票額をレース予算の一定割合までに制限し、極端な集中を防ぐ。
+    single_ticket_cap = calc.round_to_bet_unit(race_cap * max_single_bet_pct_of_race_cap)
+
     # 候補ごとの払戻対象結果を事前計算する。
     # 選択ループ内で judge_purchase_result を繰り返さない。
     winning_cache = {}
 
     for c in candidates:
-        stake = calc.round_to_bet_unit(c["raw_stake"])
+        stake = calc.round_to_bet_unit(min(c["raw_stake"], single_ticket_cap))
         if stake <= 0:
             continue
 
@@ -1051,6 +1057,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         avoid_garami=req.avoid_garami,
         outcomes=outcomes,
         odds_safety_margins=odds_safety_margins,
+        max_single_bet_pct_of_race_cap=getattr(req, "max_single_bet_pct_of_race_cap", 1.0),
     )
 
     items = []
