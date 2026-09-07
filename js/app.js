@@ -1564,6 +1564,46 @@ document.getElementById("loadOddsCapBtn").addEventListener("click", async () => 
   }
 });
 
+
+document.getElementById("loadPipelineBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "判定経路を分析中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/decision-pipeline?since=calibration_switch"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    let html = `<p><strong>判定経路の分離検証</strong>(本命→確率→EV→購入 / 読み取り専用)</p>`;
+    html += `<p class="note">期間: ${data.since_resolved || data.since || "-"}</p>`;
+    const s1 = data.stage1_favorite_car || {};
+    html += `<p><strong>Stage1 本命車番</strong> レース${s1.n_races ?? 0} / 1着率 ${s1.win_rate_pct ?? "-"}% (予測平均 ${s1.avg_predicted_win_prob_pct ?? "-"}%) / Top3率 ${s1.top3_rate_pct ?? "-"}% / gap ${s1.predicted_vs_actual_gap_pt ?? "-"}pt</p>`;
+    const s2 = data.stage2_combination_probability || {};
+    const pc = s2.purchase_calibrated || {};
+    const pr = s2.purchase_raw || {};
+    html += `<p><strong>Stage2 買い目確率</strong> 購入・校正後: n=${pc.n ?? 0} 予測${pc.predicted_avg_pct ?? "-"}% vs 実${pc.actual_hit_rate_pct ?? "-"}% (gap ${pc.gap_pt ?? "-"}pt) / 校正前 gap ${pr.gap_pt ?? "-"}pt</p>`;
+    const sk = s2.skipped_calibrated || {};
+    html += `<p class="note">見送り側(校正後): n=${sk.n ?? 0} 予測${sk.predicted_avg_pct ?? "-"}% vs 実${sk.actual_hit_rate_pct ?? "-"}% (gap ${sk.gap_pt ?? "-"}pt)</p>`;
+    const s3 = data.stage3_ev || {};
+    const pur = s3.purchased || {};
+    const skp = s3.skipped || {};
+    html += `<p><strong>Stage3 EV</strong> 購入: 予測平均EV ${pur.predicted_average_ev_pct ?? pur.predicted_avg_ev_pct ?? "-"}% / 実績ROI ${pur.actual_roi_pct ?? "-"}% / 損益 ${pur.actual_profit ?? "-"}</p>`;
+    html += `<p class="note">見送り仮想: ROI ${skp.actual_roi_pct ?? "-"}% (stake仮想100円)</p>`;
+    const s4 = data.stage4_purchase_decision || {};
+    html += `<p><strong>Stage4 購入判定</strong> 購入${s4.purchased_count ?? 0} / 見送り${s4.skipped_count ?? 0} / 購入率 ${s4.purchase_rate_pct ?? "-"}% / 的中のpurchase捕捉率 ${s4.hit_capture_rate_pct ?? "-"}% (purchase的中${s4.hit_in_purchase ?? 0} / skip的中${s4.hit_in_skipped ?? 0})</p>`;
+    if (s4.skip_reason_categories) {
+      html += `<p class="note">見送り理由: ${Object.entries(s4.skip_reason_categories).map(([k,v]) => k+":"+v).join(" / ")}</p>`;
+    }
+    if (data.bottleneck_hints && data.bottleneck_hints.length) {
+      html += `<p><strong>注目ポイント</strong></p><ul>` + data.bottleneck_hints.map(h => `<li>${h}</li>`).join("") + `</ul>`;
+    }
+    if (data.interpretation_notes) {
+      html += `<p class="note">${data.interpretation_notes.join(" ")}</p>`;
+    }
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibrationBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "読み込み中...";

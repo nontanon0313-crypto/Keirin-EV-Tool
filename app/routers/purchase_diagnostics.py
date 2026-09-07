@@ -1814,6 +1814,209 @@ def diagnostics_odds_cap_sensitivity(
     }
 
 
+@router.get("/decision-pipeline")
+def diagnostics_decision_pipeline(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    本命車番 → 買い目確率 → EV → 購入判定 を段階分離して計測する(読み取り専用)。
+
+    目的:
+    - 「どこで精度が落ちているか」を1本のレスポンスで追跡する
+    - 高オッズを切る等のルール変更はしない(分析のみ)
+    - 高オッズ×高EVの的中は期待値上あり得る、という前提で数字を読む
+
+    Stage1 本命車番: Entry.blended_win_prob 最大車が1着/上位3か
+    Stage2 買い目確率: Purchase+Skipped の予測確率 vs 実績的中(校正前/後)
+    Stage3 EV: 購入集合と見送り集合の予測EV vs 実績ROI
+    Stage4 購入判定: 見送り理由の内訳、購入率、的中がpurchase/skippedのどちらに落ちたか
+    """
+    since_dt = _since_dt(since)
+
+    # --- Stage1: 本命車番 ---
+    rq = db.query(models.Race).filter(models.Race.actual_result.isnot(None))
+    if since_dt is not None:
+        from sqlalchemy import or_
+        already_purchased = (
+            db.query(models.Purchase.id)
+            .filter(models.Purchase.race_id == models.Race.id)
+            .filter(models.Purchase.purchased_at >= since_dt)
+        )
+        already_skipped = (
+            db.query(models.SkippedBet.id)
+            .filter(models.SkippedBet.race_id == models.Race.id)
+            .filter(models.SkippedBet.created_at >= since_dt)
+        )
+        rq = rq.filter(or_(already_purchased.exists(), already_skipped.exists()))
+    races = rq.all()
+    race_ids = [r.id for r in races]
+    # entries batch
+    entries_by_race: Dict[int, list] = defaultdict(list)
+    if race_ids:
+        for e in db.query(models.Entry).filter(models.Entry.race_id.in_(race_ids)).all():
+            entries_by_race[e.race_id].append(e)
+
+    stage1_items = []
+    for race in races:
+        ents = [e for e in entries_by_race.get(race.id, []) if e.blended_win_prob is not None]
+        if not ents:
+            continue
+        top = max(ents, key=lambda e: e.blended_win_prob)
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+        if not parsed.get("groups"):
+            continue
+        first = parsed["groups"][0]
+        stage1_items.append({
+            "race_id": race.id,
+            "won": top.car_number in first,
+            "in_top3": top.car_number in (parsed.get("top3_set") or set()),
+            "predicted_pct": float(top.blended_win_prob) * 100.0,
+        })
+    n1 = len(stage1_items)
+    if n1:
+        w1 = sum(1 for it in stage1_items if it["won"])
+        t3 = sum(1 for it in stage1_items if it["in_top3"])
+        avg_p = sum(it["predicted_pct"] for it in stage1_items) / n1
+        p_val = calc.binomial_lower_tail_p(w1, n1, avg_p / 100.0)
+        stage1 = {
+            "n_races": n1,
+            "win_count": w1,
+            "win_rate_pct": round(w1 / n1 * 100, 2),
+            "top3_rate_pct": round(t3 / n1 * 100, 2),
+            "avg_predicted_win_prob_pct": round(avg_p, 2),
+            "predicted_vs_actual_gap_pt": round(avg_p - (w1 / n1 * 100), 2),
+            "binomial_p_value_pct": round(p_val * 100, 4),
+            "note": "車番本命の精度。券種・買い目のノイズを除いた1レース1試行。",
+        }
+    else:
+        stage1 = {"n_races": 0, "note": "対象レースなし"}
+
+    # --- Stage2/3/4: Purchase + Skipped ---
+    purchases = _load_settled_purchases(db, since_dt)
+    skips = _load_settled_skips(db, since_dt)
+    p_rows = [_purchase_row(p) for p in purchases]
+    s_rows = [_skip_row(s) for s in skips]
+
+    def _calib_block(rows: List[dict], prob_key: str) -> dict:
+        pairs = [(r[prob_key], r["won"]) for r in rows if r.get(prob_key) is not None]
+        if not pairs:
+            return {"n": 0}
+        n = len(pairs)
+        hits = sum(1 for _, w in pairs if w)
+        avg_p = sum(p for p, _ in pairs) / n
+        act = hits / n
+        return {
+            "n": n,
+            "hit_count": hits,
+            "actual_hit_rate_pct": round(act * 100, 4),
+            "predicted_avg_pct": round(avg_p * 100, 4),
+            "gap_pt": round(avg_p * 100 - act * 100, 4),
+            "brier": round(sum((p - (1.0 if w else 0.0)) ** 2 for p, w in pairs) / n, 6),
+        }
+
+    stage2 = {
+        "purchase_calibrated": _calib_block(p_rows, "prob_cal"),
+        "purchase_raw": _calib_block(p_rows, "prob_raw"),
+        "skipped_calibrated": _calib_block(s_rows, "prob_cal"),
+        "skipped_raw": _calib_block(s_rows, "prob_raw"),
+        "note": (
+            "買い目単位の確率校正。purchaseは選択後バイアス、skippedは見送り側。"
+            "gap>0なら予測が楽観的。"
+        ),
+    }
+
+    def _ev_block(rows: List[dict]) -> dict:
+        m = _agg_rows(rows)
+        evs = [r["ev_pct"] for r in rows if r.get("ev_pct") is not None]
+        m["predicted_avg_ev_pct"] = round(sum(evs) / len(evs), 4) if evs else None
+        # EV帯別
+        bands = defaultdict(list)
+        for r in rows:
+            bands[_band_for_ev_pct(r.get("ev_pct"))].append(r)
+        m["by_ev_band"] = {
+            k: _agg_rows(v) for k, v in sorted(bands.items(), key=lambda x: x[0])
+        }
+        return m
+
+    stage3 = {
+        "purchased": _ev_block(p_rows),
+        "skipped": _ev_block(s_rows),
+        "note": (
+            "予測EVと実績ROIの対応。高EV帯に高オッズが入りやすく、"
+            "的中時の払戻が大きく見えるのはEV定義上あり得る。"
+            "それを理由に高オッズを一律除外する根拠にはならない。"
+        ),
+    }
+
+    # Stage4 funnel
+    reason_counts = Counter()
+    for s in skips:
+        reason_counts[purchases_router._categorize_skip_reason(s.reason or "")] += 1
+
+    # 的中がどこに落ちたか (same race set)
+    hit_purchase = sum(1 for r in p_rows if r["won"])
+    hit_skip = sum(1 for r in s_rows if r["won"])
+    total_tracked = len(p_rows) + len(s_rows)
+    stage4 = {
+        "purchased_count": len(p_rows),
+        "skipped_count": len(s_rows),
+        "purchase_rate_pct": (
+            round(100.0 * len(p_rows) / total_tracked, 2) if total_tracked else None
+        ),
+        "hit_in_purchase": hit_purchase,
+        "hit_in_skipped": hit_skip,
+        "hit_capture_rate_pct": (
+            round(100.0 * hit_purchase / (hit_purchase + hit_skip), 2)
+            if (hit_purchase + hit_skip) > 0
+            else None
+        ),
+        "skip_reason_categories": dict(reason_counts.most_common()),
+        "note": (
+            "購入判定の結果。hit_capture_rateは記録上の的中がpurchaseに載った割合。"
+            "not_recorded(評価外)はこの集計には含まない。"
+        ),
+    }
+
+    # 経路サマリ: どこがボトルネックか(記述のみ)
+    bottlenecks = []
+    if stage1.get("n_races") and stage1.get("predicted_vs_actual_gap_pt", 0) > 5:
+        bottlenecks.append("Stage1: 本命車番の予測が実績より楽観的(gap大)")
+    pc = stage2.get("purchase_calibrated") or {}
+    if pc.get("n") and abs(pc.get("gap_pt") or 0) > 1:
+        bottlenecks.append(
+            f"Stage2: 購入集合の確率ギャップ {pc.get('gap_pt')}pt (校正後)"
+        )
+    pur = stage3.get("purchased") or {}
+    if pur.get("predicted_average_ev_pct") is not None and pur.get("actual_roi_pct") is not None:
+        # predicted_average_ev_pct is EV% ; ROI = EV+100 roughly for comparison narrative
+        bottlenecks.append(
+            f"Stage3: 購入の予測平均EV {pur.get('predicted_average_ev_pct')}% に対し実績ROI {pur.get('actual_roi_pct')}%"
+        )
+    if stage4.get("hit_capture_rate_pct") is not None and stage4["hit_capture_rate_pct"] < 50:
+        bottlenecks.append(
+            f"Stage4: 的中のpurchase捕捉率が低い({stage4['hit_capture_rate_pct']}%)"
+        )
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "stage1_favorite_car": stage1,
+        "stage2_combination_probability": stage2,
+        "stage3_ev": stage3,
+        "stage4_purchase_decision": stage4,
+        "bottleneck_hints": bottlenecks,
+        "interpretation_notes": [
+            "高オッズは市場確率が低い分、推定p×odds-1のEVが大きくなりやすい。利益が出ること自体は矛盾ではない。",
+            "問題になるのは『予測pが実績より高すぎる』『選択後に楽観が残る』『見送りに的中が落ちる』場合。",
+            "本APIはルール変更を提案しない。数値の切り分け材料のみ。",
+        ],
+    }
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -1837,6 +2040,7 @@ def diagnostics_summary(
         "race_plan_rank_compare": diagnostics_race_plan_rank_compare(since=since, db=db),
         "winning_capture": diagnostics_winning_capture(since=since, db=db),
         "odds_cap_sensitivity": diagnostics_odds_cap_sensitivity(since=since, db=db),
+        "decision_pipeline": diagnostics_decision_pipeline(since=since, db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"
