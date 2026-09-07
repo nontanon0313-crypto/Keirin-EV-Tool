@@ -205,3 +205,50 @@ class SkippedBet(Base):
     actual_payout = Column(Float, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class LiveBet(Base):
+    """
+    実資金投票の履歴(収益タブ専用)。
+    Purchase / SkippedBet / 検証集計とは完全に分離する。
+    投票プランの想定値と、実際に投票した結果を別カラムで保持する。
+    """
+    __tablename__ = "live_bets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    race_id = Column(Integer, ForeignKey("races.id"), nullable=True, index=True)
+    race_date = Column(DateTime, nullable=True, index=True)
+    venue_name = Column(String(50), nullable=True)
+    race_number = Column(Integer, nullable=True)
+
+    # --- 想定(投票プラン側・変更しない) ---
+    bet_type = Column(String(20), nullable=False)
+    combination = Column(String(50), nullable=False)
+    planned_stake = Column(Float, nullable=True)  # プラン上の投票予定額
+    planned_win_prob = Column(Float, nullable=True)  # 0-1
+    planned_odds = Column(Float, nullable=True)
+    planned_ev_pct = Column(Float, nullable=True)
+    planned_expected_profit = Column(Float, nullable=True)
+
+    # --- 実績(手入力) ---
+    # planned: プラン登録のみ / voted: 実投票した / not_voted: プランにあっても投票しなかった
+    vote_status = Column(String(20), nullable=False, default="planned")
+    actual_stake = Column(Float, nullable=True)
+    # pending / win / lose / not_voted
+    actual_result = Column(String(20), nullable=False, default="pending")
+    actual_payout = Column(Float, nullable=True, default=0.0)
+    memo = Column(Text, nullable=True)
+
+    # from_plan | manual
+    source = Column(String(20), nullable=False, default="from_plan")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RevenueSettings(Base):
+    """収益タブの設定(開始資産など)。常に1行想定。"""
+    __tablename__ = "revenue_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    starting_assets = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
