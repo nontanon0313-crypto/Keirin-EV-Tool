@@ -1683,6 +1683,137 @@ def diagnostics_winning_capture(
 
 
 
+@router.get("/odds-cap-sensitivity")
+def diagnostics_odds_cap_sensitivity(
+    since: Optional[str] = Query("calibration_switch"),
+    caps: Optional[str] = Query(
+        "50,100,200,300,500,1000",
+        description="カンマ区切りの仮想オッズ上限。空なら既定セット",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    オッズ上限の感度分析(読み取り専用)。
+
+    既存の確定済みPurchaseについて、購入時オッズが上限以下のものだけ残した場合の
+    件数・的中率・ROI・損益を上限ごとに比較する。
+    購入判定・race-plan・校正係数は一切変更しない。
+
+    解釈上の注意:
+    - 小サンプルの高ROIを採用条件にしないこと
+    - 高オッズ/低オッズを良い悪いと決めつけないこと
+    - これは「もしその上限で買わなかったら」の仮想集計であり、因果の証明ではない
+    """
+    since_dt = _since_dt(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    rows = [_purchase_row(p) for p in purchases]
+
+    # オッズ不明は上限判定不能のため別集計
+    with_odds = [r for r in rows if r.get("odds") is not None]
+    no_odds = [r for r in rows if r.get("odds") is None]
+
+    try:
+        cap_list = []
+        for part in (caps or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            cap_list.append(float(part))
+        cap_list = sorted(set(cap_list))
+    except ValueError:
+        cap_list = [50.0, 100.0, 200.0, 300.0, 500.0, 1000.0]
+
+    if not cap_list:
+        cap_list = [50.0, 100.0, 200.0, 300.0, 500.0, 1000.0]
+
+    baseline = _agg_rows(rows)
+    baseline_with_odds = _agg_rows(with_odds)
+
+    # 利益集中: 的中の払戻上位
+    wins = sorted(
+        [r for r in rows if r["won"] and r["payout"] > 0],
+        key=lambda r: r["payout"],
+        reverse=True,
+    )
+    total_profit = baseline["actual_profit"] or 0.0
+    top_n = min(10, len(wins))
+    top_profit = sum(w["payout"] - w["stake"] for w in wins[:top_n]) if top_n else 0.0
+
+    def _slice_metrics(subset: List[dict], label: str, cap_value: Optional[float]) -> dict:
+        m = _agg_rows(subset)
+        if cap_value is not None:
+            excluded = [r for r in with_odds if r.get("odds") is not None and r["odds"] > cap_value]
+        else:
+            excluded = []
+        excl_m = _agg_rows(excluded) if excluded else _agg_rows([])
+        # 利益寄与: 除外した分の損益
+        m["cap"] = cap_value
+        m["label"] = label
+        m["excluded_bet_count"] = excl_m["bet_count"]
+        m["excluded_profit"] = excl_m["actual_profit"]
+        m["excluded_roi_pct"] = excl_m["actual_roi_pct"]
+        m["excluded_hit_count"] = excl_m["hit_count"]
+        # baseline 比
+        if baseline["actual_roi_pct"] is not None and m["actual_roi_pct"] is not None:
+            m["roi_delta_vs_baseline_pt"] = round(m["actual_roi_pct"] - baseline["actual_roi_pct"], 4)
+        else:
+            m["roi_delta_vs_baseline_pt"] = None
+        if baseline["actual_profit"] is not None and m["actual_profit"] is not None:
+            m["profit_delta_vs_baseline"] = round(m["actual_profit"] - baseline["actual_profit"], 2)
+        else:
+            m["profit_delta_vs_baseline"] = None
+        # 残した側の的中オッズ中央値
+        hit_odds = sorted([r["odds"] for r in subset if r["won"] and r.get("odds") is not None])
+        if hit_odds:
+            mid = len(hit_odds) // 2
+            m["hit_odds_median"] = hit_odds[mid] if len(hit_odds) % 2 == 1 else round((hit_odds[mid - 1] + hit_odds[mid]) / 2, 4)
+        else:
+            m["hit_odds_median"] = None
+        return m
+
+    scenarios = []
+    scenarios.append(_slice_metrics(rows, "上限なし(現状)", None))
+    for cap in cap_list:
+        kept = [r for r in with_odds if r["odds"] <= cap]
+        # オッズ不明は上限判定不能→現状方針では含めない(厳しめ=除外)
+        scenarios.append(_slice_metrics(kept, f"上限{int(cap) if cap == int(cap) else cap}倍以下", cap))
+
+    # 券種別×上限の粗い表(サンプル不足は n_insufficient)
+    by_bet_type = {}
+    for bt in sorted({r["bet_type"] for r in with_odds if r.get("bet_type")}):
+        bt_rows = [r for r in with_odds if r["bet_type"] == bt]
+        bt_scenarios = [{"label": "上限なし", "cap": None, **_agg_rows(bt_rows)}]
+        for cap in cap_list:
+            kept = [r for r in bt_rows if r["odds"] <= cap]
+            bt_scenarios.append({"label": f"<={int(cap) if cap == int(cap) else cap}", "cap": cap, **_agg_rows(kept)})
+        by_bet_type[bt] = bt_scenarios
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "caps": cap_list,
+        "baseline": baseline,
+        "baseline_with_odds_only": baseline_with_odds,
+        "odds_missing_count": len(no_odds),
+        "profit_concentration": {
+            "top10_hit_count": top_n,
+            "top10_profit": round(top_profit, 2),
+            "total_profit": round(total_profit, 2),
+            "top10_share_of_profit_pct": (
+                round(100.0 * top_profit / total_profit, 2) if total_profit not in (0, 0.0) else None
+            ),
+        },
+        "scenarios": scenarios,
+        "by_bet_type": by_bet_type,
+        "notes": [
+            "既存Purchaseの事後フィルタ。購入ロジックは変更していない。",
+            "オッズ不明行は上限シナリオでは除外(保守的)。",
+            f"バンド内n<{MIN_BAND_N}は n_insufficient=true。採用判断に使わないこと。",
+            "次の判断材料: ROI改善とベット数減少のトレードオフ、券種別の差、利益集中度。",
+        ],
+    }
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -1705,6 +1836,7 @@ def diagnostics_summary(
         "race_plan_design": diagnostics_race_plan_design(),
         "race_plan_rank_compare": diagnostics_race_plan_rank_compare(since=since, db=db),
         "winning_capture": diagnostics_winning_capture(since=since, db=db),
+        "odds_cap_sensitivity": diagnostics_odds_cap_sensitivity(since=since, db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"

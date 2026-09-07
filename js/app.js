@@ -1514,6 +1514,56 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
   }
 });
 
+document.getElementById("loadOddsCapBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "オッズ上限感度を計算中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/odds-cap-sensitivity?since=calibration_switch"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    let html = `<p><strong>オッズ上限の感度分析</strong>(読み取り専用・購入ロジックは変更なし)</p>`;
+    html += `<p class="note">期間: ${data.since_resolved || data.since || "-"} / オッズ不明 ${data.odds_missing_count || 0}件は上限シナリオから除外</p>`;
+    if (data.profit_concentration) {
+      const pc = data.profit_concentration;
+      html += `<p>利益集中: 上位${pc.top10_hit_count}的中の利益 ${pc.top10_profit}円 / 全体利益 ${pc.total_profit}円`;
+      if (pc.top10_share_of_profit_pct != null) html += ` (上位シェア ${pc.top10_share_of_profit_pct}%)`;
+      html += `</p>`;
+    }
+    html += `<table><tr><th>シナリオ</th><th>件数</th><th>的中</th><th>的中率</th><th>ROI</th><th>損益</th><th>除外件数</th><th>除外側損益</th><th>ROI差</th></tr>`;
+    for (const s of (data.scenarios || [])) {
+      const insuf = s.n_insufficient ? " ⚠n少" : "";
+      html += `<tr><td>${s.label}${insuf}</td><td>${s.bet_count}</td><td>${s.hit_count}</td>` +
+        `<td>${s.actual_hit_rate_pct != null ? s.actual_hit_rate_pct + "%" : "-"}</td>` +
+        `<td>${s.actual_roi_pct != null ? s.actual_roi_pct + "%" : "-"}</td>` +
+        `<td>${s.actual_profit != null ? s.actual_profit : "-"}</td>` +
+        `<td>${s.excluded_bet_count != null ? s.excluded_bet_count : "-"}</td>` +
+        `<td>${s.excluded_profit != null ? s.excluded_profit : "-"}</td>` +
+        `<td>${s.roi_delta_vs_baseline_pt != null ? s.roi_delta_vs_baseline_pt + "pt" : "-"}</td></tr>`;
+    }
+    html += `</table>`;
+    if (data.by_bet_type) {
+      html += `<p style="margin-top:12px;"><strong>券種別(上限なし vs 各上限)</strong></p>`;
+      for (const [bt, list] of Object.entries(data.by_bet_type)) {
+        html += `<p class="note">${bt}</p><table><tr><th>上限</th><th>件数</th><th>的中率</th><th>ROI</th><th>損益</th></tr>`;
+        for (const s of list) {
+          const insuf = s.n_insufficient ? " ⚠" : "";
+          html += `<tr><td>${s.label}${insuf}</td><td>${s.bet_count}</td>` +
+            `<td>${s.actual_hit_rate_pct != null ? s.actual_hit_rate_pct + "%" : "-"}</td>` +
+            `<td>${s.actual_roi_pct != null ? s.actual_roi_pct + "%" : "-"}</td>` +
+            `<td>${s.actual_profit != null ? s.actual_profit : "-"}</td></tr>`;
+        }
+        html += `</table>`;
+      }
+    }
+    if (data.notes && data.notes.length) {
+      html += `<p class="note">${data.notes.join(" ")}</p>`;
+    }
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibrationBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "読み込み中...";
