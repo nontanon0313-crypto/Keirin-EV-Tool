@@ -1836,6 +1836,93 @@ def diagnostics_odds_cap_sensitivity(
     }
 
 
+@router.get("/exclude-top-hits-sensitivity")
+def diagnostics_exclude_top_hits_sensitivity(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    ChatGPT分析9項目の項目8: 上位的中を除外した場合の損益(読み取り専用)。
+
+    `odds-cap-sensitivity`が「オッズ上限を下げたら」を見るのに対し、こちらは
+    「点数ベースで上位1/5/10件の的中を除いたら、それでも黒字が残るか」を見る。
+    実際に確定済みのPurchase(実購入)のみが対象。既存の購入判定・予想ロジックは
+    一切変更しない。
+    """
+    since_dt = _since_dt(since)
+    purchases = _load_settled_purchases(db, since_dt)
+    if not purchases:
+        return {"message": "対象データがありません"}
+
+    stake_total = sum(float(p.stake_amount or 0) for p in purchases)
+    payout_total = sum(float(p.payout_amount or 0) for p in purchases)
+
+    hit_purchases_desc = sorted(
+        (p for p in purchases if p.result == "win"),
+        key=lambda p: float(p.payout_amount or 0) - float(p.stake_amount or 0),
+        reverse=True,
+    )
+
+    def _after_excluding(k: int) -> Dict[str, Any]:
+        excluded = hit_purchases_desc[:k]
+        excluded_payout = sum(float(p.payout_amount or 0) for p in excluded)
+        remaining_payout = payout_total - excluded_payout
+        remaining_profit = remaining_payout - stake_total
+        remaining_roi_pct = round(remaining_payout / stake_total * 100, 2) if stake_total > 0 else None
+        return {
+            "excluded_count": len(excluded),
+            "remaining_profit": round(remaining_profit, 0),
+            "remaining_roi_pct": remaining_roi_pct,
+            "still_profitable": remaining_profit > 0,
+        }
+
+    by_odds_threshold = []
+    for cap in (100.0, 500.0, 1000.0):
+        included_stake = 0.0
+        included_payout = 0.0
+        for p in purchases:
+            odds = p.odds_at_purchase
+            if odds is None or odds <= 0:
+                odds = p.final_odds
+            if odds is not None and odds >= cap:
+                continue  # このcap以上の的中(投資分含む)を除外
+            included_stake += float(p.stake_amount or 0)
+            included_payout += float(p.payout_amount or 0)
+        by_odds_threshold.append({
+            "exclude_odds_at_or_above": cap,
+            "remaining_bet_count": sum(
+                1 for p in purchases
+                if not ((p.odds_at_purchase or p.final_odds or 0) >= cap)
+            ),
+            "remaining_profit": round(included_payout - included_stake, 0),
+            "remaining_roi_pct": round(included_payout / included_stake * 100, 2) if included_stake > 0 else None,
+            "still_profitable": (included_payout - included_stake) > 0,
+        })
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "total_bets": len(purchases),
+        "actual_profit": round(payout_total - stake_total, 0),
+        "actual_roi_pct": round(payout_total / stake_total * 100, 2) if stake_total > 0 else None,
+        "exclude_top_n_hits": {
+            "top1": _after_excluding(1),
+            "top5": _after_excluding(5),
+            "top10": _after_excluding(10),
+        },
+        "exclude_by_odds_threshold": by_odds_threshold,
+        "note": (
+            "exclude_top_n_hitsは、的中1件ごとの純利益(payout-stake)が大きい順に"
+            "上位1/5/10件を『無かったこと』にした場合の残り損益。"
+            "exclude_by_odds_thresholdは、指定オッズ以上の的中があった買い目を除いた"
+            "場合の残り損益(投資額はそのまま、対象の払戻だけを除く)。"
+            "still_profitable=falseの閾値があれば、その分だけ現在の黒字が"
+            "少数の高オッズ的中に依存していることを意味する。読み取り専用の感度分析であり、"
+            "この結果を根拠に自動で除外する変更は行っていない。"
+        ),
+    }
+
+
 @router.get("/gate-expectancy-detail")
 def diagnostics_gate_expectancy_detail(
     since: Optional[str] = Query("calibration_switch"),

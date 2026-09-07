@@ -800,3 +800,25 @@ def binomial_lower_tail_p(actual_wins: int, n: int, predicted_prob: float) -> fl
     ]
     max_log = max(log_terms)
     return exp(max_log) * sum(exp(lt - max_log) for lt in log_terms)
+
+
+def wilson_score_interval(wins: int, n: int, z: float = 1.96) -> tuple:
+    """
+    的中率の95%信頼区間(Wilson score interval、既定z=1.96)を返す。
+
+    2026-09-07追加(ChatGPT分析項目5対応・のんの指摘により追加):
+    「回収率が高い」という理由だけで小サンプルの条件を有効と判断しないよう、
+    実績的中率と一緒に「真の的中率がどの範囲にありそうか」を示す信頼区間を
+    出せるようにする。単純な正規近似(wins/n ± z*sqrt(p(1-p)/n))はnが小さい・
+    pが0や1に近いと破綻しやすいため、そうした条件でも安定するWilson score
+    intervalを使う。戻り値は(下限, 上限)の確率(0〜1)のタプル。
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    p_hat = wins / n
+    denom = 1 + z * z / n
+    center = (p_hat + z * z / (2 * n)) / denom
+    margin = (z * ((p_hat * (1 - p_hat) / n + z * z / (4 * n * n)) ** 0.5)) / denom
+    lo = max(0.0, center - margin)
+    hi = min(1.0, center + margin)
+    return (lo, hi)

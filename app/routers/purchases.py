@@ -377,6 +377,14 @@ def _compute_calibration_factors_from_records(records: list) -> dict:
         # こちらは「予想が実際どれだけ当たっているか」を表す(のんの指摘により追加)。
         accuracy_pct = calc.prediction_accuracy_pct(actual_win_rate, predicted_avg)
 
+        # 2026-09-07追加(ChatGPT分析項目5対応): 実績的中率の95%信頼区間
+        # (Wilson score interval)。件数が少ない帯ほど区間が広くなるため、
+        # 「回収率が高い」という見た目だけで小サンプルの帯を過信しない材料にする。
+        win_rate_ci95 = None
+        if count > 0:
+            lo, hi = calc.wilson_score_interval(wins, count)
+            win_rate_ci95 = {"ci95_low_pct": round(lo * 100, 2), "ci95_high_pct": round(hi * 100, 2)}
+
         result[name] = {
             "sample_count": count,
             "purchase_count": purchase_count,
@@ -384,6 +392,7 @@ def _compute_calibration_factors_from_records(records: list) -> dict:
             "required_sample_count": required,
             "is_reliable": is_reliable,
             "actual_win_rate_pct": round(actual_win_rate * 100, 2) if actual_win_rate is not None else None,
+            "actual_win_rate_ci95": win_rate_ci95,
             "predicted_avg_prob_pct": round(predicted_avg * 100, 2) if predicted_avg is not None else None,
             "deviation_pct": deviation_pct,
             "significance_p_value_pct": significance_p_value_pct,
@@ -1818,6 +1827,91 @@ def _summarize_bucket(bucket: dict) -> dict:
         "predicted_avg_prob_pct": bucket.get("predicted_avg_prob_pct"),
         "deviation_pct": bucket.get("deviation_pct"),
         "calibration_factor": bucket.get("calibration_factor"),
+    }
+
+
+@router.get("/calibration-investment-impact")
+def calibration_investment_impact(min_ev_pct: float = 5.0, db: Session = Depends(get_db)):
+    """
+    ChatGPT分析9項目の項目9: 「キャリブレーション改善」と「投資判断改善」の
+    指標分離(読み取り専用)。
+
+    `calibration-factors-compare`は予想確率と実績確率の乖離(キャリブレーション
+    上の改善)だけを見ており、「乖離が縮んだ=収益が改善した」と早合点しない
+    ために、実際に購入した買い目を対象に、券種別の遡及検証係数
+    (get_calibration_factors_retroactive の by_bet_type)を適用し直した場合、
+    - 実際に買った買い目のうちどれだけが「引き続き買う判定」になるか
+    - 除外される側になる買い目は、実際どうだったか(勝率・回収率)
+    - 残る側になる買い目は、実際どうだったか
+    を分けて集計する。既存の投票ロジック・補正処理は一切変更しない
+    (あくまで過去の実購入データへの事後シミュレーション)。
+    """
+    retro = get_calibration_factors_retroactive(db, use_cache=False)
+    retro_by_bet_type = retro.get("by_bet_type") or {}
+
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result.in_(("win", "lose")))
+        .all()
+    )
+
+    rows = []
+    for p in purchases:
+        raw_prob = getattr(p, "win_prob_raw", None)
+        odds = p.odds_at_purchase or p.final_odds
+        if raw_prob is None or not odds:
+            continue
+        bt_info = retro_by_bet_type.get(p.bet_type)
+        if not bt_info:
+            continue
+        retro_factor = bt_info.get("calibration_factor")
+        if retro_factor is None:
+            continue
+        est_prob_retro = min(1.0, float(raw_prob) * float(retro_factor))
+        ev_retro_pct = (est_prob_retro * float(odds) - 1.0) * 100
+        rows.append({
+            "p": p,
+            "would_still_buy": ev_retro_pct >= min_ev_pct,
+        })
+
+    def _group_stats(group):
+        n = len(group)
+        if n == 0:
+            return None
+        stake = sum(float(r["p"].stake_amount or 0) for r in group)
+        payout = sum(float(r["p"].payout_amount or 0) for r in group)
+        wins = sum(1 for r in group if r["p"].result == "win")
+        return {
+            "n": n,
+            "win_count": wins,
+            "win_rate_pct": round(wins / n * 100, 2),
+            "stake_total": round(stake, 0),
+            "payout_total": round(payout, 0),
+            "roi_pct": round(payout / stake * 100, 2) if stake > 0 else None,
+        }
+
+    still_buy = [r for r in rows if r["would_still_buy"]]
+    excluded = [r for r in rows if not r["would_still_buy"]]
+
+    return {
+        "min_ev_pct": min_ev_pct,
+        "evaluated_purchase_count": len(rows),
+        "skipped_missing_data_count": len(purchases) - len(rows),
+        "would_still_buy_under_retroactive_calibration": _group_stats(still_buy),
+        "would_be_excluded_under_retroactive_calibration": _group_stats(excluded),
+        "actual_all": _group_stats(rows),
+        "note": (
+            "実際に買った買い目(win_prob_raw・odds_at_purchaseが記録されているもの"
+            "のみ対象)に、券種別の遡及検証係数(偏りの無い方法で計算し直した係数)を"
+            "適用し直した場合の事後シミュレーション。"
+            "would_be_excluded側の実績回収率が高い場合、遡及検証係数への切り替えで"
+            "本来拾えていたはずの利益を取りこぼす可能性があることを示す。逆にこちら側の"
+            "実績が悪い(または的中0件)場合は、切り替えても実害は無かった可能性が高い。"
+            "『キャリブレーション改善(乖離が縮んだか)』は"
+            "/purchases/calibration-factors-compare を参照。こちらは投資結果への"
+            "影響だけを見る指標であり、両者は別物として扱うこと。"
+            "既存の投票ロジック・補正処理は変更していない。"
+        ),
     }
 
 
@@ -3758,10 +3852,19 @@ def _compute_purchase_stats(db: Session, since_dt=None):
             win_rate_pct = (
                 round(v["purchased_wins"] / v["purchased_count"] * 100, 1) if has_purchase else None
             )
+            # 2026-09-07追加(ChatGPT分析項目5対応): 「回収率が高い」というだけで
+            # 小サンプルの条件を有効と判断しないよう、実的中率の95%信頼区間
+            # (Wilson score interval)を併記する。件数が少ないほど区間が広くなり、
+            # 一目で「まだ何とも言えない」ことが分かるようにする。
+            win_rate_ci = None
+            if has_purchase:
+                lo, hi = calc.wilson_score_interval(v["purchased_wins"], v["purchased_count"])
+                win_rate_ci = {"ci95_low_pct": round(lo * 100, 1), "ci95_high_pct": round(hi * 100, 1)}
             out[k] = {
                 "count": v["count"],
                 "purchased_count": v["purchased_count"],
                 "win_rate_pct": win_rate_pct,
+                "win_rate_ci95": win_rate_ci,
                 "predicted_win_rate_pct": predicted_win_rate_pct,
                 "expected_win_rate_pct": expected_win_rate_pct,
                 # roi_pct: 回収率(100%が損益分岐点)。expectancy_pct: 同じ値を「0%が損益分岐点」の表現にしたもの。
@@ -3922,12 +4025,28 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     def combo_bucket(key_fn_a, label_a, key_fn_b, label_b):
         return bucket_stats(lambda p: f"{label_a}:{key_fn_a(p)} × {label_b}:{key_fn_b(p)}")
 
+    def odds_band_bucket(p):
+        odds = p.odds_at_purchase
+        if odds is None or odds <= 0:
+            odds = p.final_odds
+        return odds_band_label(odds)
+
     combo_buckets = {
         "グレード×季節": combo_bucket(grade_bucket, "グレード", season_bucket, "季節"),
         "券種×勝率帯": combo_bucket(lambda p: p.bet_type, "券種", prob_bucket, "勝率帯"),
         "季節×バンク先行有利度": combo_bucket(season_bucket, "季節", bank_lead_bucket, "先行有利度"),
         "券種×ライン絡み": combo_bucket(lambda p: p.bet_type, "券種", line_bucket, "ライン"),
         "券種×人気集中度パターン": combo_bucket(lambda p: p.bet_type, "券種", popularity_pattern_bucket, "人気集中度"),
+        # 2026-09-07追加(ChatGPT分析項目6対応): バンク別の収益差が「バンク自体の
+        # 差」なのか「特定の券種・オッズ帯がそのバンクに偏っているだけ」なのかを
+        # 切り分けるための組み合わせ。
+        "バンク×券種": combo_bucket(bank_bucket, "バンク", lambda p: p.bet_type, "券種"),
+        "バンク×オッズ帯": combo_bucket(bank_bucket, "バンク", odds_band_bucket, "オッズ帯"),
+        # 2026-09-07追加(ChatGPT分析項目7対応): 同ライン絡みの高回収率が
+        # 「同ラインだから」なのか「同ライン条件に高オッズの買い目が集中して
+        # いるだけ」なのかを切り分けるための組み合わせ。
+        "ライン絡み×オッズ帯": combo_bucket(line_bucket, "ライン", odds_band_bucket, "オッズ帯"),
+        "ライン絡み×勝率帯": combo_bucket(line_bucket, "ライン", prob_bucket, "勝率帯"),
     }
     min_sample_for_combo = 8
 
