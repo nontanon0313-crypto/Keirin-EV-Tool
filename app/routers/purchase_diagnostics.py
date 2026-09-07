@@ -1981,16 +1981,26 @@ def diagnostics_pick_to_bet_funnel(
         db.query(models.Purchase)
         .filter(models.Purchase.result.in_(("win", "lose")))
         .filter(models.Purchase.bet_type.in_(("3連単", "2車単")))
-        .filter(models.Purchase.win_prob_at_purchase.isnot(None))
     )
     if since_dt is not None:
         q = q.filter(models.Purchase.purchased_at >= since_dt)
-    purchases = q.all()
+    all_rows = q.all()
+    # win_prob_at_purchaseが無い古い行はwin_prob_rawで補完する(既存コードの
+    # purchases.py 89行目付近と同じフォールバック)。これをしないと対象が
+    # 数百件規模まで激減し、本命絡み/非絡みの差を見るには足りなくなる
+    # (2026-09-07: since=allで実測149件しかなく発覚し修正)。
+    purchases = []
+    for p in all_rows:
+        prob = getattr(p, "win_prob_raw", None)
+        if prob is None:
+            prob = p.win_prob_at_purchase
+        if prob is not None:
+            purchases.append((p, float(prob)))
 
     if not purchases:
         return {"message": "対象データがありません(3連単・2車単の確定済み購入)"}
 
-    race_ids = {p.race_id for p in purchases}
+    race_ids = {p.race_id for p, _ in purchases}
     races = db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()
     honmei_by_race: Dict[int, Optional[int]] = {}
     for r in races:
@@ -2007,16 +2017,16 @@ def diagnostics_pick_to_bet_funnel(
         except (ValueError, IndexError):
             return None
 
-    def _stats(rows: List[models.Purchase]) -> Optional[Dict[str, Any]]:
+    def _stats(rows: List[Tuple[models.Purchase, float]]) -> Optional[Dict[str, Any]]:
         n = len(rows)
         if n == 0:
             return None
-        wins = sum(1 for p in rows if p.result == "win")
-        pred_avg = sum(float(p.win_prob_at_purchase) for p in rows) / n
+        wins = sum(1 for p, _ in rows if p.result == "win")
+        pred_avg = sum(prob for _, prob in rows) / n
         act = wins / n
         p_value = calc.binomial_lower_tail_p(wins, n, pred_avg)
-        stake = sum(float(p.stake_amount or 0) for p in rows)
-        payout = sum(float(p.payout_amount or 0) for p in rows)
+        stake = sum(float(p.stake_amount or 0) for p, _ in rows)
+        payout = sum(float(p.payout_amount or 0) for p, _ in rows)
         return {
             "n": n,
             "win_count": wins,
@@ -2029,15 +2039,15 @@ def diagnostics_pick_to_bet_funnel(
 
     by_bet_type = {}
     for bt in ("3連単", "2車単"):
-        rows = [p for p in purchases if p.bet_type == bt]
+        rows = [(p, prob) for p, prob in purchases if p.bet_type == bt]
         honmei_first, other_first, unknown = [], [], 0
-        for p in rows:
+        for p, prob in rows:
             honmei = honmei_by_race.get(p.race_id)
             first = _first_car(p.combination)
             if honmei is None or first is None:
                 unknown += 1
                 continue
-            (honmei_first if first == honmei else other_first).append(p)
+            (honmei_first if first == honmei else other_first).append((p, prob))
         by_bet_type[bt] = {
             "本命車番が1着位置の買い目": _stats(honmei_first),
             "本命以外が1着位置の買い目": _stats(other_first),
