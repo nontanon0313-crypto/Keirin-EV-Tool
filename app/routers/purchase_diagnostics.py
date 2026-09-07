@@ -2017,6 +2017,213 @@ def diagnostics_decision_pipeline(
     }
 
 
+@router.get("/calibration-structure")
+def diagnostics_calibration_structure(
+    db: Session = Depends(get_db),
+):
+    """
+    補正係数の算出構造を可視化する(読み取り専用)。
+
+    第1段: get_calibration_factors_retroactive (全オッズ組合せ・偏り無し)
+    第2段: get_purchase_set_calibration_factors (実購入の残差=勝者の呪い)
+
+    本番の適用順(_apply_calibration相当):
+      1) 券種×勝率帯 (n>=30)
+      2) 勝率帯単体 (n>=80)
+      3) overall
+      4) 券種残差 (overallからの乖離を半減して乗算、第1段のみ)
+      係数は [0.25, 2.0] にクランプ
+    その後 race-plan で第2段(購入集合・主に券種×オッズ帯)を追加適用。
+
+    係数・閾値・購入ロジックは変更しない。
+    """
+    stage1 = purchases_router.get_calibration_factors_retroactive(db, use_cache=True)
+    stage2 = purchases_router.get_purchase_set_calibration_factors(db, use_cache=True)
+
+    def _flatten_buckets(factors: dict) -> List[dict]:
+        rows = []
+        overall = factors.get("overall")
+        if overall:
+            rows.append({"layer": "overall", "key": "overall", **{k: overall.get(k) for k in (
+                "sample_count", "required_sample_count", "is_reliable",
+                "actual_win_rate_pct", "predicted_avg_prob_pct", "deviation_pct",
+                "significance_p_value_pct", "calibration_factor", "prediction_accuracy_pct",
+            ) if k in overall or True}})
+        # named buckets at top level (prob bands)
+        for k, v in factors.items():
+            if k in ("overall", "by_bet_type", "by_bet_type_bucket", "by_odds_band",
+                      "by_bet_type_odds_band", "note"):
+                continue
+            if isinstance(v, dict) and "calibration_factor" in v:
+                rows.append({
+                    "layer": "prob_bucket",
+                    "key": k,
+                    "sample_count": v.get("sample_count"),
+                    "required_sample_count": v.get("required_sample_count"),
+                    "is_reliable": v.get("is_reliable"),
+                    "actual_win_rate_pct": v.get("actual_win_rate_pct"),
+                    "predicted_avg_prob_pct": v.get("predicted_avg_prob_pct"),
+                    "deviation_pct": v.get("deviation_pct"),
+                    "significance_p_value_pct": v.get("significance_p_value_pct"),
+                    "calibration_factor": v.get("calibration_factor"),
+                    "prediction_accuracy_pct": v.get("prediction_accuracy_pct"),
+                })
+        for bt, info in (factors.get("by_bet_type") or {}).items():
+            rows.append({
+                "layer": "bet_type",
+                "key": bt,
+                "sample_count": info.get("sample_count"),
+                "actual_win_rate_pct": info.get("actual_win_rate_pct"),
+                "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
+                "calibration_factor": info.get("calibration_factor"),
+            })
+        for bt, buckets in (factors.get("by_bet_type_bucket") or {}).items():
+            for bname, info in buckets.items():
+                rows.append({
+                    "layer": "bet_type_x_prob_bucket",
+                    "key": f"{bt}|{bname}",
+                    "sample_count": info.get("sample_count"),
+                    "required_sample_count": info.get("required_sample_count"),
+                    "actual_win_rate_pct": info.get("actual_win_rate_pct"),
+                    "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
+                    "deviation_pct": info.get("deviation_pct"),
+                    "significance_p_value_pct": info.get("significance_p_value_pct"),
+                    "calibration_factor": info.get("calibration_factor"),
+                })
+        for band, info in (factors.get("by_odds_band") or {}).items():
+            if isinstance(info, dict) and "calibration_factor" in info:
+                rows.append({
+                    "layer": "odds_band",
+                    "key": band,
+                    "sample_count": info.get("sample_count") or info.get("n"),
+                    "calibration_factor": info.get("calibration_factor"),
+                    "actual_win_rate_pct": info.get("actual_win_rate_pct"),
+                    "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
+                })
+        for key, info in (factors.get("by_bet_type_odds_band") or {}).items():
+            if isinstance(info, dict):
+                # may be nested bt -> band -> info
+                if "calibration_factor" in info:
+                    rows.append({
+                        "layer": "bet_type_x_odds_band",
+                        "key": str(key),
+                        "sample_count": info.get("sample_count") or info.get("n"),
+                        "calibration_factor": info.get("calibration_factor"),
+                        "actual_win_rate_pct": info.get("actual_win_rate_pct"),
+                        "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
+                    })
+                else:
+                    for band, sub in info.items():
+                        if isinstance(sub, dict) and "calibration_factor" in sub:
+                            rows.append({
+                                "layer": "bet_type_x_odds_band",
+                                "key": f"{key}|{band}",
+                                "sample_count": sub.get("sample_count") or sub.get("n"),
+                                "calibration_factor": sub.get("calibration_factor"),
+                                "actual_win_rate_pct": sub.get("actual_win_rate_pct"),
+                                "predicted_avg_prob_pct": sub.get("predicted_avg_prob_pct"),
+                            })
+        return rows
+
+    stage1_rows = _flatten_buckets(stage1)
+    stage2_rows = _flatten_buckets(stage2)
+
+    overall1 = (stage1.get("overall") or {})
+    overall2 = (stage2.get("overall") or {})
+
+    # 適用シミュレーション: 代表的な (bet_type, raw_prob) で第1段係数を追跡
+    demo_cases = []
+    for bt, raw_p in [
+        ("3連単", 0.01), ("3連単", 0.05), ("ワイド", 0.10),
+        ("2車単", 0.08), ("3連複", 0.03),
+    ]:
+        bucket_name, _ = calc.get_prob_bucket(raw_p)
+        path = []
+        factor = 1.0
+        MIN_CROSS = 30
+        cross_map = stage1.get("by_bet_type_bucket") or {}
+        cross_info = (cross_map.get(bt) or {}).get(bucket_name)
+        info = stage1.get(bucket_name)
+        overall = stage1.get("overall")
+        if cross_info and cross_info.get("sample_count", 0) >= MIN_CROSS and cross_info.get("calibration_factor") is not None:
+            factor = cross_info["calibration_factor"]
+            path.append(f"bet_type_x_bucket:{bt}|{bucket_name} factor={factor}")
+            cross_used = True
+        else:
+            cross_used = False
+            if info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
+                factor = info["calibration_factor"]
+                path.append(f"prob_bucket:{bucket_name} factor={factor}")
+            elif overall and overall.get("calibration_factor") is not None:
+                factor = overall["calibration_factor"]
+                path.append(f"overall factor={factor}")
+            else:
+                path.append("no factor (1.0)")
+        if not cross_used:
+            by_bt = stage1.get("by_bet_type") or {}
+            if bt in by_bt and overall and overall.get("calibration_factor"):
+                bt_f = by_bt[bt]["calibration_factor"]
+                ov_f = overall["calibration_factor"]
+                if ov_f and ov_f > 1e-9:
+                    residual = bt_f / ov_f
+                    residual = 1.0 + 0.5 * (residual - 1.0)
+                    factor *= residual
+                    path.append(f"bet_type_residual:{bt} residual={round(residual,4)}")
+        factor_clamped = max(0.25, min(2.0, factor))
+        if abs(factor_clamped - factor) > 1e-9:
+            path.append(f"clamped->{factor_clamped}")
+        cal_p = max(0.0, min(1.0, raw_p * factor_clamped))
+        demo_cases.append({
+            "bet_type": bt,
+            "raw_prob": raw_p,
+            "prob_bucket": bucket_name,
+            "factor_applied": round(factor_clamped, 4),
+            "calibrated_prob": round(cal_p, 6),
+            "path": path,
+        })
+
+    # 条件別補正が「効いている」層: factorが大きく1から離れている & n十分
+    def _notable(rows, min_n=50, min_dev=0.05):
+        out = []
+        for r in rows:
+            f = r.get("calibration_factor")
+            n = r.get("sample_count") or 0
+            if f is None or n < min_n:
+                continue
+            if abs(f - 1.0) >= min_dev:
+                out.append(r)
+        out.sort(key=lambda r: abs((r.get("calibration_factor") or 1) - 1), reverse=True)
+        return out[:20]
+
+    return {
+        "stage1_retroactive": {
+            "overall": overall1,
+            "rows": stage1_rows,
+            "note": stage1.get("note") or "全確定レース×全オッズ組合せの遡及校正(本番第1段)",
+        },
+        "stage2_purchase_set": {
+            "overall": overall2,
+            "rows": stage2_rows,
+            "note": stage2.get("note") or "実購入集合の残差校正(本番第2段・勝者の呪い)",
+        },
+        "application_order": [
+            "第1段: 券種×勝率帯(n>=30) → 勝率帯(n>=80) → overall",
+            "第1段追加: 券種残差(overall比を半減して乗算) ※交差係数使用時はスキップ",
+            "第1段: factorを[0.25,2.0]にクランプ",
+            "第2段: 購入集合の券種×オッズ帯など残差係数を追加適用",
+        ],
+        "demo_application_path": demo_cases,
+        "notable_stage1_factors": _notable(stage1_rows),
+        "notable_stage2_factors": _notable(stage2_rows, min_n=30, min_dev=0.05),
+        "interpretation_notes": [
+            "overall係数が0.85前後なら、全体として予測確率を約15%割引している。",
+            "係数は actual/predicted をshrinkageした値。小サンプルでは1.0に寄る。",
+            "第2段は『買ったものだけ』の残る楽観を抑える。見送り側のギャップとは別物。",
+            "本APIは係数の中身の可視化のみ。係数や閾値は変更しない。",
+        ],
+    }
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -2041,6 +2248,7 @@ def diagnostics_summary(
         "winning_capture": diagnostics_winning_capture(since=since, db=db),
         "odds_cap_sensitivity": diagnostics_odds_cap_sensitivity(since=since, db=db),
         "decision_pipeline": diagnostics_decision_pipeline(since=since, db=db),
+        "calibration_structure": diagnostics_calibration_structure(db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"

@@ -1604,6 +1604,54 @@ document.getElementById("loadPipelineBtn").addEventListener("click", async () =>
   }
 });
 
+
+document.getElementById("loadCalibStructBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "補正係数の構造を取得中...(重い場合あり)";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/calibration-structure"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    let html = `<p><strong>補正係数の構造</strong>(読み取り専用・係数は変更しない)</p>`;
+    const o1 = (data.stage1_retroactive || {}).overall || {};
+    const o2 = (data.stage2_purchase_set || {}).overall || {};
+    html += `<p><strong>第1段 overall</strong> factor=${o1.calibration_factor ?? "-"} / 予測${o1.predicted_avg_prob_pct ?? "-"}% vs 実${o1.actual_win_rate_pct ?? "-"}% / n=${o1.sample_count ?? "-"} / p=${o1.significance_p_value_pct ?? "-"}%</p>`;
+    html += `<p><strong>第2段 overall</strong> factor=${o2.calibration_factor ?? "-"} / n=${o2.sample_count ?? "-"} <span class="note">(購入集合の残差)</span></p>`;
+    if (data.application_order) {
+      html += `<p class="note">適用順: ${data.application_order.join(" → ")}</p>`;
+    }
+    html += `<p style="margin-top:10px;"><strong>適用パス例</strong></p><table><tr><th>券種</th><th>raw p</th><th>帯</th><th>係数</th><th>校正後p</th><th>経路</th></tr>`;
+    for (const d of (data.demo_application_path || [])) {
+      html += `<tr><td>${d.bet_type}</td><td>${d.raw_prob}</td><td>${d.prob_bucket}</td><td>${d.factor_applied}</td><td>${d.calibrated_prob}</td><td style="font-size:11px;">${(d.path||[]).join(" / ")}</td></tr>`;
+    }
+    html += `</table>`;
+    const notable = data.notable_stage1_factors || [];
+    if (notable.length) {
+      html += `<p style="margin-top:10px;"><strong>第1段で1から大きく離れている層(上位)</strong></p>`;
+      html += `<table><tr><th>層</th><th>キー</th><th>n</th><th>factor</th><th>予測%</th><th>実%</th></tr>`;
+      for (const r of notable.slice(0, 15)) {
+        html += `<tr><td>${r.layer}</td><td>${r.key}</td><td>${r.sample_count ?? "-"}</td><td>${r.calibration_factor ?? "-"}</td><td>${r.predicted_avg_prob_pct ?? "-"}</td><td>${r.actual_win_rate_pct ?? "-"}</td></tr>`;
+      }
+      html += `</table>`;
+    }
+    const n2 = data.notable_stage2_factors || [];
+    if (n2.length) {
+      html += `<p style="margin-top:10px;"><strong>第2段(購入残差)で目立つ層</strong></p>`;
+      html += `<table><tr><th>層</th><th>キー</th><th>n</th><th>factor</th></tr>`;
+      for (const r of n2.slice(0, 15)) {
+        html += `<tr><td>${r.layer}</td><td>${r.key}</td><td>${r.sample_count ?? "-"}</td><td>${r.calibration_factor ?? "-"}</td></tr>`;
+      }
+      html += `</table>`;
+    }
+    if (data.interpretation_notes) {
+      html += `<p class="note">${data.interpretation_notes.join(" ")}</p>`;
+    }
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibrationBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "読み込み中...";
