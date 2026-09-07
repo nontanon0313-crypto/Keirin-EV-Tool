@@ -37,6 +37,9 @@ EV_BANDS = [
 MIN_BAND_N = 30  # これ未満は結論禁止
 MIN_PURCHASE_FOR_PROFIT_JUDGE = 50
 
+# 項目1: オッズ上限感度分析で検証する仮想上限。Noneは「上限なし」。
+ODDS_CAPS = [None, 50.0, 100.0, 200.0, 300.0, 500.0, 1000.0]
+
 
 def _since_dt(since: Optional[str]) -> Optional[datetime]:
     return purchases_router._parse_since_param(since or "calibration_switch")
@@ -215,6 +218,28 @@ def _skip_row(s: models.SkippedBet, default_stake: float = 100.0) -> dict:
         "skip_reason": s.reason,
         "skip_category": purchases_router._categorize_skip_reason(s.reason or ""),
     }
+
+
+def _effective_odds(p: models.Purchase) -> Optional[float]:
+    """購入時オッズが欠けている古い行は、的中時の払戻/投資額から逆算する。"""
+    odds = p.odds_at_purchase
+    if odds is None and p.stake_amount and p.result == "win" and p.payout_amount:
+        odds = p.payout_amount / p.stake_amount
+    return float(odds) if odds is not None else None
+
+
+def _percentile(values: List[float], pct: float) -> Optional[float]:
+    if not values:
+        return None
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * (pct / 100.0)
+    f = int(k)
+    c = min(f + 1, len(s) - 1)
+    if f == c:
+        return s[f]
+    return s[f] * (c - k) + s[c] * (k - f)
 
 
 def _default_stakes_by_type(purchases: List[models.Purchase]) -> Dict[str, float]:
@@ -1686,541 +1711,251 @@ def diagnostics_winning_capture(
 @router.get("/odds-cap-sensitivity")
 def diagnostics_odds_cap_sensitivity(
     since: Optional[str] = Query("calibration_switch"),
-    caps: Optional[str] = Query(
-        "50,100,200,300,500,1000",
-        description="カンマ区切りの仮想オッズ上限。空なら既定セット",
-    ),
     db: Session = Depends(get_db),
 ):
     """
-    オッズ上限の感度分析(読み取り専用)。
+    項目1: オッズ上限感度分析(読み取り専用)。
 
-    既存の確定済みPurchaseについて、購入時オッズが上限以下のものだけ残した場合の
-    件数・的中率・ROI・損益を上限ごとに比較する。
-    購入判定・race-plan・校正係数は一切変更しない。
-
-    解釈上の注意:
-    - 小サンプルの高ROIを採用条件にしないこと
-    - 高オッズ/低オッズを良い悪いと決めつけないこと
-    - これは「もしその上限で買わなかったら」の仮想集計であり、因果の証明ではない
+    実際に確定済みのPurchase(実購入)を対象に、仮想的なオッズ上限
+    (上限なし/50/100/200/300/500/1000倍)を設定した場合に実績がどう変化するかを
+    再計算する。「高オッズを除外すべき」という結論は出さず、あくまで収益構造が
+    オッズ上限によってどう変化するかを見えるようにするだけ。
+    購入判定・予想ロジック・EV計算は一切変更しない。
     """
     since_dt = _since_dt(since)
     purchases = _load_settled_purchases(db, since_dt)
-    rows = [_purchase_row(p) for p in purchases]
 
-    # オッズ不明は上限判定不能のため別集計
-    with_odds = [r for r in rows if r.get("odds") is not None]
-    no_odds = [r for r in rows if r.get("odds") is None]
-
-    try:
-        cap_list = []
-        for part in (caps or "").split(","):
-            part = part.strip()
-            if not part:
-                continue
-            cap_list.append(float(part))
-        cap_list = sorted(set(cap_list))
-    except ValueError:
-        cap_list = [50.0, 100.0, 200.0, 300.0, 500.0, 1000.0]
-
-    if not cap_list:
-        cap_list = [50.0, 100.0, 200.0, 300.0, 500.0, 1000.0]
-
-    baseline = _agg_rows(rows)
-    baseline_with_odds = _agg_rows(with_odds)
-
-    # 利益集中: 的中の払戻上位
-    wins = sorted(
-        [r for r in rows if r["won"] and r["payout"] > 0],
-        key=lambda r: r["payout"],
-        reverse=True,
-    )
-    total_profit = baseline["actual_profit"] or 0.0
-    top_n = min(10, len(wins))
-    top_profit = sum(w["payout"] - w["stake"] for w in wins[:top_n]) if top_n else 0.0
-
-    def _slice_metrics(subset: List[dict], label: str, cap_value: Optional[float]) -> dict:
-        m = _agg_rows(subset)
-        if cap_value is not None:
-            excluded = [r for r in with_odds if r.get("odds") is not None and r["odds"] > cap_value]
-        else:
-            excluded = []
-        excl_m = _agg_rows(excluded) if excluded else _agg_rows([])
-        # 利益寄与: 除外した分の損益
-        m["cap"] = cap_value
-        m["label"] = label
-        m["excluded_bet_count"] = excl_m["bet_count"]
-        m["excluded_profit"] = excl_m["actual_profit"]
-        m["excluded_roi_pct"] = excl_m["actual_roi_pct"]
-        m["excluded_hit_count"] = excl_m["hit_count"]
-        # baseline 比
-        if baseline["actual_roi_pct"] is not None and m["actual_roi_pct"] is not None:
-            m["roi_delta_vs_baseline_pt"] = round(m["actual_roi_pct"] - baseline["actual_roi_pct"], 4)
-        else:
-            m["roi_delta_vs_baseline_pt"] = None
-        if baseline["actual_profit"] is not None and m["actual_profit"] is not None:
-            m["profit_delta_vs_baseline"] = round(m["actual_profit"] - baseline["actual_profit"], 2)
-        else:
-            m["profit_delta_vs_baseline"] = None
-        # 残した側の的中オッズ中央値
-        hit_odds = sorted([r["odds"] for r in subset if r["won"] and r.get("odds") is not None])
-        if hit_odds:
-            mid = len(hit_odds) // 2
-            m["hit_odds_median"] = hit_odds[mid] if len(hit_odds) % 2 == 1 else round((hit_odds[mid - 1] + hit_odds[mid]) / 2, 4)
-        else:
-            m["hit_odds_median"] = None
-        return m
-
-    scenarios = []
-    scenarios.append(_slice_metrics(rows, "上限なし(現状)", None))
-    for cap in cap_list:
-        kept = [r for r in with_odds if r["odds"] <= cap]
-        # オッズ不明は上限判定不能→現状方針では含めない(厳しめ=除外)
-        scenarios.append(_slice_metrics(kept, f"上限{int(cap) if cap == int(cap) else cap}倍以下", cap))
-
-    # 券種別×上限の粗い表(サンプル不足は n_insufficient)
-    by_bet_type = {}
-    for bt in sorted({r["bet_type"] for r in with_odds if r.get("bet_type")}):
-        bt_rows = [r for r in with_odds if r["bet_type"] == bt]
-        bt_scenarios = [{"label": "上限なし", "cap": None, **_agg_rows(bt_rows)}]
-        for cap in cap_list:
-            kept = [r for r in bt_rows if r["odds"] <= cap]
-            bt_scenarios.append({"label": f"<={int(cap) if cap == int(cap) else cap}", "cap": cap, **_agg_rows(kept)})
-        by_bet_type[bt] = bt_scenarios
-
-    return {
-        "since": since,
-        "since_resolved": since_dt.isoformat() if since_dt else None,
-        "caps": cap_list,
-        "baseline": baseline,
-        "baseline_with_odds_only": baseline_with_odds,
-        "odds_missing_count": len(no_odds),
-        "profit_concentration": {
-            "top10_hit_count": top_n,
-            "top10_profit": round(top_profit, 2),
-            "total_profit": round(total_profit, 2),
-            "top10_share_of_profit_pct": (
-                round(100.0 * top_profit / total_profit, 2) if total_profit not in (0, 0.0) else None
-            ),
-        },
-        "scenarios": scenarios,
-        "by_bet_type": by_bet_type,
-        "notes": [
-            "既存Purchaseの事後フィルタ。購入ロジックは変更していない。",
-            "オッズ不明行は上限シナリオでは除外(保守的)。",
-            f"バンド内n<{MIN_BAND_N}は n_insufficient=true。採用判断に使わないこと。",
-            "次の判断材料: ROI改善とベット数減少のトレードオフ、券種別の差、利益集中度。",
-        ],
-    }
-
-
-@router.get("/decision-pipeline")
-def diagnostics_decision_pipeline(
-    since: Optional[str] = Query("calibration_switch"),
-    db: Session = Depends(get_db),
-):
-    """
-    本命車番 → 買い目確率 → EV → 購入判定 を段階分離して計測する(読み取り専用)。
-
-    目的:
-    - 「どこで精度が落ちているか」を1本のレスポンスで追跡する
-    - 高オッズを切る等のルール変更はしない(分析のみ)
-    - 高オッズ×高EVの的中は期待値上あり得る、という前提で数字を読む
-
-    Stage1 本命車番: Entry.blended_win_prob 最大車が1着/上位3か
-    Stage2 買い目確率: Purchase+Skipped の予測確率 vs 実績的中(校正前/後)
-    Stage3 EV: 購入集合と見送り集合の予測EV vs 実績ROI
-    Stage4 購入判定: 見送り理由の内訳、購入率、的中がpurchase/skippedのどちらに落ちたか
-    """
-    since_dt = _since_dt(since)
-
-    # --- Stage1: 本命車番 ---
-    rq = db.query(models.Race).filter(models.Race.actual_result.isnot(None))
-    if since_dt is not None:
-        from sqlalchemy import or_
-        already_purchased = (
-            db.query(models.Purchase.id)
-            .filter(models.Purchase.race_id == models.Race.id)
-            .filter(models.Purchase.purchased_at >= since_dt)
-        )
-        already_skipped = (
-            db.query(models.SkippedBet.id)
-            .filter(models.SkippedBet.race_id == models.Race.id)
-            .filter(models.SkippedBet.created_at >= since_dt)
-        )
-        rq = rq.filter(or_(already_purchased.exists(), already_skipped.exists()))
-    races = rq.all()
-    race_ids = [r.id for r in races]
-    # entries batch
-    entries_by_race: Dict[int, list] = defaultdict(list)
-    if race_ids:
-        for e in db.query(models.Entry).filter(models.Entry.race_id.in_(race_ids)).all():
-            entries_by_race[e.race_id].append(e)
-
-    stage1_items = []
-    for race in races:
-        ents = [e for e in entries_by_race.get(race.id, []) if e.blended_win_prob is not None]
-        if not ents:
-            continue
-        top = max(ents, key=lambda e: e.blended_win_prob)
-        try:
-            parsed = calc.parse_actual_result(race.actual_result)
-        except Exception:
-            continue
-        if not parsed.get("groups"):
-            continue
-        first = parsed["groups"][0]
-        stage1_items.append({
-            "race_id": race.id,
-            "won": top.car_number in first,
-            "in_top3": top.car_number in (parsed.get("top3_set") or set()),
-            "predicted_pct": float(top.blended_win_prob) * 100.0,
-        })
-    n1 = len(stage1_items)
-    if n1:
-        w1 = sum(1 for it in stage1_items if it["won"])
-        t3 = sum(1 for it in stage1_items if it["in_top3"])
-        avg_p = sum(it["predicted_pct"] for it in stage1_items) / n1
-        p_val = calc.binomial_lower_tail_p(w1, n1, avg_p / 100.0)
-        stage1 = {
-            "n_races": n1,
-            "win_count": w1,
-            "win_rate_pct": round(w1 / n1 * 100, 2),
-            "top3_rate_pct": round(t3 / n1 * 100, 2),
-            "avg_predicted_win_prob_pct": round(avg_p, 2),
-            "predicted_vs_actual_gap_pt": round(avg_p - (w1 / n1 * 100), 2),
-            "binomial_p_value_pct": round(p_val * 100, 4),
-            "note": "車番本命の精度。券種・買い目のノイズを除いた1レース1試行。",
-        }
-    else:
-        stage1 = {"n_races": 0, "note": "対象レースなし"}
-
-    # --- Stage2/3/4: Purchase + Skipped ---
-    purchases = _load_settled_purchases(db, since_dt)
-    skips = _load_settled_skips(db, since_dt)
-    p_rows = [_purchase_row(p) for p in purchases]
-    s_rows = [_skip_row(s) for s in skips]
-
-    def _calib_block(rows: List[dict], prob_key: str) -> dict:
-        pairs = [(r[prob_key], r["won"]) for r in rows if r.get(prob_key) is not None]
-        if not pairs:
-            return {"n": 0}
-        n = len(pairs)
-        hits = sum(1 for _, w in pairs if w)
-        avg_p = sum(p for p, _ in pairs) / n
-        act = hits / n
-        return {
-            "n": n,
-            "hit_count": hits,
-            "actual_hit_rate_pct": round(act * 100, 4),
-            "predicted_avg_pct": round(avg_p * 100, 4),
-            "gap_pt": round(avg_p * 100 - act * 100, 4),
-            "brier": round(sum((p - (1.0 if w else 0.0)) ** 2 for p, w in pairs) / n, 6),
-        }
-
-    stage2 = {
-        "purchase_calibrated": _calib_block(p_rows, "prob_cal"),
-        "purchase_raw": _calib_block(p_rows, "prob_raw"),
-        "skipped_calibrated": _calib_block(s_rows, "prob_cal"),
-        "skipped_raw": _calib_block(s_rows, "prob_raw"),
-        "note": (
-            "買い目単位の確率校正。purchaseは選択後バイアス、skippedは見送り側。"
-            "gap>0なら予測が楽観的。"
-        ),
-    }
-
-    def _ev_block(rows: List[dict]) -> dict:
-        m = _agg_rows(rows)
-        evs = [r["ev_pct"] for r in rows if r.get("ev_pct") is not None]
-        m["predicted_avg_ev_pct"] = round(sum(evs) / len(evs), 4) if evs else None
-        # EV帯別
-        bands = defaultdict(list)
-        for r in rows:
-            bands[_band_for_ev_pct(r.get("ev_pct"))].append(r)
-        m["by_ev_band"] = {
-            k: _agg_rows(v) for k, v in sorted(bands.items(), key=lambda x: x[0])
-        }
-        return m
-
-    stage3 = {
-        "purchased": _ev_block(p_rows),
-        "skipped": _ev_block(s_rows),
-        "note": (
-            "予測EVと実績ROIの対応。高EV帯に高オッズが入りやすく、"
-            "的中時の払戻が大きく見えるのはEV定義上あり得る。"
-            "それを理由に高オッズを一律除外する根拠にはならない。"
-        ),
-    }
-
-    # Stage4 funnel
-    reason_counts = Counter()
-    for s in skips:
-        reason_counts[purchases_router._categorize_skip_reason(s.reason or "")] += 1
-
-    # 的中がどこに落ちたか (same race set)
-    hit_purchase = sum(1 for r in p_rows if r["won"])
-    hit_skip = sum(1 for r in s_rows if r["won"])
-    total_tracked = len(p_rows) + len(s_rows)
-    stage4 = {
-        "purchased_count": len(p_rows),
-        "skipped_count": len(s_rows),
-        "purchase_rate_pct": (
-            round(100.0 * len(p_rows) / total_tracked, 2) if total_tracked else None
-        ),
-        "hit_in_purchase": hit_purchase,
-        "hit_in_skipped": hit_skip,
-        "hit_capture_rate_pct": (
-            round(100.0 * hit_purchase / (hit_purchase + hit_skip), 2)
-            if (hit_purchase + hit_skip) > 0
-            else None
-        ),
-        "skip_reason_categories": dict(reason_counts.most_common()),
-        "note": (
-            "購入判定の結果。hit_capture_rateは記録上の的中がpurchaseに載った割合。"
-            "not_recorded(評価外)はこの集計には含まない。"
-        ),
-    }
-
-    # 経路サマリ: どこがボトルネックか(記述のみ)
-    bottlenecks = []
-    if stage1.get("n_races") and stage1.get("predicted_vs_actual_gap_pt", 0) > 5:
-        bottlenecks.append("Stage1: 本命車番の予測が実績より楽観的(gap大)")
-    pc = stage2.get("purchase_calibrated") or {}
-    if pc.get("n") and abs(pc.get("gap_pt") or 0) > 1:
-        bottlenecks.append(
-            f"Stage2: 購入集合の確率ギャップ {pc.get('gap_pt')}pt (校正後)"
-        )
-    pur = stage3.get("purchased") or {}
-    if pur.get("predicted_average_ev_pct") is not None and pur.get("actual_roi_pct") is not None:
-        # predicted_average_ev_pct is EV% ; ROI = EV+100 roughly for comparison narrative
-        bottlenecks.append(
-            f"Stage3: 購入の予測平均EV {pur.get('predicted_average_ev_pct')}% に対し実績ROI {pur.get('actual_roi_pct')}%"
-        )
-    if stage4.get("hit_capture_rate_pct") is not None and stage4["hit_capture_rate_pct"] < 50:
-        bottlenecks.append(
-            f"Stage4: 的中のpurchase捕捉率が低い({stage4['hit_capture_rate_pct']}%)"
-        )
-
-    return {
-        "since": since,
-        "since_resolved": since_dt.isoformat() if since_dt else None,
-        "stage1_favorite_car": stage1,
-        "stage2_combination_probability": stage2,
-        "stage3_ev": stage3,
-        "stage4_purchase_decision": stage4,
-        "bottleneck_hints": bottlenecks,
-        "interpretation_notes": [
-            "高オッズは市場確率が低い分、推定p×odds-1のEVが大きくなりやすい。利益が出ること自体は矛盾ではない。",
-            "問題になるのは『予測pが実績より高すぎる』『選択後に楽観が残る』『見送りに的中が落ちる』場合。",
-            "本APIはルール変更を提案しない。数値の切り分け材料のみ。",
-        ],
-    }
-
-
-@router.get("/calibration-structure")
-def diagnostics_calibration_structure(
-    db: Session = Depends(get_db),
-):
-    """
-    補正係数の算出構造を可視化する(読み取り専用)。
-
-    第1段: get_calibration_factors_retroactive (全オッズ組合せ・偏り無し)
-    第2段: get_purchase_set_calibration_factors (実購入の残差=勝者の呪い)
-
-    本番の適用順(_apply_calibration相当):
-      1) 券種×勝率帯 (n>=30)
-      2) 勝率帯単体 (n>=80)
-      3) overall
-      4) 券種残差 (overallからの乖離を半減して乗算、第1段のみ)
-      係数は [0.25, 2.0] にクランプ
-    その後 race-plan で第2段(購入集合・主に券種×オッズ帯)を追加適用。
-
-    係数・閾値・購入ロジックは変更しない。
-    """
-    stage1 = purchases_router.get_calibration_factors_retroactive(db, use_cache=True)
-    stage2 = purchases_router.get_purchase_set_calibration_factors(db, use_cache=True)
-
-    def _flatten_buckets(factors: dict) -> List[dict]:
-        rows = []
-        overall = factors.get("overall")
-        if overall:
-            rows.append({"layer": "overall", "key": "overall", **{k: overall.get(k) for k in (
-                "sample_count", "required_sample_count", "is_reliable",
-                "actual_win_rate_pct", "predicted_avg_prob_pct", "deviation_pct",
-                "significance_p_value_pct", "calibration_factor", "prediction_accuracy_pct",
-            ) if k in overall or True}})
-        # named buckets at top level (prob bands)
-        for k, v in factors.items():
-            if k in ("overall", "by_bet_type", "by_bet_type_bucket", "by_odds_band",
-                      "by_bet_type_odds_band", "note"):
-                continue
-            if isinstance(v, dict) and "calibration_factor" in v:
-                rows.append({
-                    "layer": "prob_bucket",
-                    "key": k,
-                    "sample_count": v.get("sample_count"),
-                    "required_sample_count": v.get("required_sample_count"),
-                    "is_reliable": v.get("is_reliable"),
-                    "actual_win_rate_pct": v.get("actual_win_rate_pct"),
-                    "predicted_avg_prob_pct": v.get("predicted_avg_prob_pct"),
-                    "deviation_pct": v.get("deviation_pct"),
-                    "significance_p_value_pct": v.get("significance_p_value_pct"),
-                    "calibration_factor": v.get("calibration_factor"),
-                    "prediction_accuracy_pct": v.get("prediction_accuracy_pct"),
-                })
-        for bt, info in (factors.get("by_bet_type") or {}).items():
-            rows.append({
-                "layer": "bet_type",
-                "key": bt,
-                "sample_count": info.get("sample_count"),
-                "actual_win_rate_pct": info.get("actual_win_rate_pct"),
-                "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
-                "calibration_factor": info.get("calibration_factor"),
-            })
-        for bt, buckets in (factors.get("by_bet_type_bucket") or {}).items():
-            for bname, info in buckets.items():
-                rows.append({
-                    "layer": "bet_type_x_prob_bucket",
-                    "key": f"{bt}|{bname}",
-                    "sample_count": info.get("sample_count"),
-                    "required_sample_count": info.get("required_sample_count"),
-                    "actual_win_rate_pct": info.get("actual_win_rate_pct"),
-                    "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
-                    "deviation_pct": info.get("deviation_pct"),
-                    "significance_p_value_pct": info.get("significance_p_value_pct"),
-                    "calibration_factor": info.get("calibration_factor"),
-                })
-        for band, info in (factors.get("by_odds_band") or {}).items():
-            if isinstance(info, dict) and "calibration_factor" in info:
-                rows.append({
-                    "layer": "odds_band",
-                    "key": band,
-                    "sample_count": info.get("sample_count") or info.get("n"),
-                    "calibration_factor": info.get("calibration_factor"),
-                    "actual_win_rate_pct": info.get("actual_win_rate_pct"),
-                    "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
-                })
-        for key, info in (factors.get("by_bet_type_odds_band") or {}).items():
-            if isinstance(info, dict):
-                # may be nested bt -> band -> info
-                if "calibration_factor" in info:
-                    rows.append({
-                        "layer": "bet_type_x_odds_band",
-                        "key": str(key),
-                        "sample_count": info.get("sample_count") or info.get("n"),
-                        "calibration_factor": info.get("calibration_factor"),
-                        "actual_win_rate_pct": info.get("actual_win_rate_pct"),
-                        "predicted_avg_prob_pct": info.get("predicted_avg_prob_pct"),
-                    })
+    by_cap = []
+    for cap in ODDS_CAPS:
+        included: List[Tuple[models.Purchase, Optional[float]]] = []
+        excluded_unknown_odds = 0
+        for p in purchases:
+            odds = _effective_odds(p)
+            if odds is None:
+                if cap is None:
+                    included.append((p, odds))
                 else:
-                    for band, sub in info.items():
-                        if isinstance(sub, dict) and "calibration_factor" in sub:
-                            rows.append({
-                                "layer": "bet_type_x_odds_band",
-                                "key": f"{key}|{band}",
-                                "sample_count": sub.get("sample_count") or sub.get("n"),
-                                "calibration_factor": sub.get("calibration_factor"),
-                                "actual_win_rate_pct": sub.get("actual_win_rate_pct"),
-                                "predicted_avg_prob_pct": sub.get("predicted_avg_prob_pct"),
-                            })
-        return rows
+                    excluded_unknown_odds += 1
+                continue
+            if cap is None or odds <= cap:
+                included.append((p, odds))
 
-    stage1_rows = _flatten_buckets(stage1)
-    stage2_rows = _flatten_buckets(stage2)
+        n = len(included)
+        if n == 0:
+            by_cap.append({
+                "odds_cap": cap if cap is not None else "上限なし",
+                "bet_count": 0,
+                "excluded_unknown_odds": excluded_unknown_odds,
+                "note": "該当するベットがありません",
+            })
+            continue
 
-    overall1 = (stage1.get("overall") or {})
-    overall2 = (stage2.get("overall") or {})
+        stake_sum = sum(float(p.stake_amount or 0) for p, _ in included)
+        payout_sum = sum(float(p.payout_amount or 0) for p, _ in included)
+        hits = sum(1 for p, _ in included if p.result == "win")
+        profit_total = payout_sum - stake_sum
+        roi_pct = round(100.0 * payout_sum / stake_sum, 2) if stake_sum > 0 else None
 
-    # 適用シミュレーション: 代表的な (bet_type, raw_prob) で第1段係数を追跡
-    demo_cases = []
-    for bt, raw_p in [
-        ("3連単", 0.01), ("3連単", 0.05), ("ワイド", 0.10),
-        ("2車単", 0.08), ("3連複", 0.03),
-    ]:
-        bucket_name, _ = calc.get_prob_bucket(raw_p)
-        path = []
-        factor = 1.0
-        MIN_CROSS = 30
-        cross_map = stage1.get("by_bet_type_bucket") or {}
-        cross_info = (cross_map.get(bt) or {}).get(bucket_name)
-        info = stage1.get(bucket_name)
-        overall = stage1.get("overall")
-        if cross_info and cross_info.get("sample_count", 0) >= MIN_CROSS and cross_info.get("calibration_factor") is not None:
-            factor = cross_info["calibration_factor"]
-            path.append(f"bet_type_x_bucket:{bt}|{bucket_name} factor={factor}")
-            cross_used = True
-        else:
-            cross_used = False
-            if info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
-                factor = info["calibration_factor"]
-                path.append(f"prob_bucket:{bucket_name} factor={factor}")
-            elif overall and overall.get("calibration_factor") is not None:
-                factor = overall["calibration_factor"]
-                path.append(f"overall factor={factor}")
-            else:
-                path.append("no factor (1.0)")
-        if not cross_used:
-            by_bt = stage1.get("by_bet_type") or {}
-            if bt in by_bt and overall and overall.get("calibration_factor"):
-                bt_f = by_bt[bt]["calibration_factor"]
-                ov_f = overall["calibration_factor"]
-                if ov_f and ov_f > 1e-9:
-                    residual = bt_f / ov_f
-                    residual = 1.0 + 0.5 * (residual - 1.0)
-                    factor *= residual
-                    path.append(f"bet_type_residual:{bt} residual={round(residual,4)}")
-        factor_clamped = max(0.25, min(2.0, factor))
-        if abs(factor_clamped - factor) > 1e-9:
-            path.append(f"clamped->{factor_clamped}")
-        cal_p = max(0.0, min(1.0, raw_p * factor_clamped))
-        demo_cases.append({
-            "bet_type": bt,
-            "raw_prob": raw_p,
-            "prob_bucket": bucket_name,
-            "factor_applied": round(factor_clamped, 4),
-            "calibrated_prob": round(cal_p, 6),
-            "path": path,
+        # レース単位に集約し、時系列順に並べて黒字レース率・最大ドローダウンを出す。
+        race_agg: Dict[int, Dict[str, Any]] = {}
+        for p, _ in included:
+            r = race_agg.setdefault(p.race_id, {"stake": 0.0, "payout": 0.0, "t": p.purchased_at})
+            r["stake"] += float(p.stake_amount or 0)
+            r["payout"] += float(p.payout_amount or 0)
+            if p.purchased_at is not None and (r["t"] is None or p.purchased_at < r["t"]):
+                r["t"] = p.purchased_at
+        race_rows = sorted(race_agg.values(), key=lambda r: (r["t"] is None, r["t"]))
+        race_count = len(race_rows)
+        black_race_count = sum(1 for r in race_rows if r["payout"] >= r["stake"])
+        black_race_rate_pct = round(100.0 * black_race_count / race_count, 2) if race_count else None
+
+        peak = 0.0
+        cum = 0.0
+        max_drawdown = 0.0
+        for r in race_rows:
+            cum += (r["payout"] - r["stake"])
+            if cum > peak:
+                peak = cum
+            dd = peak - cum
+            if dd > max_drawdown:
+                max_drawdown = dd
+
+        # 利益集中度: 的中した買い目1件ごとの純利益を降順に並べ、
+        # 上位1/5/10件が「的中による総利益」に占める割合(要求分析の
+        # 「上位10的中で利益の64.2%」に対応する指標)。
+        hit_profits = sorted(
+            (float(p.payout_amount or 0) - float(p.stake_amount or 0) for p, _ in included if p.result == "win"),
+            reverse=True,
+        )
+        total_hit_profit = sum(hit_profits)
+
+        def top_share(k: int) -> Optional[float]:
+            if not hit_profits or total_hit_profit <= 0:
+                return None
+            return round(100.0 * sum(hit_profits[:k]) / total_hit_profit, 2)
+
+        odds_values = [o for _, o in included if o is not None]
+
+        by_cap.append({
+            "odds_cap": cap if cap is not None else "上限なし",
+            "bet_count": n,
+            "excluded_unknown_odds": excluded_unknown_odds,
+            "hit_count": hits,
+            "hit_rate_pct": round(100.0 * hits / n, 2),
+            "stake_total": round(stake_sum, 0),
+            "payout_total": round(payout_sum, 0),
+            "profit_total": round(profit_total, 0),
+            "roi_pct": roi_pct,
+            "race_count": race_count,
+            "black_race_count": black_race_count,
+            "black_race_rate_pct": black_race_rate_pct,
+            "max_drawdown": round(max_drawdown, 0),
+            "profit_concentration": {
+                "top1_hit_profit_share_pct": top_share(1),
+                "top5_hit_profit_share_pct": top_share(5),
+                "top10_hit_profit_share_pct": top_share(10),
+            },
+            "odds_median": round(_percentile(odds_values, 50), 2) if odds_values else None,
+            "odds_p90": round(_percentile(odds_values, 90), 2) if odds_values else None,
+            "odds_max": round(max(odds_values), 2) if odds_values else None,
         })
 
-    # 条件別補正が「効いている」層: factorが大きく1から離れている & n十分
-    def _notable(rows, min_n=50, min_dev=0.05):
-        out = []
-        for r in rows:
-            f = r.get("calibration_factor")
-            n = r.get("sample_count") or 0
-            if f is None or n < min_n:
-                continue
-            if abs(f - 1.0) >= min_dev:
-                out.append(r)
-        out.sort(key=lambda r: abs((r.get("calibration_factor") or 1) - 1), reverse=True)
-        return out[:20]
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "total_settled_bets": len(purchases),
+        "odds_caps_tested": [c if c is not None else "上限なし" for c in ODDS_CAPS],
+        "by_odds_cap": by_cap,
+        "note": (
+            "実際に確定済みのPurchase(実購入)のみが対象です。見送り(SkippedBet)は"
+            "含みません。仮想的にオッズ上限を適用した場合の再計算であり、この結果を"
+            "根拠に自動で高オッズを除外する変更は行っていません(読み取り専用の"
+            "感度分析)。上限を下げるほど対象ベット数・レース数が減るため、"
+            "件数が極端に少ないキャップの数値は参考程度に留めてください。"
+        ),
+    }
+
+
+@router.get("/gate-expectancy-detail")
+def diagnostics_gate_expectancy_detail(
+    since: Optional[str] = Query("calibration_switch"),
+    min_samples: int = 50,
+    db: Session = Depends(get_db),
+):
+    """
+    券種別実績ゲート(get_bet_type_expectancy_map)が「黒字/赤字」と判定した
+    根拠を、実購入分と見送り分に分けて可視化する(読み取り専用・購入判定は
+    変更しない)。
+
+    2026-09-07: 券種×オッズ帯ゲートに続き、券種ゲートにも見送り(SkippedBet)の
+    実結果を合算する修正を入れたところ、実購入0件で継続赤字だったワイドの
+    ゲートが外れて投票プランに登場する事象が発生した。見送り8,000件超を仮想
+    100円ずつ賭けたと仮定した平均が黒字化しただけなのか、実際に妥当な検出
+    なのかを切り分けるために追加。
+    """
+    since_dt = purchases_router._parse_since_param(since) if since != "all" else None
+    since_dt_eff = since_dt or purchases_router.CALIBRATION_SWITCH_AT
+
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result != "pending")
+        .filter(models.Purchase.purchased_at >= since_dt_eff)
+        .all()
+    )
+    skipped = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.actual_result.isnot(None))
+        .filter(models.SkippedBet.created_at >= since_dt_eff)
+        .all()
+    )
+
+    by_type: Dict[str, Dict[str, Any]] = {}
+
+    def bucket(bt: str) -> Dict[str, Any]:
+        return by_type.setdefault(bt, {
+            "purchased": {"n": 0, "stake": 0.0, "payout": 0.0, "wins": 0},
+            "skipped": {"n": 0, "stake": 0.0, "payout": 0.0, "wins": 0, "win_payouts": []},
+        })
+
+    for p in purchases:
+        b = bucket(p.bet_type)["purchased"]
+        b["n"] += 1
+        b["stake"] += float(p.stake_amount or 0)
+        b["payout"] += float(p.payout_amount or 0)
+        if p.result == "win":
+            b["wins"] += 1
+
+    for s in skipped:
+        b = bucket(s.bet_type)["skipped"]
+        b["n"] += 1
+        b["stake"] += 100.0
+        payout = float(s.actual_payout or 0.0)
+        b["payout"] += payout
+        if s.actual_result == "win":
+            b["wins"] += 1
+            b["win_payouts"].append(payout)
+
+    out = []
+    for bt, v in by_type.items():
+        pu, sk = v["purchased"], v["skipped"]
+        n_total = pu["n"] + sk["n"]
+        stake_total = pu["stake"] + sk["stake"]
+        payout_total = pu["payout"] + sk["payout"]
+        expectancy_pct = (
+            round((payout_total - stake_total) / stake_total * 100, 2) if stake_total > 0 else None
+        )
+        sk_win_payouts_desc = sorted(sk["win_payouts"], reverse=True)
+        sk_expectancy_pct = (
+            round((sk["payout"] - sk["stake"]) / sk["stake"] * 100, 2) if sk["stake"] > 0 else None
+        )
+        pu_expectancy_pct = (
+            round((pu["payout"] - pu["stake"]) / pu["stake"] * 100, 2) if pu["stake"] > 0 else None
+        )
+        out.append({
+            "bet_type": bt,
+            "n_total": n_total,
+            "gate_would_open": (n_total >= min_samples) and (expectancy_pct is not None and expectancy_pct >= 0.0),
+            "expectancy_pct_combined": expectancy_pct,
+            "purchased": {
+                "n": pu["n"],
+                "win_count": pu["wins"],
+                "stake_total": round(pu["stake"], 0),
+                "payout_total": round(pu["payout"], 0),
+                "expectancy_pct": pu_expectancy_pct,
+            },
+            "skipped": {
+                "n": sk["n"],
+                "win_count": sk["wins"],
+                "stake_total(仮想100円換算)": round(sk["stake"], 0),
+                "payout_total": round(sk["payout"], 0),
+                "expectancy_pct": sk_expectancy_pct,
+                # 見送り側の黒字が、少数の的中payoutに偏っていないかを見る指標。
+                "top1_win_payout": round(sk_win_payouts_desc[0], 0) if sk_win_payouts_desc else None,
+                "top1_win_payout_share_of_skip_payout_pct": (
+                    round(100.0 * sk_win_payouts_desc[0] / sk["payout"], 2)
+                    if sk_win_payouts_desc and sk["payout"] > 0 else None
+                ),
+                "top5_win_payout_share_of_skip_payout_pct": (
+                    round(100.0 * sum(sk_win_payouts_desc[:5]) / sk["payout"], 2)
+                    if sk_win_payouts_desc and sk["payout"] > 0 else None
+                ),
+            },
+        })
+
+    out.sort(key=lambda r: (r["expectancy_pct_combined"] is None, -(r["expectancy_pct_combined"] or -1e9)))
 
     return {
-        "stage1_retroactive": {
-            "overall": overall1,
-            "rows": stage1_rows,
-            "note": stage1.get("note") or "全確定レース×全オッズ組合せの遡及校正(本番第1段)",
-        },
-        "stage2_purchase_set": {
-            "overall": overall2,
-            "rows": stage2_rows,
-            "note": stage2.get("note") or "実購入集合の残差校正(本番第2段・勝者の呪い)",
-        },
-        "application_order": [
-            "第1段: 券種×勝率帯(n>=30) → 勝率帯(n>=80) → overall",
-            "第1段追加: 券種残差(overall比を半減して乗算) ※交差係数使用時はスキップ",
-            "第1段: factorを[0.25,2.0]にクランプ",
-            "第2段: 購入集合の券種×オッズ帯など残差係数を追加適用",
-        ],
-        "demo_application_path": demo_cases,
-        "notable_stage1_factors": _notable(stage1_rows),
-        "notable_stage2_factors": _notable(stage2_rows, min_n=30, min_dev=0.05),
-        "interpretation_notes": [
-            "overall係数が0.85前後なら、全体として予測確率を約15%割引している。",
-            "係数は actual/predicted をshrinkageした値。小サンプルでは1.0に寄る。",
-            "第2段は『買ったものだけ』の残る楽観を抑える。見送り側のギャップとは別物。",
-            "本APIは係数の中身の可視化のみ。係数や閾値は変更しない。",
-        ],
+        "since": since,
+        "since_resolved": since_dt_eff.isoformat(),
+        "min_samples": min_samples,
+        "by_bet_type": out,
+        "note": (
+            "expectancy_pct_combined が get_bet_type_expectancy_map の判定と同じ値。"
+            "purchased.expectancy_pct は実購入分だけの実績(サンプルが少ない券種は"
+            "参考程度)。skipped.expectancy_pct は見送りを仮想100円で賭けたと仮定した"
+            "場合の実績。top1/top5_win_payout_share_pct が高いほど、少数の大穴的中が"
+            "その券種の『黒字』を作っている度合いが強く、結果の頑健性が低いことを示す。"
+        ),
     }
 
 
@@ -2246,9 +1981,6 @@ def diagnostics_summary(
         "race_plan_design": diagnostics_race_plan_design(),
         "race_plan_rank_compare": diagnostics_race_plan_rank_compare(since=since, db=db),
         "winning_capture": diagnostics_winning_capture(since=since, db=db),
-        "odds_cap_sensitivity": diagnostics_odds_cap_sensitivity(since=since, db=db),
-        "decision_pipeline": diagnostics_decision_pipeline(since=since, db=db),
-        "calibration_structure": diagnostics_calibration_structure(db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"
