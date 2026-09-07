@@ -3457,10 +3457,14 @@ def car_pick_accuracy(since: Optional[str] = "calibration_switch", db: Session =
     avg_predicted_pct = sum(it["predicted_win_prob_pct"] for it in items) / n
     p_value = calc.binomial_lower_tail_p(win_count, n, avg_predicted_pct / 100)
 
+    # 2026-09-07修正(ChatGPT分析項目4対応): calibration_significanceと同じ理由で、
+    # 実績が予想以上の場合を「偶然のブレの範囲内」と一括りにせず明示する。
     if p_value < 0.05:
-        judgement = "予想が実態より高すぎる可能性が高い(偶然では説明しにくい)"
+        judgement = "予想が実態より高すぎる可能性が高い(偶然では説明しにくい・過大評価の疑い)"
     elif p_value < 0.20:
-        judgement = "やや予想が高めだが、まだ偶然の範囲とも言える"
+        judgement = "やや予想が高め(過大評価気味)だが、まだ偶然の範囲とも言える"
+    elif win_count / n * 100 >= avg_predicted_pct:
+        judgement = "実績的中率が予想平均以上(過大評価の証拠なし。ただしこの検定は実績が予想を上回りすぎていないかは判定しない片側検定)"
     else:
         judgement = "現時点のサンプル数では、偶然のブレの範囲内"
 
@@ -3472,6 +3476,7 @@ def car_pick_accuracy(since: Optional[str] = "calibration_switch", db: Session =
         "top3_rate_pct": round(top3_count / n * 100, 1),
         "avg_predicted_win_prob_pct": round(avg_predicted_pct, 2),
         "significance_p_value_pct": round(p_value * 100, 4),
+        "test_direction": "one_sided_lower(実績が予想より低すぎないかだけを検定する片側検定)",
         "judgement": judgement,
         "items": sorted(items, key=lambda x: -x["race_id"]),
     }
@@ -4075,15 +4080,28 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         n_races = len(race_level_results)
         profit_races = sum(race_level_results)
 
+        # 2026-09-07修正(ChatGPT分析項目4対応): この検定は「実績が予想より
+        # 低すぎないか」だけを見る片側検定のため、実績が予想と同等かそれ以上
+        # だと数式上p値は自動的に100%近くになる(過大評価の証拠が無い、という
+        # 意味であり、「大成功」を示す値ではない)。この性質を判定文言で
+        # 明示しないと、p値100%が何を意味するのか誤解される
+        # (例: 3連単×勝率0-5%、勝率5-15%帯など、実績的中率が予想平均を
+        # 上回っていた条件でp値100%表示が出ていたのは、計算バグではなく
+        # この片側検定の仕様通りの挙動だったことを確認済み)。
+        deviation_pct_bp = round((wins_with_prob / n_with_prob - avg_predicted_prob) * 100, 3) if n_with_prob else 0.0
         if p_value < 0.05:
-            judgement = "予想が実態より高すぎる可能性が高い(偶然では説明しにくい)"
+            judgement = "予想が実態より高すぎる可能性が高い(偶然では説明しにくい・過大評価の疑い)"
         elif p_value < 0.20:
-            judgement = "やや予想が高めだが、まだ偶然の範囲とも言える"
+            judgement = "やや予想が高め(過大評価気味)だが、まだ偶然の範囲とも言える"
+        elif deviation_pct_bp > 0:
+            judgement = "実績的中率が予想平均以上(過大評価の証拠なし。ただしこの検定は実績が予想を上回りすぎていないかは判定しない片側検定)"
         else:
             judgement = "現時点のサンプル数では、偶然のブレの範囲内"
         calibration_significance = {
             "p_value_pct": round(p_value * 100, 4),
             "judgement": judgement,
+            "test_direction": "one_sided_lower(実績が予想より低すぎないかだけを検定する片側検定)",
+            "deviation_pct": deviation_pct_bp,
             "n_used": n_with_prob,
             "wins_used": wins_with_prob,
             "predicted_prob_used_pct": round(avg_predicted_prob * 100, 4),
