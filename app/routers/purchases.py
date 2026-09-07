@@ -1875,11 +1875,44 @@ def calibration_factors_compare(db: Session = Depends(get_db)):
         if cell_compare:
             by_bet_type_bucket_compare[bt] = cell_compare
 
+    # 2026-09-07追加(ChatGPT分析項目3対応): 「全体一律の補正係数だけでは、
+    # 券種・勝率帯ごとの予測誤差の違いを吸収できないのでは」という懸念を判断
+    # するための材料。券種単体の係数(by_bet_type)と、その券種×勝率帯の係数
+    # (by_bet_type_bucket)がどれだけ乖離しているかを機械的に検出するだけで、
+    # 条件別補正を自動導入するものではない(既存の補正処理・投票ロジックは
+    # 一切変更していない)。
+    condition_specific_correction_candidates = []
+    CANDIDATE_FACTOR_GAP_THRESHOLD = 0.15
+    for bt, cells in retro_cross.items():
+        bt_factor = ((retroactive.get("by_bet_type") or {}).get(bt) or {}).get("calibration_factor")
+        if bt_factor is None:
+            continue
+        for band_name, cell in cells.items():
+            cell_factor = cell.get("calibration_factor")
+            if cell_factor is None:
+                continue
+            gap = abs(cell_factor - bt_factor)
+            if gap >= CANDIDATE_FACTOR_GAP_THRESHOLD:
+                condition_specific_correction_candidates.append({
+                    "bet_type": bt,
+                    "prob_band": band_name,
+                    "bet_type_level_factor": bt_factor,
+                    "bet_type_x_band_factor": cell_factor,
+                    "gap": round(gap, 3),
+                    "sample_count": cell.get("sample_count"),
+                    "is_reliable": cell.get("is_reliable"),
+                    "significance_p_value_pct": cell.get("significance_p_value_pct"),
+                })
+    condition_specific_correction_candidates.sort(
+        key=lambda r: (not r["is_reliable"], -r["gap"])
+    )
+
     return {
         "overall": overall_compare,
         "by_bucket": by_bucket_compare,
         "by_bet_type": by_bet_type_compare,
         "by_bet_type_bucket": by_bet_type_bucket_compare,
+        "condition_specific_correction_candidates": condition_specific_correction_candidates,
         "message": (
             "currentは今まで実際の投票判断に使われてきた係数(Purchase/SkippedBet"
             "の記録ベース、偏りの可能性あり)。retroactiveはオッズが存在する組み合わせを"
@@ -1887,6 +1920,10 @@ def calibration_factors_compare(db: Session = Depends(get_db)):
             "calibration_factorが大きくずれている場合、現行の係数は偏ったサンプルで"
             "学習されていた可能性が高い。この比較を見て問題なければ、"
             "ev.pyが呼び出す関数をget_calibration_factors_retroactiveに切り替える。"
+            "condition_specific_correction_candidatesは、券種単体の補正係数と"
+            "券種×勝率帯の補正係数が0.15以上ずれている組み合わせの一覧(is_reliable=True"
+            "かつgapが大きいものほど、条件別補正を検討する根拠が強い)。ここに載って"
+            "いるからといって自動で条件別補正を導入するわけではなく、判断材料として提示する。"
         ),
     }
 
