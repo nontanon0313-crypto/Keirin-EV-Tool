@@ -460,10 +460,11 @@ def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool
     2026-09-07修正(のんの指摘により変更):
       1. 現行の投票基準(CALIBRATION_SWITCH_AT)より前のPurchaseを除外するようにした。
          以前は全期間を対象にしており、旧ロジック時代の実績がいつまでもゲートに残っていた。
-      2. 実購入(Purchase)だけでなく見送り(SkippedBet、結果判明分)も、仮想投資額100円・
-         実際の払戻(actual_payout)込みで合算するようにした。以前は実購入がゼロの
-         ステージは、見送りデータ(予想)がいくら蓄積されてもサンプル数が増えず、
-         ゲートが解除される機会が永遠に来ない構造になっていた。
+      2. (撤回) 実購入に見送り(SkippedBet)を仮想投資額100円で合算する変更を
+         一度入れたが、見送りには「確率が低すぎて評価しただけの候補」が大量に
+         含まれ、これを全部買った前提の平均を取ると実態と乖離した数値になる
+         (3連単が実際は黒字なのに、見送り合算後は大赤字と判定される事故が発生)。
+         実購入だけを対象にする方式に戻した。
     """
     now = _time.time()
     if use_cache:
@@ -490,24 +491,6 @@ def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool
         if p.result == "win":
             b["wins"] += 1
 
-    skipped_rows = (
-        db.query(models.SkippedBet, models.Race.race_stage)
-        .join(models.Race, models.Race.id == models.SkippedBet.race_id)
-        .filter(models.SkippedBet.actual_result.isnot(None))
-        .filter(models.SkippedBet.created_at >= CALIBRATION_SWITCH_AT)
-        .filter(models.Race.race_stage.isnot(None))
-        .all()
-    )
-    for s, stage in skipped_rows:
-        if not stage:
-            continue
-        b = buckets.setdefault(stage, {"stake": 0.0, "payout": 0.0, "n": 0, "wins": 0})
-        b["stake"] += 100.0
-        b["payout"] += s.actual_payout or 0.0
-        b["n"] += 1
-        if s.actual_result == "win":
-            b["wins"] += 1
-
     out = {}
     for stage, b in buckets.items():
         if b["n"] < min_samples or b["stake"] <= 0:
@@ -527,9 +510,10 @@ def get_bet_type_expectancy_map(db: Session, min_samples: int = 50, use_cache: b
     """
     券種ごとの実績収支率。get_stage_expectancy_mapと同じ理由でキャッシュを追加。
 
-    2026-09-07修正: get_stage_expectancy_mapと同じ理由で、
+    2026-09-07修正: get_stage_expectancy_mapと同じ理由で
       1. CALIBRATION_SWITCH_AT以降のPurchaseだけを対象にする。
-      2. 見送り(SkippedBet、結果判明分)も仮想投資額100円・実際の払戻込みで合算する。
+      2. (撤回) 見送り合算は事故のため撤回。get_stage_expectancy_mapの
+         コメント参照。実購入だけを対象にする。
     """
     now = _time.time()
     if use_cache:
@@ -550,20 +534,6 @@ def get_bet_type_expectancy_map(db: Session, min_samples: int = 50, use_cache: b
         b["payout"] += p.payout_amount or 0
         b["n"] += 1
         if p.result == "win":
-            b["wins"] += 1
-
-    skipped = (
-        db.query(models.SkippedBet)
-        .filter(models.SkippedBet.actual_result.isnot(None))
-        .filter(models.SkippedBet.created_at >= CALIBRATION_SWITCH_AT)
-        .all()
-    )
-    for s in skipped:
-        b = buckets.setdefault(s.bet_type, {"stake": 0.0, "payout": 0.0, "n": 0, "wins": 0})
-        b["stake"] += 100.0
-        b["payout"] += s.actual_payout or 0.0
-        b["n"] += 1
-        if s.actual_result == "win":
             b["wins"] += 1
 
     out = {}
@@ -618,10 +588,8 @@ def get_bet_type_odds_band_expectancy_map(
 
     2026-09-07修正: get_stage_expectancy_map/get_bet_type_expectancy_mapと同じ理由で
     CALIBRATION_SWITCH_AT以降のPurchaseだけを対象にする。
-    見送り(SkippedBet)も合算する。見送りは評価時点のオッズを保存していないため、
-    的中時はactual_payout(100×オッズ)から逆算し、外れ時はOddsテーブルの記録値
-    (最終スクレイプ時点の値、ほぼ最終オッズ相当)で代用する
-    (2026-09-07: 当初はオッズ不明で断念していたが、Oddsテーブルとの結合で対応)。
+    (撤回) 見送り合算も一度実装したが、get_stage_expectancy_mapと同じ理由
+    (評価しただけの低確率候補が母数を歪める事故)で撤回し、実購入のみに戻した。
     """
     now = _time.time()
     if use_cache:
@@ -665,37 +633,6 @@ def get_bet_type_odds_band_expectancy_map(
         b["n"] += 1
         if p.result == "win":
             b["wins"] += 1
-
-    skipped = (
-        db.query(models.SkippedBet)
-        .filter(models.SkippedBet.actual_result.isnot(None))
-        .filter(models.SkippedBet.created_at >= CALIBRATION_SWITCH_AT)
-        .all()
-    )
-    if skipped:
-        skip_race_ids = {s.race_id for s in skipped}
-        odds_lookup = {}
-        for o in db.query(models.Odds).filter(models.Odds.race_id.in_(skip_race_ids)).all():
-            odds_lookup[(o.race_id, o.bet_type, o.combination)] = o.odds_value
-        for s in skipped:
-            # 的中時はactual_payout(100×オッズ)から逆算した方が正確。
-            # 外れ時はactual_payoutが0でオッズが分からないため、Oddsテーブルの
-            # 記録値(最終スクレイプ時点=ほぼ最終オッズ相当)で代用する。
-            if s.actual_result == "win" and s.actual_payout:
-                odds = s.actual_payout / 100.0
-            else:
-                odds = odds_lookup.get((s.race_id, s.bet_type, s.combination))
-            band = odds_band_label(odds)
-            if band == "不明":
-                continue
-            key = f"{s.bet_type}|{band}"
-            b = buckets.setdefault(key, {"stake": 0.0, "payout": 0.0, "n": 0, "wins": 0,
-                                           "bet_type": s.bet_type, "odds_band": band})
-            b["stake"] += 100.0
-            b["payout"] += s.actual_payout or 0.0
-            b["n"] += 1
-            if s.actual_result == "win":
-                b["wins"] += 1
 
     out = {}
     for key, b in buckets.items():
