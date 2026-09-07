@@ -677,6 +677,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
       bulkBtn.style.background = "#f59e0b";
       bulkBtn.addEventListener("click", recordRacePlanAsPurchases);
       resultBox.appendChild(bulkBtn);
+      appendRevenuePlanButton();
     }
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
@@ -751,6 +752,432 @@ async function recordRacePlanAsPurchases() {
   } catch (e) {
     alert("記録に失敗しました: " + e.message);
   }
+}
+
+
+// ---------- 📈 収益(実資金) ----------
+let revenueRowsCache = [];
+
+function yen(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
+  return `${Number(v).toLocaleString()}円`;
+}
+
+function pct(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return "-";
+  return `${Number(v).toFixed(2)}%`;
+}
+
+async function loadRevenueSettings() {
+  const input = document.getElementById("revenueStartAssetsInput");
+  if (!input) return;
+  try {
+    const res = await fetch(apiUrl("/revenue/settings"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    input.value = data.starting_assets ?? "";
+  } catch (e) {
+    input.value = "";
+  }
+}
+
+async function saveRevenueStartAssets() {
+  const input = document.getElementById("revenueStartAssetsInput");
+  const value = parseFloat(input.value);
+  if (!Number.isFinite(value) || value < 0) {
+    alert("開始資産を正しく入力してください。");
+    return;
+  }
+
+  try {
+    const res = await fetch(apiUrl("/revenue/settings"), {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({starting_assets: value}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    await loadRevenue();
+  } catch (e) {
+    alert("開始資産の保存に失敗しました: " + e.message);
+  }
+}
+
+function renderRevenueStats(data) {
+  const box = document.getElementById("revenueStatsBox");
+  if (!box) return;
+
+  const planned = data.planned || {};
+  const actual = data.actual || {};
+  const diff = data.diff || {};
+
+  box.innerHTML =
+    `<p><strong>実績収支</strong></p>` +
+    `<p>実投資額: ${yen(actual.stake)} / 払戻: ${yen(actual.payout)} / ` +
+    `実績損益: <strong>${yen(actual.pnl)}</strong></p>` +
+    `<p>実績回収率: <strong>${pct(actual.roi_pct)}</strong> / ` +
+    `的中率: ${pct(actual.hit_rate_pct)} ` +
+    `(${actual.hit_count ?? 0}的中 / ${actual.voted_count ?? 0}投票済み)</p>` +
+    `<p class="note">未確定: ${actual.pending_count ?? 0}件 / ` +
+    `未投票: ${actual.not_voted_count ?? 0}件</p>` +
+    `<hr>` +
+    `<p><strong>想定</strong></p>` +
+    `<p>想定投資額: ${yen(planned.stake)} / ` +
+    `想定利益: ${yen(planned.expected_profit)} / ` +
+    `想定回収率: ${pct(planned.roi_pct)}</p>` +
+    `<p>想定的中率: ${pct(planned.hit_rate_pct)}</p>` +
+    `<p class="note">実績−想定: 投資額 ${yen(diff.stake)} / ` +
+    `損益 ${yen(diff.pnl)} / 的中率 ${pct(diff.hit_rate_pct)} / ` +
+    `回収率 ${pct(diff.roi_pct)}</p>`;
+}
+
+async function loadRevenueStats() {
+  const box = document.getElementById("revenueStatsBox");
+  if (!box) return;
+
+  box.textContent = "集計中...";
+  try {
+    const res = await fetch(apiUrl("/revenue/stats"), {cache: "no-store"});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    renderRevenueStats(data);
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+}
+
+async function loadRevenueCompare() {
+  const box = document.getElementById("revenueCompareBox");
+  if (!box) return;
+
+  try {
+    const res = await fetch(apiUrl("/revenue/stats"), {cache: "no-store"});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+
+    const p = data.planned || {};
+    const a = data.actual || {};
+    box.innerHTML =
+      `<p>想定損益: ${yen(p.expected_profit)} / 実績損益: ${yen(a.pnl)}</p>` +
+      `<p>想定回収率: ${pct(p.roi_pct)} / 実績回収率: ${pct(a.roi_pct)}</p>` +
+      `<p>想定的中率: ${pct(p.hit_rate_pct)} / 実績的中率: ${pct(a.hit_rate_pct)}</p>`;
+  } catch (e) {
+    box.textContent = "エラー: " + e.message;
+  }
+}
+
+function drawRevenueEquity(data) {
+  const canvas = document.getElementById("revenueEquityCanvas");
+  const summary = document.getElementById("revenueEquitySummary");
+  if (!canvas) return;
+
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const actual = data.actual || [];
+  const planned = data.planned || [];
+
+  if (actual.length <= 1 && planned.length <= 1) {
+    if (summary) summary.textContent = "資産推移データはまだありません。";
+    return;
+  }
+
+  const all = actual.concat(planned);
+  const maxX = Math.max(...all.map(p => Number(p.cum_stake || 0)), 1);
+  const vals = all.map(p => Number(p.cum_pnl || 0));
+  const minY = Math.min(0, ...vals);
+  const maxY = Math.max(0, ...vals);
+  const rangeY = Math.max(maxY - minY, 1);
+
+  const pad = 30;
+  const x = v => pad + (Number(v || 0) / maxX) * (w - pad * 2);
+  const y = v => h - pad - ((Number(v || 0) - minY) / rangeY) * (h - pad * 2);
+
+  ctx.beginPath();
+  ctx.moveTo(pad, y(0));
+  ctx.lineTo(w - pad, y(0));
+  ctx.stroke();
+
+  function drawLine(points) {
+    if (points.length < 2) return;
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const px = x(p.cum_stake);
+      const py = y(p.cum_pnl);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+  }
+
+  drawLine(planned);
+  drawLine(actual);
+
+  if (summary) {
+    summary.textContent =
+      `開始資産: ${yen(data.starting_assets)} / ` +
+      `累積実績損益: ${yen(data.final_actual_pnl)} / ` +
+      `現在資産: ${yen(data.final_assets)}`;
+  }
+}
+
+async function loadRevenueEquity() {
+  try {
+    const res = await fetch(apiUrl("/revenue/equity-curve"), {cache: "no-store"});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    drawRevenueEquity(data);
+  } catch (e) {
+    const box = document.getElementById("revenueEquitySummary");
+    if (box) box.textContent = "エラー: " + e.message;
+  }
+}
+
+function renderRevenueList(data) {
+  const box = document.getElementById("revenueListBox");
+  if (!box) return;
+
+  revenueRowsCache = data.items || [];
+
+  if (!revenueRowsCache.length) {
+    box.textContent = "収益記録はありません。";
+    return;
+  }
+
+  let html = "";
+  for (const r of revenueRowsCache) {
+    const pending = r.actual_result === "pending";
+    html += `
+      <div style="border-bottom:1px solid #334155;padding:10px 0;">
+        <p>
+          <strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong>
+          ${r.bet_type} ${r.combination}<br>
+          投資予定: ${yen(r.planned_stake)} /
+          実投資: ${yen(r.actual_stake)} /
+          結果: ${r.actual_result || "-"} /
+          払戻: ${yen(r.actual_payout)}
+        </p>
+        ${
+          pending && r.vote_status === "voted"
+          ? `<button type="button" class="revenueWinBtn"
+               data-id="${r.id}" style="background:#22c55e;width:auto;">
+               的中(払戻入力)
+             </button>`
+          : ""
+        }
+        <button type="button" class="revenueDeleteBtn"
+          data-id="${r.id}" style="background:#64748b;width:auto;">
+          削除
+        </button>
+      </div>`;
+  }
+
+  box.innerHTML = html;
+
+  box.querySelectorAll(".revenueWinBtn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const payout = parseFloat(prompt("払戻金額を入力してください", "0"));
+      if (!Number.isFinite(payout) || payout < 0) return;
+
+      try {
+        const res = await fetch(apiUrl(`/revenue/${id}/win`), {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({actual_payout: payout}),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        await loadRevenue();
+      } catch (e) {
+        alert("的中登録に失敗しました: " + e.message);
+      }
+    });
+  });
+
+  box.querySelectorAll(".revenueDeleteBtn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("この収益記録を削除しますか？")) return;
+      try {
+        const res = await fetch(apiUrl(`/revenue/${btn.dataset.id}`), {
+          method: "DELETE",
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        await loadRevenue();
+      } catch (e) {
+        alert("削除に失敗しました: " + e.message);
+      }
+    });
+  });
+}
+
+async function loadRevenueList() {
+  try {
+    const res = await fetch(apiUrl("/revenue/list?limit=1000"), {cache: "no-store"});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    renderRevenueList(data);
+  } catch (e) {
+    const box = document.getElementById("revenueListBox");
+    if (box) box.textContent = "エラー: " + e.message;
+  }
+}
+
+async function markRevenuePendingLose() {
+  try {
+    const res = await fetch(apiUrl("/revenue/mark-pending-lose"), {
+      method: "POST",
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    await loadRevenue();
+  } catch (e) {
+    alert("未確定→外れ処理に失敗しました: " + e.message);
+  }
+}
+
+async function addManualRevenue() {
+  const raceId = parseInt(document.getElementById("revManualRaceId").value) || null;
+  const venue = document.getElementById("revManualVenue").value.trim() || null;
+  const raceNoValue = document.getElementById("revManualRaceNo").value;
+  const raceNo = raceNoValue ? parseInt(raceNoValue) : null;
+  const betType = document.getElementById("revManualBetType").value.trim();
+  const combo = document.getElementById("revManualCombo").value.trim();
+  const stake = parseFloat(document.getElementById("revManualStake").value);
+  const memo = document.getElementById("revManualMemo").value.trim() || null;
+
+  if (!betType || !combo || !Number.isFinite(stake) || stake <= 0) {
+    alert("券種・買い目・実投資額を入力してください。");
+    return;
+  }
+
+  try {
+    const res = await fetch(apiUrl("/revenue/manual"), {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        race_id: raceId,
+        venue_name: venue,
+        race_number: raceNo,
+        bet_type: betType,
+        combination: combo,
+        actual_stake: stake,
+        actual_result: "pending",
+        actual_payout: 0,
+        vote_status: "voted",
+        memo,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+    document.getElementById("revManualResult").textContent = `記録しました(ID:${data.id})`;
+    await loadRevenue();
+  } catch (e) {
+    document.getElementById("revManualResult").textContent = "エラー: " + e.message;
+  }
+}
+
+async function registerLastPlanToRevenue() {
+  if (!lastRacePlan || !lastRacePlan.items || !lastRacePlan.items.length) {
+    alert("先に自動投票プランを作成してください。");
+    return;
+  }
+
+  if (!confirm(
+    `${lastRacePlan.items.length}点を収益タブへ記録します。\n` +
+    `実際に投票した金額がプランと同じ場合に使用してください。`
+  )) return;
+
+  const items = lastRacePlan.items
+    .filter(it => it.stake && it.stake > 0)
+    .map(it => ({
+      bet_type: it.bet_type,
+      combination: it.combination,
+      planned_stake: it.stake,
+      planned_win_prob: it.win_prob != null
+        ? it.win_prob
+        : Number(it.estimated_win_prob_pct || 0) / 100,
+      planned_odds: it.odds_value,
+      planned_ev_pct: it.ev_pct,
+      planned_expected_profit:
+        it.stake * (
+          (it.win_prob != null
+            ? it.win_prob
+            : Number(it.estimated_win_prob_pct || 0) / 100) *
+          Number(it.odds_value || 0) - 1
+        ),
+    }));
+
+  try {
+    const res = await fetch(apiUrl("/revenue/from-plan"), {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        race_id: lastRacePlan.raceId,
+        mark_as_voted: true,
+        items,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+
+    alert(`${data.created_count}件を収益タブへ記録しました。`);
+    await loadRevenue();
+  } catch (e) {
+    alert("収益記録に失敗しました: " + e.message);
+  }
+}
+
+async function loadRevenue() {
+  await Promise.all([
+    loadRevenueSettings(),
+    loadRevenueStats(),
+    loadRevenueCompare(),
+    loadRevenueEquity(),
+    loadRevenueList(),
+  ]);
+}
+
+document.getElementById("revenueSaveStartBtn")?.addEventListener(
+  "click", saveRevenueStartAssets
+);
+document.getElementById("revenueRefreshBtn")?.addEventListener(
+  "click", loadRevenue
+);
+document.getElementById("revenueMarkLoseBtn")?.addEventListener(
+  "click", markRevenuePendingLose
+);
+document.getElementById("revManualAddBtn")?.addEventListener(
+  "click", addManualRevenue
+);
+
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (btn.dataset.tab === "tab-revenue") {
+      loadRevenue();
+    }
+  });
+});
+
+// race-plan作成後に「収益タブへ記録」ボタンを追加
+// lastRacePlanを使うため、race-plan表示処理の後ろからボタンを追加する。
+// 既存の購入記録ボタンを壊さず、収益記録を別処理として追加する。
+function appendRevenuePlanButton() {
+  const resultBox = document.getElementById("evResult");
+  if (!resultBox || !lastRacePlan || !lastRacePlan.items.length) return;
+
+  if (resultBox.querySelector(".recordRevenuePlanBtn")) return;
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "recordRevenuePlanBtn";
+  btn.textContent = "このプランを収益タブへ記録";
+  btn.style.background = "#22c55e";
+  btn.addEventListener("click", registerLastPlanToRevenue);
+  resultBox.appendChild(btn);
 }
 
 // ---------- ③ 購入記録 ----------
@@ -1402,25 +1829,6 @@ document.getElementById("saveRaceCapBtn").addEventListener("click", async () => 
     alert("保存に失敗しました: " + e.message);
   }
 });
-
-// 「投票」タブに現在の1レース上限%を表示する(のんの指摘=画面と日次パイプラインの
-// 上限がズレていた問題への対応の一環。今どの値が使われるか常に見えるようにする)
-async function refreshRaceCapDisplay() {
-  const el = document.getElementById("raceCapDisplay");
-  if (!el) return;
-  try {
-    const res = await fetch(apiUrl("/bankroll/"));
-    const data = await res.json();
-    if (data.race_cap_pct != null) {
-      el.textContent = `1レース上限%: ${(data.race_cap_pct * 100).toFixed(1)}%(資金管理シミュレーションタブで設定・保存)`;
-    } else {
-      el.textContent = `1レース上限%: 未設定(資金管理シミュレーションタブで設定してください)`;
-    }
-  } catch (e) {
-    el.textContent = `1レース上限%: 取得失敗`;
-  }
-}
-refreshRaceCapDisplay();
 
 
 // ---------- ⑤ 実績検証 ----------

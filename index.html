@@ -25,17 +25,7 @@
 
 <div id="tab-vote" class="tab-content active">
 
-  <section class="card">
-    <h2>① スクショ解析</h2>
-    <p class="note">出走表・直近成績・勝率・オッズ(全 券種)のスクショをまとめて選択してください。複数レース 分をまとめてもOKです。アップロードが完了すると、対象レースが自動で選択され②の詳細も自動表示されます(AI予想は自動実行されないので、下の「AI予想を実行」ボタンを押してください)。</p>
-    <input type="file" id="screenshotInput" multiple accept="image/*">
-    <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
-      <input type="checkbox" id="isFinalOddsCheckbox" style="width:auto;margin:0;">
-      これは投票締切後の最終オッズのスクショです(該当 レースの購入履歴にfinal_oddsを自動反映)
-    </label>
-    <button id="uploadBtn">解析してDBに反映</button>
-    <div id="uploadResult" class="result-box"></div>
-  </section>
+  
 
   <section class="card">
     <h2>② レース選択・期待値計算</h2>
@@ -73,8 +63,6 @@
       <input type="checkbox" id="applyPerformanceGatesCheckbox" checked style="width:auto;margin:0;">
       実績ゲートを使う(不調ステージの見送りのみ。券種 の除外やマルチ制限はしません)。検証集計には影響しませ ん
     </label>
-
-    <p class="note" id="raceCapDisplay">1レース上限%: 読み込み中...(資金管理シミュレーションタブで設定)</p>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <p class="note">AI予想がまだなら自動で実行してからプランを作成します(数十秒かかる場合があります)。</p>
     <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>
@@ -101,7 +89,21 @@
     <div id="pendingList" class="result-box"></div>
   </section>
 
+
+
+<section class="card">
+    <h2>① スクショ解析</h2>
+    <p class="note">出走表・直近成績・勝率・オッズ(全 券種)のスクショをまとめて選択してください。複数レース 分をまとめてもOKです。アップロードが完了すると、対象レースが自動で選択され②の詳細も自動表示されます(AI予想は自動実行されないので、下の「AI予想を実行」ボタンを押してください)。</p>
+    <input type="file" id="screenshotInput" multiple accept="image/*">
+    <label style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+      <input type="checkbox" id="isFinalOddsCheckbox" style="width:auto;margin:0;">
+      これは投票締切後の最終オッズのスクショです(該当 レースの購入履歴にfinal_oddsを自動反映)
+    </label>
+    <button id="uploadBtn">解析してDBに反映</button>
+    <div id="uploadResult" class="result-box"></div>
+  </section>
 </div>
+
 
 <div id="tab-bankroll" class="tab-content">
   <section class="card">
