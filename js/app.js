@@ -1994,10 +1994,74 @@ document.getElementById("loadPipelineBtn").addEventListener("click", async () =>
     }
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    let html = `<p><strong>本命→買い目→購入の経路</strong>(読み取り専用)</p>`;
+
+    const pct = (v) => (v == null || v === undefined) ? "-" : `${Number(v).toFixed(2)}%`;
+    const num = (v, d = 3) => (v == null || v === undefined) ? "-" : Number(v).toFixed(d);
+    const ratioLabel = (r) => {
+      if (r == null) return "-";
+      const x = Number(r);
+      if (x < 0.7) return `${x.toFixed(3)}（予測が楽観的）`;
+      if (x > 1.3) return `${x.toFixed(3)}（予測が悲観的）`;
+      return `${x.toFixed(3)}（概ね一致）`;
+    };
+
+    let html = `<p><strong>本命→買い目→購入の経路</strong>（読み取り専用）</p>`;
     html += `<p class="note">期間: ${data.since_resolved || data.since || "-"}</p>`;
-    html += `<pre style="white-space:pre-wrap;font-size:12px;">${JSON.stringify(data, null, 2).slice(0, 8000)}</pre>`;
-    if ((JSON.stringify(data).length) > 8000) html += `<p class="note">長いため一部のみ表示。全文はAPIを直接確認。</p>`;
+    html += `<p class="note">本命＝そのレースでAI勝率が最も高い車番。1着位置に本命が入っている買い目と、そうでない買い目を分けて、予測と実績のズレを見る。</p>`;
+    html += `<p class="note">実績/予測の比が1未満＝予測が楽観的、1超＝悲観的。両区分で同じくらいなら「本命の展開だけが悪い」とは言いにくい。</p>`;
+
+    const by = data.by_bet_type || {};
+    if (!Object.keys(by).length) {
+      html += `<p class="note">対象データがありません</p>`;
+    } else {
+      html += `<table>
+        <tr>
+          <th>券種</th>
+          <th>区分</th>
+          <th>件数</th>
+          <th>的中</th>
+          <th>予想的中率</th>
+          <th>実績的中率</th>
+          <th>実績÷予想</th>
+          <th>ROI</th>
+          <th>本命不明除外</th>
+        </tr>`;
+      for (const [bt, block] of Object.entries(by)) {
+        const fav = block["本命車番が1着位置の買い目"] || {};
+        const oth = block["本命以外が1着位置の買い目"] || {};
+        const unknown = block["本命車番不明で除外した件数"] ?? "-";
+        html += `<tr>
+          <td rowspan="2"><strong>${bt}</strong></td>
+          <td>本命が1着位置</td>
+          <td>${fav.n ?? "-"}</td>
+          <td>${fav.win_count ?? "-"}</td>
+          <td>${pct(fav.predicted_win_rate_pct)}</td>
+          <td>${pct(fav.actual_win_rate_pct)}</td>
+          <td>${ratioLabel(fav.ratio_actual_over_predicted)}</td>
+          <td>${fav.roi_pct != null ? Number(fav.roi_pct).toFixed(1) + "%" : "-"}</td>
+          <td rowspan="2">${unknown}</td>
+        </tr>`;
+        html += `<tr>
+          <td>本命以外が1着</td>
+          <td>${oth.n ?? "-"}</td>
+          <td>${oth.win_count ?? "-"}</td>
+          <td>${pct(oth.predicted_win_rate_pct)}</td>
+          <td>${pct(oth.actual_win_rate_pct)}</td>
+          <td>${ratioLabel(oth.ratio_actual_over_predicted)}</td>
+          <td>${oth.roi_pct != null ? Number(oth.roi_pct).toFixed(1) + "%" : "-"}</td>
+        </tr>`;
+      }
+      html += `</table>`;
+
+      // short interpretation
+      html += `<p style="margin-top:12px;"><strong>読み方の目安</strong></p><ul class="note">`;
+      html += `<li>本命1着の比だけが大きく崩れている → 本命を1着に置く展開の変換を疑う</li>`;
+      html += `<li>両方とも1未満 → 買い目全体の確率が楽観的な可能性</li>`;
+      html += `<li>ROIが大きく違っても件数少ない券種は参考程度</li>`;
+      html += `<li>本命車番そのものの精度は「核となる車番予想の精度」を参照</li>`;
+      html += `</ul>`;
+    }
+    if (data.note) html += `<details style="margin-top:10px;"><summary class="note">詳細説明</summary><p class="note">${data.note}</p></details>`;
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
