@@ -2278,16 +2278,49 @@ def diagnostics_high_odds_correction_check(db: Session = Depends(get_db)):
             "実際にrace-planで掛かる合計倍率(2つの積)": combined,
         }
 
+    # 2026-09-08追加(のんの指摘): 「母数不足」仮説を全期間データで直接検証する。
+    # 券種ごとにEV帯(100-105%の薄い帯〜150%以上の厚い帯)へ分解し、
+    # EVが高い(=モデルが自信を持っている)帯ほど実績ROIも改善するかを見る。
+    # 母数不足が原因なら帯ごとの傾向はバラバラになりやすいが、
+    # 「的中率が高い券種ほど実績が悪い」という逆相関が本物なら、
+    # EVが高い帯でもROIが改善しない(ev_rank_correlation=broken)はず。
+    rows_all = [_purchase_row(p) for p in purchases]
+    ev_band_by_bet_type: Dict[str, Any] = {}
+    for bt in sorted({r["bet_type"] for r in rows_all}):
+        subset = [r for r in rows_all if r["bet_type"] == bt]
+        bands_out = []
+        for label, lo, hi in EV_BANDS:
+            bucket = []
+            for r in subset:
+                ev = r.get("ev_pct")
+                if ev is None:
+                    continue
+                if lo is None and ev < hi:
+                    bucket.append(r)
+                elif hi is None and ev >= lo:
+                    bucket.append(r)
+                elif lo is not None and hi is not None and lo <= ev < hi:
+                    bucket.append(r)
+            stat = _agg_rows(bucket)
+            stat["band"] = label
+            bands_out.append(stat)
+        ev_band_by_bet_type[bt] = {
+            "bands": bands_out,
+            **_ev_rank_correlation(bands_out),
+        }
+
     return {
         "note": (
             "全期間・実購入のみを対象にした読み取り専用診断(sinceによる絞り込みなし)。"
-            "券種別実績ROI・ワイドのオッズ帯別内訳・高オッズ帯の二重補正チェックをまとめて返す。"
+            "券種別実績ROI・ワイドのオッズ帯別内訳・高オッズ帯の二重補正チェック・"
+            "券種別EV帯別ROI(母数不足仮説の検証)をまとめて返す。"
             "既存の予想ロジック・投票ロジックは変更していない。"
         ),
         "券種別_全期間実績ROI": by_bet_type_all_time,
         "ワイド_オッズ帯別_全期間実績ROI": wide_by_odds_band_stats,
         "券種×オッズ帯_全期間実績ROI": by_bt_odds_all_time_stats,
         "高オッズ帯_二重補正チェック": double_correction_check,
+        "券種別_EV帯別_全期間実績ROI": ev_band_by_bet_type,
         "二重補正チェックの見方": (
             "『実際にrace-planで掛かる合計倍率』が1から離れているほど、"
             "2つの補正が重なって強く(または弱く)確率を歪めている可能性がある。"

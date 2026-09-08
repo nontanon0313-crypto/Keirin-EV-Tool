@@ -2139,6 +2139,28 @@ document.getElementById("loadHighOddsCheckBtn").addEventListener("click", async 
     html += `</table>`;
     html += `<p class="note">${data["二重補正チェックの見方"] || ""}</p>`;
 
+    // 券種別EV帯別ROI(母数不足仮説の検証)
+    html += `<p style="margin-top:10px;"><strong>券種別・EV帯別・全期間実績ROI（母数不足仮説の検証）</strong></p>`;
+    html += `<p class="note">EVが高い帯ほど実績ROIも上がるのが本来の姿。上がらない(broken)なら、確率・EV計算そのものに歪みがある可能性が高い。</p>`;
+    for (const [bt, block] of Object.entries(data["券種別_EV帯別_全期間実績ROI"] || {})) {
+      const corr = block.ev_rank_correlation;
+      const corrLabel = corr === "broken" ? "🔴崩れている" : corr === "positive" ? "🟢良好" : corr === "flat" ? "🟡横ばい" : "判定不能";
+      html += `<p style="margin-top:6px;"><strong>${bt}</strong>: ${corrLabel}（${block.note || ""}）</p>`;
+      html += `<table><tr><th>EV帯</th><th>件数</th><th>的中</th><th>実的中率</th><th>予想EV%</th><th>実績ROI</th><th>参考</th></tr>`;
+      for (const b of block.bands || []) {
+        html += `<tr>
+          <td>${b.band}</td>
+          <td>${num(b.bet_count)}</td>
+          <td>${num(b.hit_count)}</td>
+          <td>${b.actual_hit_rate_pct != null ? Number(b.actual_hit_rate_pct).toFixed(1) + "%" : "-"}</td>
+          <td>${b.predicted_average_ev_pct != null ? Number(b.predicted_average_ev_pct).toFixed(1) + "%" : "-"}</td>
+          <td>${roi(b.actual_roi_pct)}</td>
+          <td>${b.n_insufficient ? "件数少" : ""}</td>
+        </tr>`;
+      }
+      html += `</table>`;
+    }
+
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
