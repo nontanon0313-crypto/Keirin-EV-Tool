@@ -765,33 +765,19 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         except Exception:
             stage_exp_map = {}
 
-    # 実績に基づく券種のゲート用データ。
-    # 「どの券種を選んでも、個々の券種で期待値プラスでなければならない」という
-    # のんの方針を受けて追加(ステージゲートと同じ考え方・同じ閾値を券種にも適用)。
-    # ステージゲートが「その時期のそのステージの読みが甘い」を検出するのに対し、
-    # こちらは「その券種自体の予想ロジックが継続的に実績で負けている」ことを検出する。
-    # 両者は独立していて、どちらか一方に該当すれば見送りになる。
+    # 券種・券種×オッズ帯の実績マップはプラン判定には使わない。
+    # (過去に誤ってプランへ取り込み、UI/設計「ステージのみ」と矛盾したため削除)
+    # 診断API側で参照する用途のみ残す場合は purchases 側のエンドポイントを使う。
     bet_type_exp_map = {}
     bet_type_odds_band_exp_map = {}
-    if apply_gates:
-        try:
-            bet_type_exp_map = purchases_router.get_bet_type_expectancy_map(db, min_samples=50)
-        except Exception:
-            bet_type_exp_map = {}
-        try:
-            bet_type_odds_band_exp_map = purchases_router.get_bet_type_odds_band_expectancy_map(
-                db, min_samples=30
-            )
-        except Exception:
-            bet_type_odds_band_exp_map = {}
-    _t4 = _time.time()  # ここまで: ステージ/券種ゲート集計取得(キャッシュ済みのはず)
+    _t4 = _time.time()  # ここまで: ステージゲート集計取得(キャッシュ済みのはず)
 
-    # 実績ゲートは「確率を捨てる」のではなく、不調ステージのみ見送り(券種差別なし)。
-    # マルチ専用の確率縮小・最低勝率・券種除外は行わない。
+    # 実績ゲートの設計(厳守):
+    # - 投票プランに影響してよいのは「不調ステージの見送り」と
+    #   「着順指定券種のステージサンプル不足」のみ。
+    # - 券種丸ごと除外・券種×オッズ帯除外・購入集合的中不足ゲートは
+    #   プランの is_recommended に入れない(再混入禁止)。
     STAGE_EXPECTANCY_CUTOFF = -50.0
-    # 券種ゲート: 実績収支がマイナス（ROI<100%）の券種は見送り。
-    # 2車単など継続赤字の券種をプランから外す。
-    BET_TYPE_EXPECTANCY_CUTOFF = 0.0
 
     # ライン構成を買い目確率に反映
     line_map, line_boost = _line_map_from_race(race)
@@ -822,47 +808,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         effective_min_ev = req.min_ev_pct
         gate_reason = None
         if apply_gates:
-            # 不調ステージのみ除外(券種は問わない)
+            # 不調ステージのみ除外(券種は問わない)。券種・帯・購入集合ゲートは禁止。
             if race.race_stage and race.race_stage in stage_exp_map:
                 st = stage_exp_map[race.race_stage]
                 if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
                     gate_reason = (
                         f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
                         f"{st['n']}件)"
-                    )
-            # 不調券種を除外(全期間の実績収支率ベース。ステージゲートとは独立で、
-            # どちらか一方に該当すれば見送りになる)。
-            if gate_reason is None and o.bet_type in bet_type_exp_map:
-                bt_exp = bet_type_exp_map[o.bet_type]
-                if bt_exp["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF:
-                    gate_reason = (
-                        f"不調券種除外({o.bet_type}:実績{bt_exp['expectancy_pct']}%/"
-                        f"{bt_exp['n']}件)"
-                    )
-            # 券種×オッズ帯の実績ゲート（例: 3連単は全体黒字でも1000-3000倍だけ赤字なら除外）
-            if gate_reason is None and bet_type_odds_band_exp_map:
-                band = _odds_band_key(float(o.odds_value) if o.odds_value else 0)
-                key = f"{o.bet_type}|{band}"
-                cell = bet_type_odds_band_exp_map.get(key)
-                if cell and cell.get("expectancy_pct") is not None:
-                    if cell["expectancy_pct"] < BET_TYPE_EXPECTANCY_CUTOFF:
-                        gate_reason = (
-                            f"不調券種×オッズ帯除外({o.bet_type}/{band}:"
-                            f"実績{cell['expectancy_pct']}%/{cell['n']}件)"
-                        )
-            # 購入集合で的中が極端に不足している券種も見送り
-            # （収支ゲートをすり抜けても、的中比が壊滅的なら買わない）
-            if gate_reason is None and purchase_set_factors:
-                ps_bt = (purchase_set_factors.get("by_bet_type") or {}).get(o.bet_type)
-                if (
-                    ps_bt
-                    and (ps_bt.get("n") or 0) >= 80
-                    and ps_bt.get("factor") is not None
-                    and float(ps_bt["factor"]) <= 0.25
-                ):
-                    gate_reason = (
-                        f"購入集合で的中不足({o.bet_type}:係数{ps_bt['factor']}/"
-                        f"{ps_bt['n']}件)"
                     )
 
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
