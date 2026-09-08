@@ -2188,3 +2188,110 @@ def diagnostics_summary(
             "as-of修正後に再実行すること。"
         ),
     }
+
+
+def _real_purchase_roi_stats(rows: List[models.Purchase]) -> Optional[Dict[str, Any]]:
+    """実購入(Purchase)のリストから、投資額・払戻額ベースの実績ROIを計算する。"""
+    n = len(rows)
+    if n == 0:
+        return None
+    wins = sum(1 for p in rows if p.result == "win")
+    stake = sum(p.stake_amount or 0 for p in rows)
+    payout = sum(p.payout_amount or 0 for p in rows)
+    return {
+        "件数": n,
+        "的中数": wins,
+        "的中率%": round(wins / n * 100, 2),
+        "総投資額": round(stake, 0),
+        "総払戻額": round(payout, 0),
+        "実績ROI%": round(payout / stake * 100, 2) if stake > 0 else None,
+        "損益": round(payout - stake, 0),
+    }
+
+
+@router.get("/high-odds-correction-check")
+def diagnostics_high_odds_correction_check(db: Session = Depends(get_db)):
+    """
+    実績マイナスの原因調査(特にワイド)用の読み取り専用診断。
+
+    1. 券種別「全期間・実購入のみ」の実績ROI(sinceによる絞り込みは行わない。
+       直近数日だけでは母数が小さすぎて判断できないため)。
+    2. ワイドについてはオッズ帯別に内訳を出す(ワイドの利益が出ない原因が
+       特定のオッズ帯に集中しているかを確認するため)。
+    3. 高オッズ帯(300-1000/1000-3000/3000倍以上)について、race-planで
+       実際に掛かっている2つの独立した補正係数
+       (第2段補正 purchase_set_factor と 方針B補正 high_odds_residual)を
+       並べて表示し、同じオッズ帯に対して二重に補正がかかっていないかを確認する。
+
+    既存の予想ロジック・投票ロジックは変更しない(読み取り専用)。
+    """
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result.in_(("win", "lose")))
+        .all()
+    )
+
+    by_bet_type_all_time: Dict[str, Any] = {}
+    for bt in sorted({p.bet_type for p in purchases if p.bet_type}):
+        by_bet_type_all_time[bt] = _real_purchase_roi_stats(
+            [p for p in purchases if p.bet_type == bt]
+        )
+
+    # ワイドはオッズ帯別に細分化する
+    wide_by_odds_band: Dict[str, List[models.Purchase]] = {}
+    for p in purchases:
+        if p.bet_type != "ワイド":
+            continue
+        band = purchases_router.odds_band_label(p.odds_at_purchase)
+        wide_by_odds_band.setdefault(band, []).append(p)
+    wide_by_odds_band_stats = {
+        band: _real_purchase_roi_stats(rows)
+        for band, rows in sorted(wide_by_odds_band.items())
+    }
+
+    # 全券種×オッズ帯(全期間)も参考として出す
+    by_bt_odds_all_time: Dict[str, Dict[str, List[models.Purchase]]] = {}
+    for p in purchases:
+        band = purchases_router.odds_band_label(p.odds_at_purchase)
+        by_bt_odds_all_time.setdefault(p.bet_type, {}).setdefault(band, []).append(p)
+    by_bt_odds_all_time_stats = {
+        bt: {band: _real_purchase_roi_stats(rows) for band, rows in bands.items()}
+        for bt, bands in by_bt_odds_all_time.items()
+    }
+
+    # 高オッズ帯で2つの補正係数が両方掛かっているか確認する
+    purchase_set_factors = purchases_router.get_purchase_set_calibration_factors(db, use_cache=False)
+    high_odds_factors = purchases_router.get_high_odds_residual_factors(db, use_cache=False)
+
+    double_correction_check: Dict[str, Any] = {}
+    for band in purchases_router.HIGH_ODDS_BANDS:
+        stage2a = (purchase_set_factors.get("by_odds_band") or {}).get(band)
+        stage2b = (high_odds_factors.get("by_odds_band") or {}).get(band)
+        f2a = stage2a.get("factor") if stage2a else None
+        f2b = stage2b.get("factor") if stage2b else None
+        combined = round(f2a * f2b, 4) if (f2a is not None and f2b is not None) else None
+        double_correction_check[band] = {
+            "第2段補正(purchase_set_factor)の係数": f2a,
+            "第2段補正の対象件数": stage2a.get("n") if stage2a else None,
+            "方針B補正(high_odds_residual)の係数": f2b,
+            "方針B補正の対象件数": stage2b.get("n") if stage2b else None,
+            "実際にrace-planで掛かる合計倍率(2つの積)": combined,
+        }
+
+    return {
+        "note": (
+            "全期間・実購入のみを対象にした読み取り専用診断(sinceによる絞り込みなし)。"
+            "券種別実績ROI・ワイドのオッズ帯別内訳・高オッズ帯の二重補正チェックをまとめて返す。"
+            "既存の予想ロジック・投票ロジックは変更していない。"
+        ),
+        "券種別_全期間実績ROI": by_bet_type_all_time,
+        "ワイド_オッズ帯別_全期間実績ROI": wide_by_odds_band_stats,
+        "券種×オッズ帯_全期間実績ROI": by_bt_odds_all_time_stats,
+        "高オッズ帯_二重補正チェック": double_correction_check,
+        "二重補正チェックの見方": (
+            "『実際にrace-planで掛かる合計倍率』が1から離れているほど、"
+            "2つの補正が重なって強く(または弱く)確率を歪めている可能性がある。"
+            "たとえば0.5倍×0.5倍=0.25倍のように積が極端に小さい場合、"
+            "意図せず過剰に確率を縮小している可能性が高い。"
+        ),
+    }

@@ -2068,6 +2068,83 @@ document.getElementById("loadPipelineBtn").addEventListener("click", async () =>
   }
 });
 
+document.getElementById("loadHighOddsCheckBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "ワイド原因調査（高オッズ二重補正チェック）を取得中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/high-odds-correction-check"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    const roi = (v) => (v == null || v === undefined) ? "-" : `${Number(v).toFixed(1)}%`;
+    const num = (v) => (v == null || v === undefined) ? "-" : v;
+
+    let html = `<p><strong>ワイド原因調査（高オッズ二重補正チェック）</strong>（読み取り専用・全期間対象）</p>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+
+    // 券種別・全期間実績ROI
+    html += `<p style="margin-top:10px;"><strong>券種別・全期間・実購入のみの実績ROI</strong></p>`;
+    html += `<table><tr><th>券種</th><th>件数</th><th>的中数</th><th>的中率</th><th>実績ROI</th><th>損益</th></tr>`;
+    for (const [bt, s] of Object.entries(data["券種別_全期間実績ROI"] || {})) {
+      if (!s) continue;
+      html += `<tr>
+        <td><strong>${bt}</strong></td>
+        <td>${num(s["件数"])}</td>
+        <td>${num(s["的中数"])}</td>
+        <td>${num(s["的中率%"])}%</td>
+        <td>${roi(s["実績ROI%"])}</td>
+        <td>${num(s["損益"])}円</td>
+      </tr>`;
+    }
+    html += `</table>`;
+
+    // ワイドのオッズ帯別内訳
+    html += `<p style="margin-top:10px;"><strong>ワイド・オッズ帯別・全期間実績ROI</strong></p>`;
+    const wideBands = data["ワイド_オッズ帯別_全期間実績ROI"] || {};
+    if (!Object.keys(wideBands).length) {
+      html += `<p class="note">ワイドの実購入データがありません</p>`;
+    } else {
+      html += `<table><tr><th>オッズ帯</th><th>件数</th><th>的中数</th><th>的中率</th><th>実績ROI</th><th>損益</th></tr>`;
+      for (const [band, s] of Object.entries(wideBands)) {
+        if (!s) continue;
+        html += `<tr>
+          <td><strong>${band}</strong></td>
+          <td>${num(s["件数"])}</td>
+          <td>${num(s["的中数"])}</td>
+          <td>${num(s["的中率%"])}%</td>
+          <td>${roi(s["実績ROI%"])}</td>
+          <td>${num(s["損益"])}円</td>
+        </tr>`;
+      }
+      html += `</table>`;
+    }
+
+    // 高オッズ帯の二重補正チェック
+    html += `<p style="margin-top:10px;"><strong>高オッズ帯・二重補正チェック</strong></p>`;
+    html += `<table><tr><th>オッズ帯</th><th>第2段補正の係数</th><th>第2段の件数</th><th>方針B補正の係数</th><th>方針Bの件数</th><th>実際にかかる合計倍率</th></tr>`;
+    for (const [band, c] of Object.entries(data["高オッズ帯_二重補正チェック"] || {})) {
+      html += `<tr>
+        <td><strong>${band}</strong></td>
+        <td>${num(c["第2段補正(purchase_set_factor)の係数"])}</td>
+        <td>${num(c["第2段補正の対象件数"])}</td>
+        <td>${num(c["方針B補正(high_odds_residual)の係数"])}</td>
+        <td>${num(c["方針B補正の対象件数"])}</td>
+        <td><strong>${num(c["実際にrace-planで掛かる合計倍率(2つの積)"])}</strong></td>
+      </tr>`;
+    }
+    html += `</table>`;
+    html += `<p class="note">${data["二重補正チェックの見方"] || ""}</p>`;
+
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibStructBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "補正前後の比較を取得中...";
@@ -2385,6 +2462,19 @@ function isCalibrationApplyEnabled() {
   const el = document.getElementById("applyCalibrationCheckbox");
   return !el || el.checked;
 }
+
+// 自動補正ON/OFFチェックボックスの状態を保存・復元する。
+// 従来は保存処理が無く、ページを開き直すたびHTML側のchecked初期値(常にON)に
+// 戻ってしまっていた(のんの指摘により2026-09-08修正)。
+(function initCalibrationApplyCheckbox() {
+  const el = document.getElementById("applyCalibrationCheckbox");
+  if (!el) return;
+  const saved = localStorage.getItem("keirin_apply_calibration");
+  el.checked = saved === null ? true : saved === "true";
+  el.addEventListener("change", () => {
+    localStorage.setItem("keirin_apply_calibration", String(el.checked));
+  });
+})();
 
 
 
