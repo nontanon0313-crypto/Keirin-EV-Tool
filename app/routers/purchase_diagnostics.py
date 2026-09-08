@@ -10,13 +10,14 @@
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from datetime import datetime
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from ..database import get_db
 from .. import models
@@ -2326,5 +2327,172 @@ def diagnostics_high_odds_correction_check(db: Session = Depends(get_db)):
             "2つの補正が重なって強く(または弱く)確率を歪めている可能性がある。"
             "たとえば0.5倍×0.5倍=0.25倍のように積が極端に小さい場合、"
             "意図せず過剰に確率を縮小している可能性が高い。"
+        ),
+    }
+
+
+def _line_position_map(race) -> Optional[Dict[int, int]]:
+    """race.lines_data から {車番: ライン内の並び順(0=先頭,1=番手,2=3番手...)} を作る。"""
+    if not race or not race.lines_data:
+        return None
+    pos_map: Dict[int, int] = {}
+    for line in race.lines_data:
+        for pos, car in enumerate(line):
+            try:
+                pos_map[int(car)] = pos
+            except (TypeError, ValueError):
+                pass
+    return pos_map or None
+
+
+@router.get("/line-boost-sweep")
+def diagnostics_line_boost_sweep(db: Session = Depends(get_db)):
+    """
+    3連単の2・3着展開予測精度向上の第一歩(のんの承認・2026-09-08)。
+
+    現在の確率モデルは、AIが予測する「1着になる確率」しか持っておらず、
+    2着・3着はHarville式(1着を除いた残りの中から確率比で機械的に按分)で
+    導出しているだけ。競輪特有の「同ラインの選手が連続して上位に来やすい」
+    力学を反映するために line_boost という係数(現在1.2固定)を掛けているが、
+    この値は一度も実績データで検証されたことがない(PROGRESS.md記載の
+    既知の未検証項目)。
+
+    このエンドポイントは、line_boostの候補値ごとに「実際に的中した3連単の
+    組み合わせに、モデルがどれだけ高い確率を割り当てていたか」を
+    対数尤度(log-likelihood)で比較し、どの値が最も実績に合うかを検証する。
+    あわせて、1着→2着が同ラインだった場合とそうでない場合、さらに
+    ライン内の並び順(先頭/番手/3番手)別にも分解する。
+
+    本番の投票ロジック(app/routers/ev.py)は一切呼び出さない、
+    読み取り専用の遡及検証。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    CANDIDATES = [1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5]
+
+    def _new_stat():
+        return {"n": 0, "log_likelihood_sum": 0.0, "prob_sum": 0.0, "zero_count": 0}
+
+    stats_overall = {c: _new_stat() for c in CANDIDATES}
+    stats_same_line_12 = {c: _new_stat() for c in CANDIDATES}
+    stats_diff_line_12 = {c: _new_stat() for c in CANDIDATES}
+    # 1着が先頭(pos=0)のとき、2着が番手(pos=1・同ライン)だったか否か
+    stats_head_then_bante = {c: _new_stat() for c in CANDIDATES}
+    stats_head_then_other = {c: _new_stat() for c in CANDIDATES}
+
+    evaluated = 0
+    skipped_no_win_probs = 0
+    skipped_no_result = 0
+
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs:
+            skipped_no_win_probs += 1
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped_no_result += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            skipped_no_result += 1
+            continue
+        actual_order = tuple(canonical[0][:3])
+        if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+            skipped_no_result += 1
+            continue
+
+        line_map, _ = calc.line_map_from_race(race)
+        pos_map = _line_position_map(race)
+
+        same_line_12 = bool(
+            line_map
+            and line_map.get(actual_order[0]) is not None
+            and line_map.get(actual_order[0]) == line_map.get(actual_order[1])
+        )
+        head_then_bante = bool(
+            pos_map
+            and pos_map.get(actual_order[0]) == 0
+            and same_line_12
+            and pos_map.get(actual_order[1]) == 1
+        )
+        head_win = bool(pos_map and pos_map.get(actual_order[0]) == 0)
+
+        evaluated += 1
+        for c in CANDIDATES:
+            p = calc.harville_prob(win_probs, actual_order, line_map, c)
+            st = stats_overall[c]
+            st["n"] += 1
+            st["prob_sum"] += p
+            if p > 1e-12:
+                st["log_likelihood_sum"] += math.log(p)
+            else:
+                st["zero_count"] += 1
+
+            target = stats_same_line_12[c] if same_line_12 else stats_diff_line_12[c]
+            target["n"] += 1
+            if p > 1e-12:
+                target["log_likelihood_sum"] += math.log(p)
+            else:
+                target["zero_count"] += 1
+
+            if head_win:
+                target2 = stats_head_then_bante[c] if head_then_bante else stats_head_then_other[c]
+                target2["n"] += 1
+                if p > 1e-12:
+                    target2["log_likelihood_sum"] += math.log(p)
+                else:
+                    target2["zero_count"] += 1
+
+    def _summarize(stats: dict) -> List[dict]:
+        out = []
+        for c in CANDIDATES:
+            st = stats[c]
+            n = st["n"]
+            out.append({
+                "line_boost候補": c,
+                "件数": n,
+                "平均対数尤度": round(st["log_likelihood_sum"] / n, 5) if n else None,
+                "平均予測確率%": round(st["prob_sum"] / n * 100, 4) if n and "prob_sum" in st else None,
+                "確率ほぼ0件数": st["zero_count"],
+            })
+        return out
+
+    overall_summary = _summarize(stats_overall)
+    best = max(
+        (r for r in overall_summary if r["平均対数尤度"] is not None),
+        key=lambda r: r["平均対数尤度"],
+        default=None,
+    )
+
+    return {
+        "note": (
+            "平均対数尤度は、実際に的中した3連単の組み合わせにモデルが割り当てていた"
+            "確率の対数の平均。0に近いほど良く、マイナスに大きいほど「実際に起きた"
+            "ことをモデルが起こりにくいと見誤っていた」ことを意味する。"
+            "候補値を比較して、どのline_boostが最も実績に合うかを確認する。"
+            "現在の本番値は1.2(検証されないまま使われていた)。"
+            "本番ロジック(ev.py)は一切呼び出していない読み取り専用診断。"
+        ),
+        "評価対象レース数": evaluated,
+        "除外(勝率データ無し)": skipped_no_win_probs,
+        "除外(結果パース不可)": skipped_no_result,
+        "line_boost候補別_全体": overall_summary,
+        "最も当てはまりの良いline_boost候補": best["line_boost候補"] if best else None,
+        "line_boost候補別_1着2着が同ラインの場合": _summarize(stats_same_line_12),
+        "line_boost候補別_1着2着が別ラインの場合": _summarize(stats_diff_line_12),
+        "line_boost候補別_1着が先頭→2着が番手だった場合": _summarize(stats_head_then_bante),
+        "line_boost候補別_1着が先頭→2着が番手以外だった場合": _summarize(stats_head_then_other),
+        "読み方": (
+            "『1着2着が同ライン』の平均対数尤度が『別ライン』より大きく改善する"
+            "line_boost値があれば、それが実績に合った値。"
+            "『先頭→番手』と『先頭→番手以外』で改善幅が大きく違う場合、"
+            "同ラインの中でも並び順(先頭/番手/3番手)を区別して補正すべきという根拠になる。"
         ),
     }

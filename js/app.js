@@ -2167,6 +2167,55 @@ document.getElementById("loadHighOddsCheckBtn").addEventListener("click", async 
   }
 });
 
+document.getElementById("loadLineBoostSweepBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "line_boost感度分析を取得中（全レース再計算のため少し時間がかかります）...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/line-boost-sweep"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    const num = (v) => (v == null || v === undefined) ? "-" : v;
+
+    let html = `<p><strong>3連単精度向上（line_boost感度分析）</strong>（読み取り専用・全期間対象）</p>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+    html += `<p class="note">評価対象レース数: ${num(data["評価対象レース数"])}（除外: 勝率無し${num(data["除外(勝率データ無し)"])}件・結果パース不可${num(data["除外(結果パース不可)"])}件）</p>`;
+    html += `<p><strong>最も当てはまりの良いline_boost候補: ${num(data["最も当てはまりの良いline_boost候補"])}</strong>（現在の本番値: 1.2）</p>`;
+
+    const renderTable = (title, rows) => {
+      let t = `<p style="margin-top:10px;"><strong>${title}</strong></p>`;
+      t += `<table><tr><th>line_boost候補</th><th>件数</th><th>平均対数尤度</th><th>平均予測確率</th><th>確率ほぼ0件数</th></tr>`;
+      for (const r of rows || []) {
+        t += `<tr>
+          <td>${num(r["line_boost候補"])}</td>
+          <td>${num(r["件数"])}</td>
+          <td>${num(r["平均対数尤度"])}</td>
+          <td>${r["平均予測確率%"] != null ? Number(r["平均予測確率%"]).toFixed(4) + "%" : "-"}</td>
+          <td>${num(r["確率ほぼ0件数"])}</td>
+        </tr>`;
+      }
+      t += `</table>`;
+      return t;
+    };
+
+    html += renderTable("候補別・全体", data["line_boost候補別_全体"]);
+    html += renderTable("候補別・1着2着が同ラインの場合", data["line_boost候補別_1着2着が同ラインの場合"]);
+    html += renderTable("候補別・1着2着が別ラインの場合", data["line_boost候補別_1着2着が別ラインの場合"]);
+    html += renderTable("候補別・1着が先頭→2着が番手だった場合", data["line_boost候補別_1着が先頭→2着が番手だった場合"]);
+    html += renderTable("候補別・1着が先頭→2着が番手以外だった場合", data["line_boost候補別_1着が先頭→2着が番手以外だった場合"]);
+
+    html += `<p class="note" style="margin-top:10px;">${data["読み方"] || ""}</p>`;
+
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibStructBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "補正前後の比較を取得中...";
