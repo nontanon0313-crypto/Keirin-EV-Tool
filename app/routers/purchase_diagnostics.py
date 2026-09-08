@@ -2373,7 +2373,11 @@ def diagnostics_line_boost_sweep(db: Session = Depends(get_db)):
         .all()
     )
 
-    CANDIDATES = [1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5]
+    CANDIDATES = [
+        0.5, 0.7, 0.8, 0.9,
+        1.0, 1.1, 1.2, 1.3, 1.5, 1.8, 2.0, 2.5,
+        3.0, 3.5, 4.0, 5.0, 6.0, 8.0, 10.0
+    ]
 
     def _new_stat():
         return {"n": 0, "log_likelihood_sum": 0.0, "prob_sum": 0.0, "zero_count": 0}
@@ -2437,6 +2441,7 @@ def diagnostics_line_boost_sweep(db: Session = Depends(get_db)):
 
             target = stats_same_line_12[c] if same_line_12 else stats_diff_line_12[c]
             target["n"] += 1
+            target["prob_sum"] += p
             if p > 1e-12:
                 target["log_likelihood_sum"] += math.log(p)
             else:
@@ -2445,6 +2450,7 @@ def diagnostics_line_boost_sweep(db: Session = Depends(get_db)):
             if head_win:
                 target2 = stats_head_then_bante[c] if head_then_bante else stats_head_then_other[c]
                 target2["n"] += 1
+                target2["prob_sum"] += p
                 if p > 1e-12:
                     target2["log_likelihood_sum"] += math.log(p)
                 else:
