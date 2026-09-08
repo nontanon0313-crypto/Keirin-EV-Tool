@@ -2015,8 +2015,109 @@ document.getElementById("loadCalibStructBtn").addEventListener("click", async ()
     }
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    let html = `<p><strong>補正係数の比較</strong>(読み取り専用)</p>`;
-    html += `<pre style="white-space:pre-wrap;font-size:12px;">${JSON.stringify(data, null, 2).slice(0, 8000)}</pre>`;
+
+    const fmt = (v, digits = 3) => (v == null || v === undefined) ? "-" : (typeof v === "number" ? Number(v).toFixed(digits) : v);
+    const pct = (v) => (v == null || v === undefined) ? "-" : `${Number(v).toFixed(2)}%`;
+    const rowPair = (label, cur, ret) => {
+      cur = cur || {};
+      ret = ret || {};
+      const df = (cur.calibration_factor != null && ret.calibration_factor != null)
+        ? (Number(ret.calibration_factor) - Number(cur.calibration_factor))
+        : null;
+      return `<tr>
+        <td>${label}</td>
+        <td>${cur.sample_count ?? "-"}</td>
+        <td>${pct(cur.actual_win_rate_pct)}</td>
+        <td>${pct(cur.predicted_avg_prob_pct)}</td>
+        <td>${fmt(cur.calibration_factor)}</td>
+        <td>${ret.sample_count ?? "-"}</td>
+        <td>${pct(ret.actual_win_rate_pct)}</td>
+        <td>${pct(ret.predicted_avg_prob_pct)}</td>
+        <td>${fmt(ret.calibration_factor)}</td>
+        <td>${df == null ? "-" : (df >= 0 ? "+" : "") + df.toFixed(3)}</td>
+      </tr>`;
+    };
+    const head = `<table>
+      <tr>
+        <th rowspan="2">区分</th>
+        <th colspan="4">現行(購入記録ベース)</th>
+        <th colspan="4">遡及(全候補・偏り少)</th>
+        <th rowspan="2">係数差<br>(遡及−現行)</th>
+      </tr>
+      <tr>
+        <th>件数</th><th>実績的中</th><th>予想平均</th><th>係数</th>
+        <th>件数</th><th>実績的中</th><th>予想平均</th><th>係数</th>
+      </tr>`;
+
+    let html = `<p><strong>補正前後の比較</strong>（読み取り専用）</p>`;
+    html += `<p class="note">現行＝今まで投票判断に使ってきた係数（購入・見送り記録ベース）。遡及＝オッズがある全候補で測った係数（偏りが少ない）。係数1.0＝補正なし。1より小さい＝予想が楽観的なので確率を下げる。</p>`;
+    if (data.message) html += `<p class="note">${data.message}</p>`;
+
+    // overall
+    const ov = data.overall || {};
+    html += `<p style="margin-top:12px;"><strong>① 全体</strong></p>`;
+    html += head;
+    html += rowPair("全体", ov.current, ov.retroactive);
+    html += `</table>`;
+
+    // by bucket
+    html += `<p style="margin-top:14px;"><strong>② 勝率帯ごと</strong></p>`;
+    html += head;
+    for (const [k, v] of Object.entries(data.by_bucket || {})) {
+      html += rowPair(k, (v || {}).current, (v || {}).retroactive);
+    }
+    html += `</table>`;
+
+    // by bet type
+    html += `<p style="margin-top:14px;"><strong>③ 券種ごと</strong></p>`;
+    html += head;
+    for (const [k, v] of Object.entries(data.by_bet_type || {})) {
+      html += rowPair(k, (v || {}).current, (v || {}).retroactive);
+    }
+    html += `</table>`;
+
+    // by bet type x bucket (collapsed summary of largest gaps)
+    html += `<p style="margin-top:14px;"><strong>④ 券種×勝率帯（係数差が大きい順・上位）</strong></p>`;
+    const pairs = [];
+    for (const [bt, bands] of Object.entries(data.by_bet_type_bucket || {})) {
+      for (const [band, v] of Object.entries(bands || {})) {
+        const c = (v || {}).current || {};
+        const r = (v || {}).retroactive || {};
+        if (c.calibration_factor == null || r.calibration_factor == null) continue;
+        const gap = Number(r.calibration_factor) - Number(c.calibration_factor);
+        pairs.push({ label: `${bt} / ${band}`, cur: c, ret: r, gap });
+      }
+    }
+    pairs.sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap));
+    html += head;
+    for (const p of pairs.slice(0, 15)) {
+      html += rowPair(p.label, p.cur, p.ret);
+    }
+    html += `</table>`;
+    if (pairs.length > 15) {
+      html += `<p class="note">差の大きい上位15件のみ表示（全${pairs.length}区分）</p>`;
+    }
+
+    // condition candidates
+    const cands = data.condition_specific_correction_candidates || [];
+    if (cands.length) {
+      html += `<p style="margin-top:14px;"><strong>⑤ 条件別補正の候補（券種係数と帯別係数の差が大きい）</strong></p>`;
+      html += `<table><tr><th>券種</th><th>勝率帯</th><th>券種係数</th><th>券種×帯係数</th><th>差</th><th>件数</th><th>参考p値%</th></tr>`;
+      for (const c of cands) {
+        html += `<tr>
+          <td>${c.bet_type ?? "-"}</td>
+          <td>${c.prob_band ?? "-"}</td>
+          <td>${fmt(c.bet_type_level_factor)}</td>
+          <td>${fmt(c.bet_type_x_band_factor)}</td>
+          <td>${fmt(c.gap)}</td>
+          <td>${c.sample_count ?? "-"}</td>
+          <td>${c.significance_p_value_pct != null ? Number(c.significance_p_value_pct).toFixed(2) : "-"}</td>
+        </tr>`;
+      }
+      html += `</table>`;
+      html += `<p class="note">差が大きいほど「券種一律補正」では足りず、帯ごとの補正を検討する材料になります（ルール変更は別判断）。</p>`;
+    }
+
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
