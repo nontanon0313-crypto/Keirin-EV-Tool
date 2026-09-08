@@ -4188,10 +4188,20 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         # レース単位の検定(独立性の問題を避けるための補助指標)。
         # そのレースの購入全体で黒字(payout>=stake)だったレースの割合を、
         # 「想定期待値(roi換算)が100%以上なら黒字を期待する」という単純な基準と比較する。
-        race_ids_with_purchase = sorted({p.race_id for p in purchases})
+        # 修正(2026-09-08・のんの指摘): purchasesは実購入(Purchase)と
+        # 見送り記録(SkippedBet)を合体させたリストで、見送り分は投資額・払戻額
+        # ともに常に0円として登録される。そのため実購入が1件も無く見送りだけの
+        # レースまで「払戻(0円)>=投資額(0円)」でTrueとなり、誤って黒字レースに
+        # 数えられてしまっていた(245レース中29黒字という数字は、実購入があった
+        # 224レース中の本当の黒字8件に、見送りのみの21レースが紛れ込んだ結果で
+        # あることを実測で確認済み)。実際に購入があったレースだけを対象にする。
+        real_purchase_records = [
+            p for p in purchases if not getattr(p, "is_skipped_record", False)
+        ]
+        race_ids_with_purchase = sorted({p.race_id for p in real_purchase_records})
         race_level_results = []
         for rid in race_ids_with_purchase:
-            race_purchases = [p for p in purchases if p.race_id == rid]
+            race_purchases = [p for p in real_purchase_records if p.race_id == rid]
             race_stake = sum(p.stake_amount for p in race_purchases)
             race_payout = sum(p.payout_amount for p in race_purchases)
             race_level_results.append(1 if race_payout >= race_stake else 0)
