@@ -994,13 +994,18 @@ def replay_settled_targets(
         )
         q = q.filter(~already_purchased.exists()).filter(~already_skipped.exists())
 
-    ids = [row[0] for row in q.limit(limit).all()]
+    # total は limit に依存しない真の残件数。race_ids だけ limit で切る。
+    all_ids = [row[0] for row in q.all()]
+    total = len(all_ids)
+    ids = all_ids[: max(0, int(limit or 0))]
 
     return {
         "since": since_out,
         "after_race_id": after_race_id,
         "exclude_already_replayed": exclude_already_replayed,
-        "total": len(ids),
+        "total": total,
+        "returned_count": len(ids),
+        "limit": limit,
         "race_ids": ids,
     }
 

@@ -24,21 +24,15 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-08(Grok) — 検証タブUIを現行診断API形式に修正
+最終更新: 2026-09-08(Grok) — targetsのtotalを真の残件数に修正、0件時はcontinue即終了
 
-### 直近の作業
-- **オッズ上限感度の空表:** APIは`by_odds_cap`を返すのにUIが古い`scenarios`を見ていた → 修正
-- 合わせて検証タブの後続ボタンも現行APIに接続:
-  - 上位的中除外 → `/exclude-top-hits-sensitivity`
-  - 校正の投資影響 → `/calibration-investment-impact`
-  - 本命→購入経路 → `/pick-to-bet-funnel`(旧decision-pipelineは未統合)
-  - 補正前後比較 → `/calibration-factors-compare`
-- 実績ゲートはステージのみ(e67b087)。SWITCH_ATは2026-09-08 02:00 UTC(aea03ad)
+### 直近の修正
+- `/races/replay-settled/targets` の `total` が `limit` 件数になっていたバグを修正（真の残件数を返す）
+- `run_replay_continue.sh` は残0件なら warm/診断をせず exit 0
 
-### 次にやること
-1. 本UI修正をcommit/push(Pages反映)
-2. 画面でオッズ上限感度に行が出ることを確認
-3. 新基準の再投票は残りがあれば continue で継続
+### 残作業
+- 再投票の残りを continue ループで消化
+- 検証タブUI修正は main に反映済み
 
 
 ---
