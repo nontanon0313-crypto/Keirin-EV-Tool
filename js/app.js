@@ -1903,131 +1903,120 @@ document.getElementById("loadOddsCapBtn").addEventListener("click", async () => 
     const res = await fetch(apiUrl("/purchases/diagnostics/odds-cap-sensitivity?since=calibration_switch"));
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    let html = `<p><strong>オッズ上限の感度分析</strong>(読み取り専用・購入ロジックは変更なし)</p>`;
-    html += `<p class="note">期間: ${data.since_resolved || data.since || "-"} / オッズ不明 ${data.odds_missing_count || 0}件は上限シナリオから除外</p>`;
-    if (data.profit_concentration) {
-      const pc = data.profit_concentration;
-      html += `<p>利益集中: 上位${pc.top10_hit_count}的中の利益 ${pc.top10_profit}円 / 全体利益 ${pc.total_profit}円`;
-      if (pc.top10_share_of_profit_pct != null) html += ` (上位シェア ${pc.top10_share_of_profit_pct}%)`;
-      html += `</p>`;
-    }
-    html += `<table><tr><th>シナリオ</th><th>件数</th><th>的中</th><th>的中率</th><th>ROI</th><th>損益</th><th>除外件数</th><th>除外側損益</th><th>ROI差</th></tr>`;
-    for (const s of (data.scenarios || [])) {
-      const insuf = s.n_insufficient ? " ⚠n少" : "";
-      html += `<tr><td>${s.label}${insuf}</td><td>${s.bet_count}</td><td>${s.hit_count}</td>` +
-        `<td>${s.actual_hit_rate_pct != null ? s.actual_hit_rate_pct + "%" : "-"}</td>` +
-        `<td>${s.actual_roi_pct != null ? s.actual_roi_pct + "%" : "-"}</td>` +
-        `<td>${s.actual_profit != null ? s.actual_profit : "-"}</td>` +
-        `<td>${s.excluded_bet_count != null ? s.excluded_bet_count : "-"}</td>` +
-        `<td>${s.excluded_profit != null ? s.excluded_profit : "-"}</td>` +
-        `<td>${s.roi_delta_vs_baseline_pt != null ? s.roi_delta_vs_baseline_pt + "pt" : "-"}</td></tr>`;
-    }
-    html += `</table>`;
-    if (data.by_bet_type) {
-      html += `<p style="margin-top:12px;"><strong>券種別(上限なし vs 各上限)</strong></p>`;
-      for (const [bt, list] of Object.entries(data.by_bet_type)) {
-        html += `<p class="note">${bt}</p><table><tr><th>上限</th><th>件数</th><th>的中率</th><th>ROI</th><th>損益</th></tr>`;
-        for (const s of list) {
-          const insuf = s.n_insufficient ? " ⚠" : "";
-          html += `<tr><td>${s.label}${insuf}</td><td>${s.bet_count}</td>` +
-            `<td>${s.actual_hit_rate_pct != null ? s.actual_hit_rate_pct + "%" : "-"}</td>` +
-            `<td>${s.actual_roi_pct != null ? s.actual_roi_pct + "%" : "-"}</td>` +
-            `<td>${s.actual_profit != null ? s.actual_profit : "-"}</td></tr>`;
-        }
-        html += `</table>`;
+    let html = `<p><strong>オッズ上限の感度分析</strong>(読み取り専用)</p>`;
+    html += `<p class="note">期間: ${data.since_resolved || data.since || "-"} / 確定ベット ${data.total_settled_bets ?? "-"}件</p>`;
+    const rows = data.by_odds_cap || data.scenarios || [];
+    if (!rows.length) {
+      html += `<p class="note">該当データがありません(再投票前や現行基準のPurchaseが0件の可能性)</p>`;
+    } else {
+      html += `<table><tr><th>上限</th><th>件数</th><th>的中</th><th>的中率</th><th>ROI</th><th>損益</th><th>黒字レース率</th><th>最大DD</th><th>上位1的中シェア</th></tr>`;
+      for (const s of rows) {
+        const pc = s.profit_concentration || {};
+        html += `<tr><td>${s.odds_cap ?? s.label ?? "-"}</td><td>${s.bet_count ?? "-"}</td><td>${s.hit_count ?? "-"}</td>` +
+          `<td>${s.hit_rate_pct != null ? s.hit_rate_pct + "%" : (s.actual_hit_rate_pct != null ? s.actual_hit_rate_pct + "%" : "-")}</td>` +
+          `<td>${s.roi_pct != null ? s.roi_pct + "%" : (s.actual_roi_pct != null ? s.actual_roi_pct + "%" : "-")}</td>` +
+          `<td>${s.profit_total != null ? s.profit_total : (s.actual_profit != null ? s.actual_profit : "-")}</td>` +
+          `<td>${s.black_race_rate_pct != null ? s.black_race_rate_pct + "%" : "-"}</td>` +
+          `<td>${s.max_drawdown != null ? s.max_drawdown : "-"}</td>` +
+          `<td>${pc.top1_hit_profit_share_pct != null ? pc.top1_hit_profit_share_pct + "%" : "-"}</td></tr>`;
       }
+      html += `</table>`;
     }
-    if (data.notes && data.notes.length) {
-      html += `<p class="note">${data.notes.join(" ")}</p>`;
-    }
+    if (data.note) html += `<p class="note">${data.note}</p>`;
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
 });
 
+document.getElementById("loadExcludeTopBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "上位的中除外感度を計算中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/exclude-top-hits-sensitivity?since=calibration_switch"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    let html = `<p><strong>上位的中除外の感度</strong>(読み取り専用)</p>`;
+    html += `<p>総ベット ${data.total_bets ?? "-"} / 実績損益 ${data.actual_profit ?? "-"} / ROI ${data.actual_roi_pct ?? "-"}%</p>`;
+    const top = data.exclude_top_n_hits || {};
+    html += `<table><tr><th>除外</th><th>除外件数</th><th>残り損益</th><th>残りROI</th><th>まだ黒字?</th></tr>`;
+    for (const [k, v] of Object.entries(top)) {
+      html += `<tr><td>${k}</td><td>${v.excluded_count}</td><td>${v.remaining_profit}</td><td>${v.remaining_roi_pct}%</td><td>${v.still_profitable}</td></tr>`;
+    }
+    html += `</table>`;
+    if (data.exclude_by_odds_threshold && data.exclude_by_odds_threshold.length) {
+      html += `<p style="margin-top:10px;"><strong>高オッズ的中の払戻だけ除外</strong></p><table><tr><th>閾値</th><th>残件数</th><th>残損益</th><th>残ROI</th></tr>`;
+      for (const r of data.exclude_by_odds_threshold) {
+        html += `<tr><td>&gt;=${r.exclude_odds_at_or_above}</td><td>${r.remaining_bet_count}</td><td>${r.remaining_profit}</td><td>${r.remaining_roi_pct}%</td></tr>`;
+      }
+      html += `</table>`;
+    }
+    if (data.note) html += `<p class="note">${data.note}</p>`;
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
+document.getElementById("loadInvestImpactBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "校正の投資影響を計算中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/calibration-investment-impact?since=calibration_switch"));
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    let html = `<p><strong>校正の投資影響</strong>(読み取り専用)</p>`;
+    html += `<p>評価対象 ${data.evaluated_purchase_count ?? "-"}件 (欠落スキップ ${data.skipped_missing_data_count ?? "-"})</p>`;
+    const still = data.would_still_buy_under_retroactive_calibration || {};
+    const excl = data.would_be_excluded_under_retroactive_calibration;
+    html += `<p>遡及係数でも買う側: n=${still.n ?? "-"} 的中${still.win_count ?? "-"} ROI ${still.roi_pct ?? "-"}%</p>`;
+    if (excl) {
+      html += `<p>遡及係数なら除外側: n=${excl.n} 的中${excl.win_count} ROI ${excl.roi_pct}%</p>`;
+    } else {
+      html += `<p class="note">遡及係数で除外される購入は0件</p>`;
+    }
+    if (data.actual_all) html += `<p>実際の全評価対象 ROI ${data.actual_all.roi_pct}%</p>`;
+    if (data.note) html += `<p class="note">${data.note}</p>`;
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
 
 document.getElementById("loadPipelineBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
-  resultBox.textContent = "判定経路を分析中...";
+  resultBox.textContent = "本命→購入経路を分析中...";
   try {
-    const res = await fetch(apiUrl("/purchases/diagnostics/decision-pipeline?since=calibration_switch"));
+    const res = await fetch(apiUrl("/purchases/diagnostics/pick-to-bet-funnel?since=calibration_switch"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    let html = `<p><strong>判定経路の分離検証</strong>(本命→確率→EV→購入 / 読み取り専用)</p>`;
+    let html = `<p><strong>本命→買い目→購入の経路</strong>(読み取り専用)</p>`;
     html += `<p class="note">期間: ${data.since_resolved || data.since || "-"}</p>`;
-    const s1 = data.stage1_favorite_car || {};
-    html += `<p><strong>Stage1 本命車番</strong> レース${s1.n_races ?? 0} / 1着率 ${s1.win_rate_pct ?? "-"}% (予測平均 ${s1.avg_predicted_win_prob_pct ?? "-"}%) / Top3率 ${s1.top3_rate_pct ?? "-"}% / gap ${s1.predicted_vs_actual_gap_pt ?? "-"}pt</p>`;
-    const s2 = data.stage2_combination_probability || {};
-    const pc = s2.purchase_calibrated || {};
-    const pr = s2.purchase_raw || {};
-    html += `<p><strong>Stage2 買い目確率</strong> 購入・校正後: n=${pc.n ?? 0} 予測${pc.predicted_avg_pct ?? "-"}% vs 実${pc.actual_hit_rate_pct ?? "-"}% (gap ${pc.gap_pt ?? "-"}pt) / 校正前 gap ${pr.gap_pt ?? "-"}pt</p>`;
-    const sk = s2.skipped_calibrated || {};
-    html += `<p class="note">見送り側(校正後): n=${sk.n ?? 0} 予測${sk.predicted_avg_pct ?? "-"}% vs 実${sk.actual_hit_rate_pct ?? "-"}% (gap ${sk.gap_pt ?? "-"}pt)</p>`;
-    const s3 = data.stage3_ev || {};
-    const pur = s3.purchased || {};
-    const skp = s3.skipped || {};
-    html += `<p><strong>Stage3 EV</strong> 購入: 予測平均EV ${pur.predicted_average_ev_pct ?? pur.predicted_avg_ev_pct ?? "-"}% / 実績ROI ${pur.actual_roi_pct ?? "-"}% / 損益 ${pur.actual_profit ?? "-"}</p>`;
-    html += `<p class="note">見送り仮想: ROI ${skp.actual_roi_pct ?? "-"}% (stake仮想100円)</p>`;
-    const s4 = data.stage4_purchase_decision || {};
-    html += `<p><strong>Stage4 購入判定</strong> 購入${s4.purchased_count ?? 0} / 見送り${s4.skipped_count ?? 0} / 購入率 ${s4.purchase_rate_pct ?? "-"}% / 的中のpurchase捕捉率 ${s4.hit_capture_rate_pct ?? "-"}% (purchase的中${s4.hit_in_purchase ?? 0} / skip的中${s4.hit_in_skipped ?? 0})</p>`;
-    if (s4.skip_reason_categories) {
-      html += `<p class="note">見送り理由: ${Object.entries(s4.skip_reason_categories).map(([k,v]) => k+":"+v).join(" / ")}</p>`;
-    }
-    if (data.bottleneck_hints && data.bottleneck_hints.length) {
-      html += `<p><strong>注目ポイント</strong></p><ul>` + data.bottleneck_hints.map(h => `<li>${h}</li>`).join("") + `</ul>`;
-    }
-    if (data.interpretation_notes) {
-      html += `<p class="note">${data.interpretation_notes.join(" ")}</p>`;
-    }
+    html += `<pre style="white-space:pre-wrap;font-size:12px;">${JSON.stringify(data, null, 2).slice(0, 8000)}</pre>`;
+    if ((JSON.stringify(data).length) > 8000) html += `<p class="note">長いため一部のみ表示。全文はAPIを直接確認。</p>`;
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }
 });
 
-
 document.getElementById("loadCalibStructBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
-  resultBox.textContent = "補正係数の構造を取得中...(重い場合あり)";
+  resultBox.textContent = "補正前後の比較を取得中...";
   try {
-    const res = await fetch(apiUrl("/purchases/diagnostics/calibration-structure"));
+    const res = await fetch(apiUrl("/purchases/calibration-factors-compare"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    let html = `<p><strong>補正係数の構造</strong>(読み取り専用・係数は変更しない)</p>`;
-    const o1 = (data.stage1_retroactive || {}).overall || {};
-    const o2 = (data.stage2_purchase_set || {}).overall || {};
-    html += `<p><strong>第1段 overall</strong> factor=${o1.calibration_factor ?? "-"} / 予測${o1.predicted_avg_prob_pct ?? "-"}% vs 実${o1.actual_win_rate_pct ?? "-"}% / n=${o1.sample_count ?? "-"} / p=${o1.significance_p_value_pct ?? "-"}%</p>`;
-    html += `<p><strong>第2段 overall</strong> factor=${o2.calibration_factor ?? "-"} / n=${o2.sample_count ?? "-"} <span class="note">(購入集合の残差)</span></p>`;
-    if (data.application_order) {
-      html += `<p class="note">適用順: ${data.application_order.join(" → ")}</p>`;
-    }
-    html += `<p style="margin-top:10px;"><strong>適用パス例</strong></p><table><tr><th>券種</th><th>raw p</th><th>帯</th><th>係数</th><th>校正後p</th><th>経路</th></tr>`;
-    for (const d of (data.demo_application_path || [])) {
-      html += `<tr><td>${d.bet_type}</td><td>${d.raw_prob}</td><td>${d.prob_bucket}</td><td>${d.factor_applied}</td><td>${d.calibrated_prob}</td><td style="font-size:11px;">${(d.path||[]).join(" / ")}</td></tr>`;
-    }
-    html += `</table>`;
-    const notable = data.notable_stage1_factors || [];
-    if (notable.length) {
-      html += `<p style="margin-top:10px;"><strong>第1段で1から大きく離れている層(上位)</strong></p>`;
-      html += `<table><tr><th>層</th><th>キー</th><th>n</th><th>factor</th><th>予測%</th><th>実%</th></tr>`;
-      for (const r of notable.slice(0, 15)) {
-        html += `<tr><td>${r.layer}</td><td>${r.key}</td><td>${r.sample_count ?? "-"}</td><td>${r.calibration_factor ?? "-"}</td><td>${r.predicted_avg_prob_pct ?? "-"}</td><td>${r.actual_win_rate_pct ?? "-"}</td></tr>`;
-      }
-      html += `</table>`;
-    }
-    const n2 = data.notable_stage2_factors || [];
-    if (n2.length) {
-      html += `<p style="margin-top:10px;"><strong>第2段(購入残差)で目立つ層</strong></p>`;
-      html += `<table><tr><th>層</th><th>キー</th><th>n</th><th>factor</th></tr>`;
-      for (const r of n2.slice(0, 15)) {
-        html += `<tr><td>${r.layer}</td><td>${r.key}</td><td>${r.sample_count ?? "-"}</td><td>${r.calibration_factor ?? "-"}</td></tr>`;
-      }
-      html += `</table>`;
-    }
-    if (data.interpretation_notes) {
-      html += `<p class="note">${data.interpretation_notes.join(" ")}</p>`;
-    }
+    let html = `<p><strong>補正係数の比較</strong>(読み取り専用)</p>`;
+    html += `<pre style="white-space:pre-wrap;font-size:12px;">${JSON.stringify(data, null, 2).slice(0, 8000)}</pre>`;
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
