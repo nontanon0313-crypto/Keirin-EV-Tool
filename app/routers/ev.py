@@ -774,10 +774,28 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     # 実績ゲートの設計(厳守):
     # - 投票プランに影響してよいのは「不調ステージの見送り」と
-    #   「着順指定券種のステージサンプル不足」のみ。
-    # - 券種丸ごと除外・券種×オッズ帯除外・購入集合的中不足ゲートは
-    #   プランの is_recommended に入れない(再混入禁止)。
+    #   「着順指定券種のステージサンプル不足」、および下記の
+    #   BET_TYPE_SUSPENDED / BET_TYPE_MIN_EV_OVERRIDE(券種別方針)のみ。
+    # - 券種×オッズ帯除外・購入集合的中不足ゲートは(BET_TYPE_*とは別物として)
+    #   プランのis_recommendedに再混入させない。
     STAGE_EXPECTANCY_CUTOFF = -50.0
+
+    # 2026-09-08: のんの承認済み・全期間の実購入データ検証結果に基づく券種別方針。
+    # (以前あった「不調券種除外」ゲートは、根拠を明示しないまま機械的にプランへ
+    # 混入していたため一度撤去したが、今回は下記の具体的な検証結果に基づき、
+    # のんと合意のうえで明示的に再導入する)
+    #
+    # ・ワイド: 全期間28件購入・0的中(実績ROI0%)。EV150%以上の最上位帯(20件)
+    #   でも0的中で、EVが上がるほど実績が改善する関係が見られない。
+    #   期待値がプラスである証拠が無いため、丸ごと見送りにする。
+    # ・2車単: 全期間23件購入・0的中(実績ROI0%)。同様に見送りにする。
+    # ・2車複/3連複: EV150%以上の帯でのみ黒字実績が確認できる
+    #   (2車複 172件中1的中・ROI189%台の帯で実績19.8%、
+    #    3連複 270件中2的中の帯で実績51.2%)。EV105〜150%のデッドゾーンでは
+    #   ほぼ的中が無いため、購入対象をEV150%以上に絞る。
+    # ・3連単: EV150%以上の帯(320件中4的中)で明確に黒字のため現状維持。
+    BET_TYPE_SUSPENDED = {"ワイド", "2車単"}
+    BET_TYPE_MIN_EV_OVERRIDE = {"2車複": 50.0, "3連複": 50.0}  # ev_pct>=50 は EV150%以上に相当
 
     # ライン構成を買い目確率に反映
     line_map, line_boost = _line_map_from_race(race)
@@ -808,14 +826,23 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         effective_min_ev = req.min_ev_pct
         gate_reason = None
         if apply_gates:
-            # 不調ステージのみ除外(券種は問わない)。券種・帯・購入集合ゲートは禁止。
-            if race.race_stage and race.race_stage in stage_exp_map:
-                st = stage_exp_map[race.race_stage]
-                if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
-                    gate_reason = (
-                        f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
-                        f"{st['n']}件)"
-                    )
+            if o.bet_type in BET_TYPE_SUSPENDED:
+                gate_reason = (
+                    f"不調券種除外({o.bet_type}:全期間実績ROI0%・EV150%以上帯でも的中なし。"
+                    f"2026-09-08のん承認)"
+                )
+            else:
+                override = BET_TYPE_MIN_EV_OVERRIDE.get(o.bet_type)
+                if override is not None:
+                    effective_min_ev = max(effective_min_ev, override)
+                # 不調ステージのみ除外(券種は問わない)。券種・帯・購入集合ゲートは禁止。
+                if race.race_stage and race.race_stage in stage_exp_map:
+                    st = stage_exp_map[race.race_stage]
+                    if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
+                        gate_reason = (
+                            f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
+                            f"{st['n']}件)"
+                        )
 
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
         stage_order_gate = apply_gates and stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
