@@ -2907,3 +2907,176 @@ def diagnostics_normalization_check(db: Session = Depends(get_db), limit: int = 
         "エラー詳細": errors,
         "サンプル(直近20件まで表示)": mass_samples[:20],
     }
+
+
+@router.get("/player-stats-potential")
+def diagnostics_player_stats_potential(db: Session = Depends(get_db)):
+    """
+    課題J/K対応:選手個人データ(app_2nd_rate・app_3rd_rate等)の充足率と、
+    現在は全く使われていないこれらの値が、2着・3着予測において
+    現行モデル(Harville+先頭→番手boost)より予測力を持つかを検証する。
+
+    Entryテーブルには既にapp_2nd_rate(選手個人の2着率)・app_3rd_rate(3着率)・
+    finish_2nd/3rd(2着/3着回数)・kimarite_*(決まり手別勝利数)等が保存されているが、
+    現行の確率モデルはapp_win_rate/ai_win_prob由来の1着確率(blended_win_prob)しか
+    使っておらず、2着・3着はHarville式で機械的に導出しているだけで、
+    これらの個人データを一切参照していない(2026-09-08判明)。
+
+    本番ロジック(ev.py)は一切呼び出さない、読み取り専用の遡及検証。
+    """
+    total_entries = db.query(models.Entry).count()
+
+    def _availability(column) -> dict:
+        n = db.query(models.Entry).filter(column.isnot(None)).count()
+        return {"件数": n, "充足率%": round(n / total_entries * 100, 1) if total_entries else None}
+
+    availability = {
+        "app_win_rate(1着率)": _availability(models.Entry.app_win_rate),
+        "app_2nd_rate(2着率)": _availability(models.Entry.app_2nd_rate),
+        "app_3rd_rate(3着率)": _availability(models.Entry.app_3rd_rate),
+        "finish_1st(1着回数)": _availability(models.Entry.finish_1st),
+        "finish_2nd(2着回数)": _availability(models.Entry.finish_2nd),
+        "finish_3rd(3着回数)": _availability(models.Entry.finish_3rd),
+        "race_score(競走得点)": _availability(models.Entry.race_score),
+        "leg_style(脚質)": _availability(models.Entry.leg_style),
+        "kimarite_nige(逃げ決着回数)": _availability(models.Entry.kimarite_nige),
+        "kimarite_makuri(捲り決着回数)": _availability(models.Entry.kimarite_makuri),
+        "kimarite_sashi(差し決着回数)": _availability(models.Entry.kimarite_sashi),
+        "kimarite_mark(マーク決着回数)": _availability(models.Entry.kimarite_mark),
+    }
+
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    n_2nd_eval = 0
+    current_model_2nd_correct_all = 0
+    n_2nd_with_rate = 0
+    current_model_2nd_correct_subset = 0
+    app_2nd_rate_correct = 0
+    combined_2nd_correct = 0
+
+    n_3rd_eval = 0
+    current_model_3rd_correct_all = 0
+    n_3rd_with_rate = 0
+    current_model_3rd_correct_subset = 0
+    app_3rd_rate_correct = 0
+
+    def _model_pick(remaining: dict, prev_car: int, line_map, pos_map, line_boost: float):
+        boosted = {}
+        for c, v in remaining.items():
+            if line_map and line_map.get(c) == line_map.get(prev_car):
+                if pos_map and pos_map.get(prev_car) == 0 and pos_map.get(c) == 1:
+                    boosted[c] = v * calc.HEAD_TO_BANTE_BOOST
+                else:
+                    boosted[c] = v * line_boost
+            else:
+                boosted[c] = v
+        return max(boosted, key=boosted.get)
+
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            continue
+        actual_order = tuple(canonical[0][:3])
+        if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+            continue
+
+        line_map, line_boost = calc.line_map_from_race(race)
+        pos_map = calc.line_position_map(race)
+        entry_by_car = {e.car_number: e for e in race.entries}
+
+        # --- 2着予測比較(実際の1着車を固定) ---
+        remaining = {c: v for c, v in win_probs.items() if c != actual_order[0]}
+        if remaining:
+            n_2nd_eval += 1
+            model_pick = _model_pick(remaining, actual_order[0], line_map, pos_map, line_boost)
+            if model_pick == actual_order[1]:
+                current_model_2nd_correct_all += 1
+
+            rate_candidates = {
+                c: entry_by_car[c].app_2nd_rate
+                for c in remaining
+                if c in entry_by_car and entry_by_car[c].app_2nd_rate is not None
+            }
+            if rate_candidates:
+                n_2nd_with_rate += 1
+                if model_pick == actual_order[1]:
+                    current_model_2nd_correct_subset += 1
+                rate_pick = max(rate_candidates, key=rate_candidates.get)
+                if rate_pick == actual_order[1]:
+                    app_2nd_rate_correct += 1
+
+                remaining_sorted = sorted(remaining, key=lambda c: remaining[c], reverse=True)
+                rate_sorted = sorted(rate_candidates, key=lambda c: rate_candidates[c], reverse=True)
+                win_rank = {c: i for i, c in enumerate(remaining_sorted)}
+                rate_rank = {c: i for i, c in enumerate(rate_sorted)}
+                combined_pick = min(
+                    rate_candidates,
+                    key=lambda c: win_rank.get(c, 999) + rate_rank.get(c, 999),
+                )
+                if combined_pick == actual_order[1]:
+                    combined_2nd_correct += 1
+
+        # --- 3着予測比較(実際の1着・2着車を固定) ---
+        remaining2 = {c: v for c, v in win_probs.items() if c not in (actual_order[0], actual_order[1])}
+        if remaining2:
+            n_3rd_eval += 1
+            model_pick3 = _model_pick(remaining2, actual_order[1], line_map, pos_map, line_boost)
+            if model_pick3 == actual_order[2]:
+                current_model_3rd_correct_all += 1
+
+            rate_candidates3 = {
+                c: entry_by_car[c].app_3rd_rate
+                for c in remaining2
+                if c in entry_by_car and entry_by_car[c].app_3rd_rate is not None
+            }
+            if rate_candidates3:
+                n_3rd_with_rate += 1
+                if model_pick3 == actual_order[2]:
+                    current_model_3rd_correct_subset += 1
+                rate_pick3 = max(rate_candidates3, key=rate_candidates3.get)
+                if rate_pick3 == actual_order[2]:
+                    app_3rd_rate_correct += 1
+
+    def _pct(n, d):
+        return round(n / d * 100, 2) if d else None
+
+    return {
+        "note": (
+            "選手個人データ(app_2nd_rate等)の充足率と予測力を検証する読み取り専用診断。"
+            "本番ロジック(ev.py)は一切呼び出していない。"
+        ),
+        "データ充足率(全Entry対象)": availability,
+        "2着予測の比較": {
+            "全体評価件数": n_2nd_eval,
+            "現行モデルの的中率%(全体)": _pct(current_model_2nd_correct_all, n_2nd_eval),
+            "app_2nd_rateデータあり件数": n_2nd_with_rate,
+            "現行モデルの的中率%(データありに限定)": _pct(current_model_2nd_correct_subset, n_2nd_with_rate),
+            "app_2nd_rateのみで選んだ場合の的中率%": _pct(app_2nd_rate_correct, n_2nd_with_rate),
+            "win_prob順位×app_2nd_rate順位の単純合成の的中率%": _pct(combined_2nd_correct, n_2nd_with_rate),
+        },
+        "3着予測の比較": {
+            "全体評価件数": n_3rd_eval,
+            "現行モデルの的中率%(全体)": _pct(current_model_3rd_correct_all, n_3rd_eval),
+            "app_3rd_rateデータあり件数": n_3rd_with_rate,
+            "現行モデルの的中率%(データありに限定)": _pct(current_model_3rd_correct_subset, n_3rd_with_rate),
+            "app_3rd_rateのみで選んだ場合の的中率%": _pct(app_3rd_rate_correct, n_3rd_with_rate),
+        },
+        "読み方": (
+            "『app_2nd_rateのみ』または『単純合成』が『現行モデル(データありに限定)』を"
+            "上回っていれば、選手個人の2着率・3着率データを確率計算に組み込む価値がある。"
+            "下回っている、または同程度なら、単純に組み込むだけでは改善しない可能性が高く、"
+            "別の使い方(交互作用・重み付け等)を検討する必要がある。"
+        ),
+    }
