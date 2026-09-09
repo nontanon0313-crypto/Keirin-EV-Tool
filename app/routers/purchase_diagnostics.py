@@ -3202,3 +3202,206 @@ def diagnostics_line_position_matrix(db: Session = Depends(get_db)):
             "(過学習・偶然の影響を受けやすいため)。"
         ),
     }
+
+
+@router.get("/race-score-potential")
+def diagnostics_race_score_potential(db: Session = Depends(get_db)):
+    """
+    課題L対応: 競走得点(race_score)の予測力を検証する読み取り専用診断。
+
+    Entry.race_score はほぼ100%充足しているが、現行の確率モデル(Harville +
+    head_to_bante_boost)は競走得点を直接使っていない(Geminiがblended_win_probに
+    反映している可能性はあるが、明示的な特徴量としては未使用)。
+
+    本診断では以下を測る:
+    1. 競走得点順位だけで1着・2着・3着を当てた場合の的中率
+    2. 現行モデル(1着確率ランキング)との比較
+    3. 実際の1-2-3着間の得点差の分布
+    4. 得点帯ごとの1着率
+
+    本番ロジック(ev.py)は一切呼び出さない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    n_eval = 0
+    score_1st_correct = 0
+    model_1st_correct = 0
+    score_2nd_correct = 0
+    model_2nd_correct = 0
+    score_3rd_correct = 0
+    model_3rd_correct = 0
+
+    # 実際の1-2-3着の得点差
+    diff_1_2 = []
+    diff_1_3 = []
+    diff_2_3 = []
+
+    # 得点帯別1着率
+    band_stats = {}  # band -> {"n": , "wins": }
+
+    def _score_band(s: float) -> str:
+        if s is None:
+            return "欠損"
+        if s < 90:
+            return "90未満"
+        if s < 95:
+            return "90-95"
+        if s < 100:
+            return "95-100"
+        if s < 105:
+            return "100-105"
+        if s < 110:
+            return "105-110"
+        return "110以上"
+
+    skipped_no_score = 0
+    skipped_no_result = 0
+
+    for race in races:
+        entries = race.entries or []
+        if len(entries) < 3:
+            continue
+
+        score_map = {}
+        for e in entries:
+            if e.race_score is not None and e.car_number is not None:
+                score_map[int(e.car_number)] = float(e.race_score)
+
+        if len(score_map) < 3:
+            skipped_no_score += 1
+            continue
+
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped_no_result += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            skipped_no_result += 1
+            continue
+        actual = tuple(canonical[0][:3])
+        if len(actual) < 3 or not all(c in score_map for c in actual):
+            skipped_no_result += 1
+            continue
+
+        # 現行モデルの1着確率
+        win_probs = {}
+        for e in entries:
+            p = e.blended_win_prob
+            if p is None and e.app_win_rate is not None:
+                p = e.app_win_rate / 100.0
+            if p is not None and e.car_number is not None:
+                win_probs[int(e.car_number)] = float(p)
+
+        n_eval += 1
+
+        # 得点順位
+        by_score = sorted(score_map.keys(), key=lambda c: score_map[c], reverse=True)
+        # モデル順位
+        by_model = sorted(win_probs.keys(), key=lambda c: win_probs.get(c, 0), reverse=True) if win_probs else []
+
+        if by_score[0] == actual[0]:
+            score_1st_correct += 1
+        if by_model and by_model[0] == actual[0]:
+            model_1st_correct += 1
+
+        # 2着: 1着を除いた残りで最高得点 / 最高確率
+        remaining_score = [c for c in by_score if c != actual[0]]
+        remaining_model = [c for c in by_model if c != actual[0]]
+        if remaining_score and remaining_score[0] == actual[1]:
+            score_2nd_correct += 1
+        if remaining_model and remaining_model[0] == actual[1]:
+            model_2nd_correct += 1
+
+        # 3着
+        remaining2_score = [c for c in remaining_score if c != actual[1]]
+        remaining2_model = [c for c in remaining_model if c != actual[1]]
+        if remaining2_score and remaining2_score[0] == actual[2]:
+            score_3rd_correct += 1
+        if remaining2_model and remaining2_model[0] == actual[2]:
+            model_3rd_correct += 1
+
+        # 得点差
+        s1 = score_map[actual[0]]
+        s2 = score_map[actual[1]]
+        s3 = score_map[actual[2]]
+        diff_1_2.append(s1 - s2)
+        diff_1_3.append(s1 - s3)
+        diff_2_3.append(s2 - s3)
+
+        # 得点帯別1着率（全出走車）
+        for car, sc in score_map.items():
+            band = _score_band(sc)
+            st = band_stats.setdefault(band, {"n": 0, "wins": 0})
+            st["n"] += 1
+            if car == actual[0]:
+                st["wins"] += 1
+
+    def _avg(xs):
+        return round(sum(xs) / len(xs), 2) if xs else None
+
+    def _median(xs):
+        if not xs:
+            return None
+        s = sorted(xs)
+        m = len(s) // 2
+        return round(s[m], 2) if len(s) % 2 else round((s[m - 1] + s[m]) / 2, 2)
+
+    band_rows = []
+    for band in ["90未満", "90-95", "95-100", "100-105", "105-110", "110以上", "欠損"]:
+        st = band_stats.get(band)
+        if not st:
+            continue
+        band_rows.append({
+            "得点帯": band,
+            "出走延べ回数": st["n"],
+            "1着回数": st["wins"],
+            "1着率%": round(st["wins"] / st["n"] * 100, 2) if st["n"] else None,
+        })
+
+    return {
+        "note": (
+            "競走得点だけで着順を予測した場合と、現行モデル(blended_win_prob順位)を比較する"
+            "読み取り専用診断。本番ロジックは変更していない。"
+        ),
+        "評価対象レース数": n_eval,
+        "除外(得点データ不足)": skipped_no_score,
+        "除外(結果パース不可)": skipped_no_result,
+        "1着的中率比較": {
+            "競走得点順位のみ%": round(score_1st_correct / n_eval * 100, 2) if n_eval else None,
+            "現行モデル%": round(model_1st_correct / n_eval * 100, 2) if n_eval else None,
+            "件数": n_eval,
+        },
+        "2着的中率比較(実際の1着を固定)": {
+            "競走得点順位のみ%": round(score_2nd_correct / n_eval * 100, 2) if n_eval else None,
+            "現行モデル%": round(model_2nd_correct / n_eval * 100, 2) if n_eval else None,
+            "件数": n_eval,
+        },
+        "3着的中率比較(実際の1-2着を固定)": {
+            "競走得点順位のみ%": round(score_3rd_correct / n_eval * 100, 2) if n_eval else None,
+            "現行モデル%": round(model_3rd_correct / n_eval * 100, 2) if n_eval else None,
+            "件数": n_eval,
+        },
+        "実際の1-2-3着の得点差": {
+            "1着-2着_平均": _avg(diff_1_2),
+            "1着-2着_中央値": _median(diff_1_2),
+            "1着-3着_平均": _avg(diff_1_3),
+            "1着-3着_中央値": _median(diff_1_3),
+            "2着-3着_平均": _avg(diff_2_3),
+            "2着-3着_中央値": _median(diff_2_3),
+        },
+        "得点帯別1着率": band_rows,
+        "読み方": (
+            "『競走得点順位のみ』が『現行モデル』を上回る、または大きく近づいていれば、"
+            "競走得点を明示的に特徴量として取り込む価値が高い。"
+            "下回っている場合は、Geminiが既に競走得点をblended_win_probに織り込んでいるか、"
+            "得点以外の情報(ライン・脚質等)の寄与が大きいことを示す。"
+            "得点帯別1着率が単調に上がっていれば、得点は有効なシグナルである。"
+        ),
+    }
