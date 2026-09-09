@@ -870,18 +870,75 @@ function drawRevenueEquity(data) {
   const maxY = Math.max(0, ...vals);
   const rangeY = Math.max(maxY - minY, 1);
 
-  const pad = 30;
-  const x = v => pad + (Number(v || 0) / maxX) * (w - pad * 2);
-  const y = v => h - pad - ((Number(v || 0) - minY) / rangeY) * (h - pad * 2);
+  // 余白を増やして軸ラベルを描けるようにする
+  const padL = 58;
+  const padR = 16;
+  const padT = 18;
+  const padB = 36;
+  const x = v => padL + (Number(v || 0) / maxX) * (w - padL - padR);
+  const y = v => h - padB - ((Number(v || 0) - minY) / rangeY) * (h - padT - padB);
 
+  // 短縮表記（万円単位など）
+  function fmtYenShort(v) {
+    const n = Number(v) || 0;
+    const abs = Math.abs(n);
+    if (abs >= 100000000) return (n / 100000000).toFixed(1).replace(/\.0$/, "") + "億";
+    if (abs >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, "") + "万";
+    return Math.round(n).toLocaleString();
+  }
+
+  // 背景グリッド + Y軸目盛り
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  const yTicks = 5;
+  for (let i = 0; i <= yTicks; i++) {
+    const val = minY + (rangeY * i) / yTicks;
+    const py = y(val);
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.18)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, py);
+    ctx.lineTo(w - padR, py);
+    ctx.stroke();
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText(fmtYenShort(val), padL - 6, py);
+  }
+
+  // X軸目盛り
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  const xTicks = 4;
+  for (let i = 0; i <= xTicks; i++) {
+    const val = (maxX * i) / xTicks;
+    const px = x(val);
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.12)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, padT);
+    ctx.lineTo(px, h - padB);
+    ctx.stroke();
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText(fmtYenShort(val), px, h - padB + 6);
+  }
+
+  // ゼロ損益ライン（強調）
+  ctx.strokeStyle = "rgba(248, 250, 252, 0.45)";
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([4, 3]);
   ctx.beginPath();
-  ctx.moveTo(pad, y(0));
-  ctx.lineTo(w - pad, y(0));
+  ctx.moveTo(padL, y(0));
+  ctx.lineTo(w - padR, y(0));
   ctx.stroke();
+  ctx.setLineDash([]);
 
-  function drawLine(points) {
+  function drawLine(points, color, width) {
     if (points.length < 2) return;
     ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
     points.forEach((p, i) => {
       const px = x(p.cum_stake);
       const py = y(p.cum_pnl);
@@ -891,8 +948,46 @@ function drawRevenueEquity(data) {
     ctx.stroke();
   }
 
-  drawLine(planned);
-  drawLine(actual);
+  // 灰=想定、青=実績（HTMLの注記どおり）
+  drawLine(planned, "#94a3b8", 1.8);
+  drawLine(actual, "#38bdf8", 2.6);
+
+  // 最終点に小さなドット
+  function drawEndDot(points, color) {
+    if (!points.length) return;
+    const p = points[points.length - 1];
+    ctx.beginPath();
+    ctx.fillStyle = color;
+    ctx.arc(x(p.cum_stake), y(p.cum_pnl), 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  drawEndDot(planned, "#94a3b8");
+  drawEndDot(actual, "#38bdf8");
+
+  // 凡例
+  const legendY = 12;
+  ctx.font = "12px sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  // 想定
+  ctx.strokeStyle = "#94a3b8";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(padL, legendY);
+  ctx.lineTo(padL + 18, legendY);
+  ctx.stroke();
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText("想定", padL + 22, legendY);
+  // 実績
+  const leg2x = padL + 70;
+  ctx.strokeStyle = "#38bdf8";
+  ctx.lineWidth = 2.6;
+  ctx.beginPath();
+  ctx.moveTo(leg2x, legendY);
+  ctx.lineTo(leg2x + 18, legendY);
+  ctx.stroke();
+  ctx.fillStyle = "#38bdf8";
+  ctx.fillText("実績", leg2x + 22, legendY);
 
   if (summary) {
     summary.textContent =
@@ -2207,6 +2302,58 @@ document.getElementById("loadLineBoostSweepBtn").addEventListener("click", async
     html += renderTable("候補別・1着2着が別ラインの場合", data["line_boost候補別_1着2着が別ラインの場合"]);
     html += renderTable("候補別・1着が先頭→2着が番手だった場合", data["line_boost候補別_1着が先頭→2着が番手だった場合"]);
     html += renderTable("候補別・1着が先頭→2着が番手以外だった場合", data["line_boost候補別_1着が先頭→2着が番手以外だった場合"]);
+
+    html += `<p class="note" style="margin-top:10px;">${data["読み方"] || ""}</p>`;
+
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
+document.getElementById("loadTrifectaStructureBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "3連単・条件付き着順構造を計算中（全レース×全組み合わせのため時間がかかります）...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/trifecta-order-structure"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    const num = (v) => (v == null || v === undefined) ? "-" : v;
+
+    let html = `<p><strong>3連単・条件付き着順構造（課題J・読み取り専用・全期間対象）</strong></p>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+    html += `<p class="note">評価対象レース数: ${num(data["評価対象レース数"])}（除外: 勝率無し${num(data["除外(勝率データ無し)"])}件・結果パース不可${num(data["除外(結果パース不可)"])}件・9車超${num(data["除外(出走9車超のためTop-k計算スキップ)"])}件）</p>`;
+
+    const b1 = data["1着予測精度"] || {};
+    html += `<p style="margin-top:10px;"><strong>1着予測精度</strong>: ${num(b1["的中数"])}/${num(b1["件数"])}件（${b1["的中率%"]}%）</p>`;
+
+    const c2 = data["1着固定時の2着的中精度(条件付き)"] || {};
+    html += `<p style="margin-top:10px;"><strong>1着固定時の2着的中精度（条件付き）</strong></p>`;
+    html += `<table><tr><th>件数</th><th>最有力候補の的中数</th><th>的中率</th><th>実2着車への平均割当確率</th></tr>`;
+    html += `<tr><td>${num(c2["件数"])}</td><td>${num(c2["最有力候補が2着的中した数"])}</td><td>${c2["最有力候補の的中率%"]}%</td><td>${c2["実際の2着車に割り当てた平均条件付き確率%"]}%</td></tr></table>`;
+
+    const c3 = data["1着2着固定時の3着的中精度(条件付き)"] || {};
+    html += `<p style="margin-top:10px;"><strong>1着2着固定時の3着的中精度（条件付き）</strong></p>`;
+    html += `<table><tr><th>件数</th><th>最有力候補の的中数</th><th>的中率</th><th>実3着車への平均割当確率</th></tr>`;
+    html += `<tr><td>${num(c3["件数"])}</td><td>${num(c3["最有力候補が3着的中した数"])}</td><td>${c3["最有力候補の的中率%"]}%</td><td>${c3["実際の3着車に割り当てた平均条件付き確率%"]}%</td></tr></table>`;
+
+    const renderTopk = (title, rows) => {
+      let t = `<p style="margin-top:10px;"><strong>${title}</strong></p>`;
+      t += `<table><tr><th>Top-k</th><th>包含件数</th><th>包含率</th></tr>`;
+      for (const r of rows || []) {
+        t += `<tr><td>${r["Top-k"]}</td><td>${num(r["包含件数"])}</td><td>${r["包含率%"] != null ? r["包含率%"] + "%" : "-"}</td></tr>`;
+      }
+      t += `</table>`;
+      return t;
+    };
+    html += renderTopk("Top-k的中組み合わせ包含率・全体", data["Top-k的中組み合わせ包含率_全体"]);
+    html += renderTopk("Top-k的中組み合わせ包含率・1着予測が的中したレース", data["Top-k的中組み合わせ包含率_1着予測が的中したレース"]);
+    html += renderTopk("Top-k的中組み合わせ包含率・1着予測が外れたレース", data["Top-k的中組み合わせ包含率_1着予測が外れたレース"]);
 
     html += `<p class="note" style="margin-top:10px;">${data["読み方"] || ""}</p>`;
 

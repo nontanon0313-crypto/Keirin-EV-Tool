@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+import itertools
 from collections import defaultdict
 from datetime import datetime
 from collections import Counter
@@ -2500,5 +2501,212 @@ def diagnostics_line_boost_sweep(db: Session = Depends(get_db)):
             "line_boost値があれば、それが実績に合った値。"
             "『先頭→番手』と『先頭→番手以外』で改善幅が大きく違う場合、"
             "同ラインの中でも並び順(先頭/番手/3番手)を区別して補正すべきという根拠になる。"
+        ),
+    }
+
+
+@router.get("/trifecta-order-structure")
+def diagnostics_trifecta_order_structure(
+    db: Session = Depends(get_db),
+    line_boost: float = Query(1.2, description="検証に使うline_boost値(既定は本番値1.2)"),
+):
+    """
+    課題J(3連単の条件付き着順構造)に対応する読み取り専用診断。
+
+    現行モデルは「1着確率」しか直接予測しておらず、2着・3着はHarville式で
+    機械的に導出しているだけ。この診断では過去の全確定レースについて、
+
+    1. 1着予測(勝率最大の車)が実際に当たったか
+    2. 実際の1着車を固定した条件で、2着候補の予測順位・確率が実際とどれだけ合うか
+       (=1着→2着の条件付き精度)
+    3. 実際の1着・2着車を固定した条件で、3着候補の予測がどれだけ合うか
+       (=1着2着→3着の条件付き精度)
+    4. 全3連単組み合わせ(車番の並び全通り)を確率順に並べたとき、
+       実際の的中組み合わせが上位何位に入っていたか(Top-1/3/5/10/20/30包含率)
+    5. 「1着予測が当たったレース」と「外れたレース」で、Top-k包含率が
+       どれだけ違うか(=1着の誤りと2・3着展開の誤りを分離して評価)
+
+    をまとめて計算する。本番ロジック(ev.py)は一切呼び出さない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    TOPK = [1, 3, 5, 10, 20, 30]
+
+    n_races = 0
+    n_1st_correct = 0
+
+    # 1着→2着の条件付き精度
+    cond2_n = 0
+    cond2_top_correct = 0
+    cond2_prob_sum = 0.0  # 実際の2着車に割り当てられた条件付き確率の合計(平均を出す)
+
+    # 1着2着→3着の条件付き精度
+    cond3_n = 0
+    cond3_top_correct = 0
+    cond3_prob_sum = 0.0
+
+    # Top-k包含率(全体、1着的中時、1着不的中時で分ける)
+    def _new_topk():
+        return {k: 0 for k in TOPK}
+
+    topk_hits_all = _new_topk()
+    topk_hits_1st_correct = _new_topk()
+    topk_hits_1st_wrong = _new_topk()
+    n_1st_correct_evaluated = 0
+    n_1st_wrong_evaluated = 0
+
+    skipped_no_win_probs = 0
+    skipped_no_result = 0
+    skipped_too_many_entries = 0
+
+    MAX_ENTRIES_FOR_FULL_RANK = 9  # 9車立てまでなら全順列(504通り)を計算
+
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs or len(win_probs) < 3:
+            skipped_no_win_probs += 1
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped_no_result += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            skipped_no_result += 1
+            continue
+        actual_order = tuple(canonical[0][:3])
+        if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+            skipped_no_result += 1
+            continue
+
+        line_map, _ = calc.line_map_from_race(race)
+        cars = list(win_probs.keys())
+        n_races += 1
+
+        # 1. 1着予測
+        predicted_1st = max(win_probs, key=win_probs.get)
+        first_correct = predicted_1st == actual_order[0]
+        if first_correct:
+            n_1st_correct += 1
+
+        # 2. 1着→2着の条件付き精度(実際の1着車を固定)
+        remaining_after_1st = {c: v for c, v in win_probs.items() if c != actual_order[0]}
+        if remaining_after_1st:
+            if line_map and line_boost != 1.0:
+                boosted = {
+                    c: (v * line_boost if line_map.get(c) == line_map.get(actual_order[0]) else v)
+                    for c, v in remaining_after_1st.items()
+                }
+            else:
+                boosted = remaining_after_1st
+            denom2 = sum(boosted.values())
+            if denom2 > 1e-9:
+                cond2_n += 1
+                predicted_2nd = max(boosted, key=boosted.get)
+                if predicted_2nd == actual_order[1]:
+                    cond2_top_correct += 1
+                cond2_prob_sum += boosted.get(actual_order[1], 0.0) / denom2
+
+        # 3. 1着2着→3着の条件付き精度(実際の1着・2着車を固定)
+        remaining_after_2nd = {c: v for c, v in win_probs.items() if c not in (actual_order[0], actual_order[1])}
+        if remaining_after_2nd:
+            if line_map and line_boost != 1.0:
+                boosted3 = {
+                    c: (v * line_boost if line_map.get(c) == line_map.get(actual_order[1]) else v)
+                    for c, v in remaining_after_2nd.items()
+                }
+            else:
+                boosted3 = remaining_after_2nd
+            denom3 = sum(boosted3.values())
+            if denom3 > 1e-9:
+                cond3_n += 1
+                predicted_3rd = max(boosted3, key=boosted3.get)
+                if predicted_3rd == actual_order[2]:
+                    cond3_top_correct += 1
+                cond3_prob_sum += boosted3.get(actual_order[2], 0.0) / denom3
+
+        # 4. Top-k包含率(全組み合わせを確率順に並べる)
+        if len(cars) > MAX_ENTRIES_FOR_FULL_RANK:
+            skipped_too_many_entries += 1
+            continue
+        scored = []
+        for perm in itertools.permutations(cars, 3):
+            p = calc.harville_prob(win_probs, perm, line_map, line_boost)
+            scored.append((p, perm))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        rank = None
+        for idx, (_, perm) in enumerate(scored):
+            if perm == actual_order:
+                rank = idx + 1
+                break
+        if rank is not None:
+            for k in TOPK:
+                if rank <= k:
+                    topk_hits_all[k] += 1
+            if first_correct:
+                n_1st_correct_evaluated += 1
+                for k in TOPK:
+                    if rank <= k:
+                        topk_hits_1st_correct[k] += 1
+            else:
+                n_1st_wrong_evaluated += 1
+                for k in TOPK:
+                    if rank <= k:
+                        topk_hits_1st_wrong[k] += 1
+
+    def _topk_table(hits: dict, n: int) -> List[dict]:
+        return [
+            {
+                "Top-k": k,
+                "包含件数": hits[k],
+                "包含率%": round(hits[k] / n * 100, 2) if n else None,
+            }
+            for k in TOPK
+        ]
+
+    return {
+        "note": (
+            "全期間・確定済みレースを対象にした読み取り専用診断(課題J対応)。"
+            "本番ロジック(ev.py)は一切呼び出していない。line_boostは"
+            f"クエリパラメータで変更可能(既定{line_boost}=本番値)。"
+        ),
+        "評価対象レース数": n_races,
+        "除外(勝率データ無し)": skipped_no_win_probs,
+        "除外(結果パース不可)": skipped_no_result,
+        "除外(出走9車超のためTop-k計算スキップ)": skipped_too_many_entries,
+        "1着予測精度": {
+            "件数": n_races,
+            "的中数": n_1st_correct,
+            "的中率%": round(n_1st_correct / n_races * 100, 2) if n_races else None,
+        },
+        "1着固定時の2着的中精度(条件付き)": {
+            "件数": cond2_n,
+            "最有力候補が2着的中した数": cond2_top_correct,
+            "最有力候補の的中率%": round(cond2_top_correct / cond2_n * 100, 2) if cond2_n else None,
+            "実際の2着車に割り当てた平均条件付き確率%": round(cond2_prob_sum / cond2_n * 100, 2) if cond2_n else None,
+        },
+        "1着2着固定時の3着的中精度(条件付き)": {
+            "件数": cond3_n,
+            "最有力候補が3着的中した数": cond3_top_correct,
+            "最有力候補の的中率%": round(cond3_top_correct / cond3_n * 100, 2) if cond3_n else None,
+            "実際の3着車に割り当てた平均条件付き確率%": round(cond3_prob_sum / cond3_n * 100, 2) if cond3_n else None,
+        },
+        "Top-k的中組み合わせ包含率_全体": _topk_table(topk_hits_all, n_1st_correct_evaluated + n_1st_wrong_evaluated),
+        "Top-k的中組み合わせ包含率_1着予測が的中したレース": _topk_table(topk_hits_1st_correct, n_1st_correct_evaluated),
+        "Top-k的中組み合わせ包含率_1着予測が外れたレース": _topk_table(topk_hits_1st_wrong, n_1st_wrong_evaluated),
+        "読み方": (
+            "『1着固定時の2着的中精度』が低い場合、2着・3着の展開予測(Harville式+"
+            "line_boost)そのものに改善余地がある。"
+            "『1着予測が的中したレースのTop-k』と『外れたレースのTop-k』の差が大きい場合、"
+            "3連単全体の誤差の大部分は1着予測の誤りに起因しており、2・3着の展開予測を"
+            "いくら改善しても効果が限定的である可能性が高い。逆に差が小さい場合は、"
+            "1着が当たっても外れても2・3着展開の誤差が支配的であり、"
+            "展開予測(line_boost・脚質・競走得点等)の改善効果が期待できる。"
         ),
     }
