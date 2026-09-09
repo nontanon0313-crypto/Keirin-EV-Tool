@@ -35,9 +35,9 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
 
 
 def _line_map_from_race(race) -> tuple:
-    """race.lines_data から line_map と line_boost を返す。"""
+    """race.lines_data から line_map と line_boost(先頭→番手以外の同ライン継続用)を返す。"""
     line_map = None
-    line_boost = 1.2
+    line_boost = calc.OTHER_SAME_LINE_BOOST
     if race and race.lines_data:
         line_map = {}
         for idx, line in enumerate(race.lines_data):
@@ -50,12 +50,25 @@ def _line_map_from_race(race) -> tuple:
             line_map = None
     return line_map, line_boost
 
-def _estimate_prob(win_probs: dict, bet_type: str, cars: tuple, line_map: dict = None, line_boost: float = 1.0) -> float:
+def _line_position_map_from_race(race):
+    """race.lines_data から {車番: ライン内並び順(0=先頭,1=番手,...)} を返す。"""
+    return calc.line_position_map(race)
+
+def _estimate_prob(
+    win_probs: dict,
+    bet_type: str,
+    cars: tuple,
+    line_map: dict = None,
+    line_boost: float = 1.0,
+    pos_map: dict = None,
+    head_to_bante_boost: float = None,
+) -> float:
     """券種ごとに正しい的中確率の計算方法を呼び分ける。"""
     if bet_type == "ワイド":
-        return calc.wide_prob(win_probs, cars[0], cars[1], line_map, line_boost)
+        return calc.wide_prob(win_probs, cars[0], cars[1], line_map, line_boost, pos_map, head_to_bante_boost)
     ordered = bet_type in calc.ORDERED_BET_TYPES
-    return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost)
+    return calc.combination_prob(win_probs, cars, ordered, line_map, line_boost, pos_map, head_to_bante_boost)
+
 
 
 
@@ -797,12 +810,33 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     BET_TYPE_SUSPENDED = {"ワイド", "2車単"}
     BET_TYPE_MIN_EV_OVERRIDE = {"2車複": 50.0, "3連複": 50.0}  # ev_pct>=50 は EV150%以上に相当
 
-    # ライン構成を買い目確率に反映
+    # ライン構成を買い目確率に反映(2026-09-08: 先頭→番手専用boostに対応)
     line_map, line_boost = _line_map_from_race(race)
+    pos_map = _line_position_map_from_race(race)
+
+    # boost適用により確率の合計が1を超える(過大カウントになる)ため、
+    # 券種の並び方(arity=2 or 3)ごとに正規化係数を1回だけ計算しておく。
+    car_numbers_all = sorted(win_probs.keys())
+    norm_mass = {}
+    for arity in (2, 3):
+        if len(car_numbers_all) >= arity:
+            mass = calc.total_ordered_mass(
+                win_probs, car_numbers_all, arity, line_map=line_map, line_boost=line_boost,
+                pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
+            )
+            norm_mass[arity] = mass if mass > 1e-9 else 1.0
+        else:
+            norm_mass[arity] = 1.0
 
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
-        est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
+        est_prob_raw = _estimate_prob(
+            win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost,
+            pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
+        )
+        arity = calc.BET_TYPE_ARITY.get(o.bet_type)
+        if arity in norm_mass:
+            est_prob_raw = est_prob_raw / norm_mass[arity]
         if getattr(req, "apply_calibration", True):
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(
                 est_prob_raw, calibration_factors, bet_type=o.bet_type
@@ -1014,7 +1048,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     car_numbers = sorted({e.car_number for e in entries})
     outcomes = list(itertools.permutations(car_numbers, 3)) if len(car_numbers) >= 3 else []
     # 各結果(起こりうる着順)の確率。3連単の的中確率と全く同じ計算(Harville式)。
-    outcome_probs = {o: _estimate_prob(win_probs, "3連単", o, line_map=line_map, line_boost=line_boost) for o in outcomes} if outcomes else {}
+    outcome_probs = {
+        o: _estimate_prob(
+            win_probs, "3連単", o, line_map=line_map, line_boost=line_boost,
+            pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
+        )
+        for o in outcomes
+    } if outcomes else {}
 
     # 投票時オッズは締切までにズレる(券種によってズレ幅が大きく異なり、実測でワイドは
     # 3連単の4倍近くズレることが分かっている)。ガミり判定はこのズレを見込んで、

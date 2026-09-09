@@ -12,7 +12,7 @@
 import itertools
 import random
 from math import lgamma, log, exp
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 # 投票プラン(賭け金サイジング)・破産確率シミュレーションで使う固定の基準額。
 # 実際の証拠金残高(BankrollState)とは完全に切り離す。証拠金の増減は
@@ -53,6 +53,8 @@ def harville_prob(
     order: Tuple[int, ...],
     line_map: Dict[int, int] = None,
     line_boost: float = 1.0,
+    pos_map: Dict[int, int] = None,
+    head_to_bante_boost: float = None,
 ) -> float:
     """
     Harville式で「orderで指定した順に着順が決まる確率」を計算する。
@@ -62,31 +64,53 @@ def harville_prob(
     line_map: {車番: ライン番号} を渡すと、直前に確定した車と同ラインの車の
     条件付き確率をline_boost倍してから正規化する(同ラインが連続して上位に来やすい
     競輪特有の力学を反映する簡易補正)。line_boost=1.0(初期値)なら補正なし。
-    この倍率は実績データに基づく検証待ちの暫定パラメータであり、確定的な数値ではない。
+
+    2026-09-08: 全期間データの遡及検証(line-boost-sweep-v2)により、
+    「同ライン」全体では効果が薄く(倍率を上げても対数尤度がほぼ変化しない)、
+    実際に強い力学があるのは「先頭選手が確定した直後に、同ラインの番手選手が
+    続く」場合だけと判明した。pos_map({車番: ライン内並び順。0=先頭,1=番手,...})と
+    head_to_bante_boostを渡すと、先頭→番手のケースのみhead_to_bante_boostを、
+    それ以外の同ライン継続はline_boostを使う2パラメータモデルになる。
+    pos_map/head_to_bante_boostを渡さない場合は従来通りの単一line_boost挙動
+    (後方互換のため維持)。
 
     P(1着=a) = p_a
-    P(2着=b | 1着=a) = p_b / (1 - p_a)  ※同ラインならp_bをline_boost倍してから正規化
+    P(2着=b | 1着=a) = p_b / (1 - p_a)  ※同ラインならp_bを補正してから正規化
     P(3着=c | 1着=a,2着=b) = 同様
     """
+    two_param_mode = pos_map is not None and head_to_bante_boost is not None
     remaining_probs = dict(win_probs)
     prob = 1.0
     prev_car = None
     for car in order:
         p = remaining_probs.get(car, 0.0)
-        if line_map and line_boost != 1.0 and prev_car is not None:
-            same_line = line_map.get(car) is not None and line_map.get(car) == line_map.get(prev_car)
-            if same_line:
-                # 残っている車の中で、同ラインの車だけをブーストしてから正規化する
-                boosted = {
-                    c: (v * line_boost if line_map.get(c) == line_map.get(prev_car) else v)
-                    for c, v in remaining_probs.items()
-                }
-                denom = sum(boosted.values())
-                p_adj = boosted.get(car, 0.0)
-                cond_p = (p_adj / denom) if denom > 1e-9 else 0.0
-            else:
-                denom = sum(remaining_probs.values())
-                cond_p = (p / denom) if denom > 1e-9 else 0.0
+        same_line = (
+            line_map is not None
+            and prev_car is not None
+            and line_map.get(car) is not None
+            and line_map.get(car) == line_map.get(prev_car)
+        )
+        if two_param_mode and same_line:
+            boosted = {}
+            for c, v in remaining_probs.items():
+                if line_map.get(c) == line_map.get(prev_car):
+                    if pos_map.get(prev_car) == 0 and pos_map.get(c) == 1:
+                        boosted[c] = v * head_to_bante_boost
+                    else:
+                        boosted[c] = v * line_boost
+                else:
+                    boosted[c] = v
+            denom = sum(boosted.values())
+            cond_p = (boosted.get(car, 0.0) / denom) if denom > 1e-9 else 0.0
+        elif line_map and line_boost != 1.0 and same_line:
+            # 残っている車の中で、同ラインの車だけをブーストしてから正規化する
+            boosted = {
+                c: (v * line_boost if line_map.get(c) == line_map.get(prev_car) else v)
+                for c, v in remaining_probs.items()
+            }
+            denom = sum(boosted.values())
+            p_adj = boosted.get(car, 0.0)
+            cond_p = (p_adj / denom) if denom > 1e-9 else 0.0
         else:
             denom = sum(remaining_probs.values())
             cond_p = (p / denom) if denom > 1e-9 else 0.0
@@ -99,12 +123,36 @@ def harville_prob(
     return max(prob, 0.0)
 
 
+def total_ordered_mass(
+    win_probs: Dict[int, float],
+    car_numbers,
+    arity: int,
+    line_map: Dict[int, int] = None,
+    line_boost: float = 1.0,
+    pos_map: Dict[int, int] = None,
+    head_to_bante_boost: float = None,
+) -> float:
+    """
+    car_numbersからarity個を選ぶ「順序ありの全パターン」について、harville_probの
+    合計を返す。line_boost/head_to_bante_boostでブーストを掛けると、本来1.0になる
+    はずの合計が崩れる(過大カウント)ため、個々の確率をこの合計で割って正規化する
+    のに使う(2026-09-08発見: head_to_bante_boost=20では合計が約1.53まで膨らむ
+    ことを確認したため追加)。
+    """
+    total = 0.0
+    for perm in itertools.permutations(car_numbers, arity):
+        total += harville_prob(win_probs, perm, line_map, line_boost, pos_map, head_to_bante_boost)
+    return total
+
+
 def combination_prob(
     win_probs: Dict[int, float],
     cars: Tuple[int, ...],
     ordered: bool,
     line_map: Dict[int, int] = None,
     line_boost: float = 1.0,
+    pos_map: Dict[int, int] = None,
+    head_to_bante_boost: float = None,
 ) -> float:
     """
     指定した車番の組み合わせが「その通りに」または「着順不問(複)で」決まる確率。
@@ -112,11 +160,11 @@ def combination_prob(
     ordered=False: 3連複/2車複/ワイド等、順不同で合算
     """
     if ordered:
-        return harville_prob(win_probs, cars, line_map, line_boost)
+        return harville_prob(win_probs, cars, line_map, line_boost, pos_map, head_to_bante_boost)
     else:
         total = 0.0
         for perm in itertools.permutations(cars):
-            total += harville_prob(win_probs, perm, line_map, line_boost)
+            total += harville_prob(win_probs, perm, line_map, line_boost, pos_map, head_to_bante_boost)
         return total
 
 
@@ -187,7 +235,13 @@ def judge_purchase_result(bet_type: str, combination: str, actual_result) -> boo
 
 
 def wide_prob(
-    win_probs: Dict[int, float], car_a: int, car_b: int, line_map: Dict[int, int] = None, line_boost: float = 1.0
+    win_probs: Dict[int, float],
+    car_a: int,
+    car_b: int,
+    line_map: Dict[int, int] = None,
+    line_boost: float = 1.0,
+    pos_map: Dict[int, int] = None,
+    head_to_bante_boost: float = None,
 ) -> float:
     """
     ワイド: 指定した2車が両方とも3着以内に入る確率。
@@ -195,7 +249,10 @@ def wide_prob(
     """
     others = [c for c in win_probs if c not in (car_a, car_b)]
     return sum(
-        combination_prob(win_probs, (car_a, car_b, o), ordered=False, line_map=line_map, line_boost=line_boost)
+        combination_prob(
+            win_probs, (car_a, car_b, o), ordered=False, line_map=line_map, line_boost=line_boost,
+            pos_map=pos_map, head_to_bante_boost=head_to_bante_boost,
+        )
         for o in others
     )
 
@@ -605,10 +662,20 @@ def build_win_probs_from_entries(entries: list) -> dict:
     return probs
 
 
+# 2026-09-08: line-boost-sweep-v2の遡及検証結果に基づく係数(のん承認)。
+# 「同ライン」全体では効果が薄く(1.0倍からほぼ動かない)、
+# 実際に強いのは「先頭選手が確定した直後に、同ラインの番手選手が続く」場合だけと判明。
+# 対数尤度は80〜120倍あたりでほぼ頭打ちになるが、該当サンプルが246レース中59件と
+# 少なく、極端な値は過学習の懸念があるため、頭打ち直前で改善の大部分(約85%)を
+# 捉えられる20倍を採用する(データが貯まり次第、再検証して見直す)。
+HEAD_TO_BANTE_BOOST = 20.0
+OTHER_SAME_LINE_BOOST = 1.0
+
+
 def line_map_from_race(race) -> tuple:
     """app/routers/ev.pyの_line_map_from_raceと同じロジック(遡及検証用に複製)。"""
     line_map = None
-    line_boost = 1.2
+    line_boost = OTHER_SAME_LINE_BOOST
     if race and race.lines_data:
         line_map = {}
         for idx, line in enumerate(race.lines_data):
@@ -622,12 +689,34 @@ def line_map_from_race(race) -> tuple:
     return line_map, line_boost
 
 
-def estimate_prob_for_bet(win_probs: dict, bet_type: str, cars: tuple, line_map: dict = None, line_boost: float = 1.0) -> float:
+def line_position_map(race) -> Optional[Dict[int, int]]:
+    """{車番: ライン内の並び順(0=先頭,1=番手,2=3番手...)} を返す。"""
+    if not race or not race.lines_data:
+        return None
+    pos_map: Dict[int, int] = {}
+    for line in race.lines_data:
+        for pos, car in enumerate(line):
+            try:
+                pos_map[int(car)] = pos
+            except (TypeError, ValueError):
+                pass
+    return pos_map or None
+
+
+def estimate_prob_for_bet(
+    win_probs: dict,
+    bet_type: str,
+    cars: tuple,
+    line_map: dict = None,
+    line_boost: float = 1.0,
+    pos_map: dict = None,
+    head_to_bante_boost: float = None,
+) -> float:
     """app/routers/ev.pyの_estimate_probと同じロジック(遡及検証用に複製)。"""
     if bet_type == "ワイド":
-        return wide_prob(win_probs, cars[0], cars[1], line_map, line_boost)
+        return wide_prob(win_probs, cars[0], cars[1], line_map, line_boost, pos_map, head_to_bante_boost)
     ordered = bet_type in ORDERED_BET_TYPES
-    return combination_prob(win_probs, cars, ordered, line_map, line_boost)
+    return combination_prob(win_probs, cars, ordered, line_map, line_boost, pos_map, head_to_bante_boost)
 
 
 def apply_calibration_to_prob(est_prob: float, calibration_factors: dict, bet_type: str = None) -> float:

@@ -24,20 +24,27 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-08(Claude) — 課題J(3連単条件付き着順構造)の診断エンドポイント追加
+最終更新: 2026-09-08(Claude) — 先頭→番手専用boostモデルを本番ロジックに実装完了
 
-### 直近の修正
-- ワイド・2車単を全期間実績(0/28, 0/23、EV150%以上でも0的中)に基づき丸ごと見送りに変更(のん承認2026-09-08)
-- 2車複・3連複はEV閾値を150%以上に引き上げ(105〜150%はデッドゾーンで的中無し)
-- `/purchases/diagnostics/line-boost-sweep`: line_boost(現在1.2・未検証)の候補値スイープを追加
-- `/purchases/diagnostics/trifecta-order-structure`: 課題Jの中核(1着→2着/1-2着→3着の条件付き精度、Top-k的中包含率、1着的中/不的中別の分離)を追加
-- `/purchases/diagnostics/high-odds-correction-check`: purchase_set_factorとhigh_odds_residualの二重補正チェック・券種別EV帯別ROIを追加
+### 直近の修正(3連単精度向上・課題J一連の実装)
+- line-boost-sweep/v2の遡及検証結果(のん承認)に基づき、Harville式の展開予測を
+  「先頭→番手」専用boost(20倍)と「それ以外の同ライン継続」(1.0倍=補正なし)の
+  2パラメータモデルに変更(`app/ev_calculator.py`: harville_prob等を拡張、
+  後方互換のため引数省略時は従来の単一line_boost挙動を維持)
+- 実装の過程で発見: boost適用により全順列の確率合計が1を超える(過大カウント)
+  問題を確認(boost=20では合計が約1.53倍に膨張)。`total_ordered_mass`で
+  正規化係数を計算し、本番プラン生成・キャリブレーション係数計算・遡及診断の
+  全箇所で確率を正規化するよう修正
+- ワイド・2車単を全期間実績に基づき丸ごと見送りに変更、2車複・3連複はEV150%以上に限定(のん承認2026-09-08)
+- `/purchases/diagnostics/`配下に高オッズ二重補正チェック・line-boost-sweep・
+  line-boost-sweep-v2・trifecta-order-structureを追加(いずれも読み取り専用)
 
 ### 残作業
-- line-boost-sweep・trifecta-order-structureの実行結果待ち(のんに依頼中)
-- 結果次第でline_boost値の変更 or ライン内位置(先頭/番手)を考慮した補正の設計要否を判断
+- のんが本番デプロイ後、データを追加投入して検証予定
+- head_to_bante_boost=20は246レース中59件という少サンプルでの暫定値。
+  データが貯まったらline-boost-sweep-v2を再実行し、20が引き続き妥当か確認する
 - 課題K〜Q(選手個人データ・競走得点詳細・脚質×ライン交互作用・特徴量追加効果測定等)は未着手
-- 高オッズ帯の二重補正(purchase_set_factor×high_odds_residual)の統合要否は未着手
+- 高オッズ帯の二重補正(purchase_set_factor×high_odds_residual)の統合要否は未着手(別件として残っている)
 
 
 ---
