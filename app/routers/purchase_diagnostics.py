@@ -2848,3 +2848,62 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
             "(1.0付近が最良なら、先頭→番手以外は補正不要という結論になる)。"
         ),
     }
+
+
+@router.get("/normalization-check")
+def diagnostics_normalization_check(db: Session = Depends(get_db), limit: int = Query(30, ge=1, le=200)):
+    """
+    2026-09-08実装の先頭→番手boost(20倍)・正規化係数(total_ordered_mass)が
+    エラー無く動作しているかを確認する読み取り専用診断。
+    Termux側にはDATABASE_URLが無く生DBスクリプトが動かせないため、
+    サーバー側(DATABASE_URLを持つ)で同じチェックをAPI経由で行えるようにする。
+    本番の投票ロジックは一切変更しない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .order_by(models.Race.id.desc())
+        .limit(limit)
+        .all()
+    )
+
+    checked = 0
+    errors = []
+    mass_samples = []
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs or len(win_probs) < 3:
+            continue
+        try:
+            line_map, line_boost = calc.line_map_from_race(race)
+            pos_map = calc.line_position_map(race)
+            cars = sorted(win_probs.keys())
+            mass3 = calc.total_ordered_mass(
+                win_probs, cars, 3, line_map, line_boost, pos_map, calc.HEAD_TO_BANTE_BOOST
+            )
+            mass2 = calc.total_ordered_mass(
+                win_probs, cars, 2, line_map, line_boost, pos_map, calc.HEAD_TO_BANTE_BOOST
+            )
+            checked += 1
+            mass_samples.append({
+                "race_id": race.id,
+                "正規化前mass_arity3": round(mass3, 4),
+                "正規化前mass_arity2": round(mass2, 4),
+                "ライン情報あり": line_map is not None,
+            })
+        except Exception as e:
+            errors.append({"race_id": race.id, "error": str(e)})
+
+    return {
+        "note": (
+            "先頭→番手boost(20倍)・正規化係数(total_ordered_mass)の動作確認。"
+            "本番ロジックは一切変更していない読み取り専用診断。"
+            "『正規化前mass』はboostによる過大カウントの生値。"
+            "プラン生成時はこの値で割って正規化されるため、1を超えていて問題ない"
+            "(ライン情報が無いレースは1.0付近になるのが正常)。"
+        ),
+        "確認したレース数": checked,
+        "エラー件数": len(errors),
+        "エラー詳細": errors,
+        "サンプル(直近20件まで表示)": mass_samples[:20],
+    }
