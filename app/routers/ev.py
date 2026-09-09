@@ -14,7 +14,9 @@ router = APIRouter(prefix="/ev", tags=["ev"])
 
 
 def _build_win_probs(entries: List[models.Entry]) -> dict:
-    """blended → ai → tipstar の順で勝率を拾う（replay/再プラン用）。"""
+    """blended → ai → tipstar の順で勝率を拾う（replay/再プラン用）。
+    その後、競走得点帯の経験的補正を掛けて再正規化する。
+    """
     probs = {}
     for e in entries:
         v = e.blended_win_prob
@@ -30,6 +32,7 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
     total = sum(probs.values())
     if total > 0:
         probs = {k: v / total for k, v in probs.items()}
+    probs = calc.apply_race_score_band_factors(probs, entries)
     return probs
 
 

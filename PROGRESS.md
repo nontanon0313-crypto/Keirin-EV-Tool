@@ -24,18 +24,19 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-09(Grok) — 課題L:得点帯別補正倍率の遡及診断を追加
+最終更新: 2026-09-09(Grok) — 課題L:競走得点帯補正を本番1着確率に試験実装
 
 ### 直近の修正
-- race-score-potential 診断結果: 1着的中率 得点順位40.71% > 現行36.95%、3着も得点優位
-- 高得点帯(105+)の1着率が30%超。競走得点は有効シグナルと判断
-- `/purchases/diagnostics/race-score-band-factors` を追加(読み取り専用)。
-  得点帯別の経験的補正倍率を算出し、現行1着確率に掛けた場合の的中率変化を返す
+- race-score-band-factors診断: 無補正37.99% → 帯別factor適用40.50%(+2.52pt)
+- 本番の `_build_win_probs` / `build_win_probs_from_entries` に得点帯補正を追加
+  (`RACE_SCORE_BAND_FACTORS` + `apply_race_score_band_factors`、再正規化あり)
+- 特に105-110帯 factor=1.4354。110以上はサンプル不足で1.0
+- フラグ `RACE_SCORE_BAND_CORRECTION_ENABLED=True` でオンオフ可能
 
 ### 残作業
-- race-score-band-factors を本番で実行し、帯別factor適用の効果を確認
-- 効果があれば1着確率への得点帯補正を試験実装(本番反映は効果確認後)
-- 課題K・M以降は race_score 補正の方針が固まってから
+- デプロイ後に少数replayまたは直近PVAで副作用を確認
+- データ増加後に band factors を再推定して更新
+- 課題K・M以降は効果が安定してから
 - 高オッズ二重補正・head_to_bante_boost再検証は並行可
 
 

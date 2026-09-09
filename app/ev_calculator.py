@@ -649,8 +649,7 @@ def build_win_probs_from_entries(entries: list) -> dict:
 
     のんの要望により追加: 過去の確定済みレースを、記録済みのPurchase/SkippedBet
     に頼らず、現在の確率モデルでその場で再計算して検証できるようにするため。
-    本番の投票ロジック(ev.py)は一切変更せず、検証専用の複製として持つ
-    (投票ロジックへの意図しない影響を避けるため、あえて共通化しない)。
+    本番の投票ロジック(ev.py)と補正内容を揃える(得点帯補正を含む)。
     """
     probs = {}
     for e in entries:
@@ -659,6 +658,7 @@ def build_win_probs_from_entries(entries: list) -> dict:
     total = sum(probs.values())
     if total > 0:
         probs = {k: v / total for k, v in probs.items()}
+    probs = apply_race_score_band_factors(probs, entries)
     return probs
 
 
@@ -670,6 +670,71 @@ def build_win_probs_from_entries(entries: list) -> dict:
 # 捉えられる20倍を採用する(データが貯まり次第、再検証して見直す)。
 HEAD_TO_BANTE_BOOST = 20.0
 OTHER_SAME_LINE_BOOST = 1.0
+
+# 2026-09-09: race-score-band-factors診断結果に基づく1着確率の得点帯補正(のん承認待ちの試験値)。
+# 診断: 無補正37.99% → 適用後40.50% (+2.52pt)。105-110帯が特に過小評価(factor≈1.44)。
+# 110以上はサンプル不足のため1.0固定。データ増加後に再診断して更新すること。
+RACE_SCORE_BAND_FACTORS = {
+    "90未満": 0.9383,
+    "90-95": 1.0677,
+    "95-100": 0.9747,
+    "100-105": 1.029,
+    "105-110": 1.4354,
+    "110以上": 1.0,
+}
+RACE_SCORE_BAND_CORRECTION_ENABLED = True
+
+
+def race_score_band(score) -> str:
+    """競走得点を帯ラベルに変換。Noneは補正対象外。"""
+    if score is None:
+        return None
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return None
+    if s < 90:
+        return "90未満"
+    if s < 95:
+        return "90-95"
+    if s < 100:
+        return "95-100"
+    if s < 105:
+        return "100-105"
+    if s < 110:
+        return "105-110"
+    return "110以上"
+
+
+def apply_race_score_band_factors(probs: dict, entries: list) -> dict:
+    """
+    1着確率に競走得点帯の経験的補正倍率を掛け、レース内で再正規化する。
+    entries は car_number と race_score を持つオブジェクトのリスト。
+    補正無効時やデータ不足時は probs をそのまま返す。
+    """
+    if not RACE_SCORE_BAND_CORRECTION_ENABLED or not probs:
+        return probs
+    score_by_car = {}
+    for e in entries or []:
+        car = getattr(e, "car_number", None)
+        if car is None:
+            continue
+        try:
+            car = int(car)
+        except (TypeError, ValueError):
+            continue
+        score_by_car[car] = getattr(e, "race_score", None)
+
+    adjusted = {}
+    for car, p in probs.items():
+        band = race_score_band(score_by_car.get(car))
+        factor = RACE_SCORE_BAND_FACTORS.get(band, 1.0) if band else 1.0
+        adjusted[car] = float(p) * factor
+    total = sum(adjusted.values())
+    if total <= 1e-12:
+        return probs
+    return {c: v / total for c, v in adjusted.items()}
+
 
 
 def line_map_from_race(race) -> tuple:
