@@ -1,14 +1,17 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# 使い方: bash scraper/run_replay_continue.sh [件数] [間隔秒] [証拠金] [after_race_id(通常不要)]
+# 使い方: bash scraper/run_replay_continue.sh [件数] [間隔秒] [証拠金] [after_race_id(通常不要)] [include_already_replayed(true/false、既定false)]
+# include_already_replayed=true を指定すると、既にCALIBRATION_SWITCH_AT以降の
+# 購入/見送り記録があるレースも再投票対象に含める(予想ロジック変更後に
+# 全件を新ロジックで作り直したい場合に使う)。
 # 対象0件なら warm/診断をせずに即終了する。
 # ループ例:
 #   while bash scraper/run_replay_continue.sh 30 3; do sleep 10; done
 #   → 残0でスクリプトが exit 1 以外の「対象なし終了」をするので、下の終了コードに注意
-#   推奨ループ:
+#   推奨ループ(ロジック変更後の全件作り直し):
 #   while true; do
-#     LEFT=$(python3 -c "import requests; print(requests.get(\"$API_BASE/races/replay-settled/targets\",params={\"since\":\"all\",\"limit\":1},timeout=90).json().get(\"total\",0))")
+#     LEFT=$(python3 -c "import requests; print(requests.get(\"$API_BASE/races/replay-settled/targets\",params={\"since\":\"all\",\"limit\":1,\"exclude_already_replayed\":\"false\"},timeout=90).json().get(\"total\",0))")
 #     echo "残り=$LEFT"; [ "$LEFT" -le 0 ] && break
-#     bash scraper/run_replay_continue.sh 30 3 || true
+#     bash scraper/run_replay_continue.sh 30 3 1000000 "" true || true
 #     sleep 15
 #   done
 set -e
@@ -17,6 +20,7 @@ LIMIT="${1:-50}"
 INTERVAL="${2:-2}"
 BANKROLL="${3:-1000000}"
 AFTER_RACE_ID="${4:-}"
+INCLUDE_ALREADY_REPLAYED="${5:-false}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -28,6 +32,8 @@ params={'since':'all','limit':1}
 after='$AFTER_RACE_ID'
 if after.strip():
     params['after_race_id']=int(after)
+if '$INCLUDE_ALREADY_REPLAYED' == 'true':
+    params['exclude_already_replayed']='false'
 d=requests.get(api+'/races/replay-settled/targets', params=params, timeout=90).json()
 print(d.get('total', 0))
 ")
@@ -54,17 +60,24 @@ for i in range(6):
     time.sleep(min(5*(2**i), 60))
 "
 
-echo "=== replay limit=$LIMIT interval=${INTERVAL}s after_race_id=${AFTER_RACE_ID:-なし} ==="
+echo "=== replay limit=$LIMIT interval=${INTERVAL}s after_race_id=${AFTER_RACE_ID:-なし} include_already_replayed=${INCLUDE_ALREADY_REPLAYED} ==="
+EXTRA_ARGS=""
+if [ "$INCLUDE_ALREADY_REPLAYED" = "true" ]; then
+  EXTRA_ARGS="--include-already-replayed"
+fi
 if [ -n "$AFTER_RACE_ID" ]; then
-  python3 -u scraper/replay_settled.py --since all --limit "$LIMIT" --bankroll "$BANKROLL" --interval "$INTERVAL" --after-race-id "$AFTER_RACE_ID"
+  python3 -u scraper/replay_settled.py --since all --limit "$LIMIT" --bankroll "$BANKROLL" --interval "$INTERVAL" --after-race-id "$AFTER_RACE_ID" $EXTRA_ARGS
 else
-  python3 -u scraper/replay_settled.py --since all --limit "$LIMIT" --bankroll "$BANKROLL" --interval "$INTERVAL"
+  python3 -u scraper/replay_settled.py --since all --limit "$LIMIT" --bankroll "$BANKROLL" --interval "$INTERVAL" $EXTRA_ARGS
 fi
 
 echo "=== 処理後の残件数 ==="
 LEFT2=$(python3 -c "
 import requests
-d=requests.get('$API/races/replay-settled/targets', params={'since':'all','limit':1}, timeout=90).json()
+params={'since':'all','limit':1}
+if '$INCLUDE_ALREADY_REPLAYED' == 'true':
+    params['exclude_already_replayed']='false'
+d=requests.get('$API/races/replay-settled/targets', params=params, timeout=90).json()
 print(d.get('total', 0))
 ")
 echo "残り ${LEFT2} 件"

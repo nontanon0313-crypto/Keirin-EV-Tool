@@ -103,6 +103,15 @@ def main():
     parser.add_argument("--limit", type=int, default=5000)
     parser.add_argument("--bankroll", type=float, default=1000000)
     parser.add_argument(
+        "--include-already-replayed",
+        action="store_true",
+        help=(
+            "既にCALIBRATION_SWITCH_AT以降の購入/見送り記録があるレースも対象に含める。"
+            "予想ロジック変更後に全件を新ロジックで再計算したい場合に指定する"
+            "(exclude_already_replayed=falseをtargetsに渡す)。"
+        ),
+    )
+    parser.add_argument(
         "--interval",
         type=float,
         default=1.5,
@@ -142,6 +151,8 @@ def main():
         params = {"since": args.since, "limit": args.limit}
         if args.after_race_id is not None:
             params["after_race_id"] = args.after_race_id
+        if args.include_already_replayed:
+            params["exclude_already_replayed"] = "false"
         r = request_with_retry(
             session,
             "GET",
