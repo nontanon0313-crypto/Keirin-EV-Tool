@@ -2710,3 +2710,141 @@ def diagnostics_trifecta_order_structure(
             "展開予測(line_boost・脚質・競走得点等)の改善効果が期待できる。"
         ),
     }
+
+
+def _harville_prob_v2(
+    win_probs: Dict[int, float],
+    order: Tuple[int, ...],
+    line_map: Optional[Dict[int, int]],
+    pos_map: Optional[Dict[int, int]],
+    head_to_bante_boost: float,
+    other_same_line_boost: float,
+) -> float:
+    """
+    harville_probの2パラメータ版(読み取り専用診断でのみ使用。本番コードには反映しない)。
+    「先頭選手が確定した直後に、同ラインの番手選手が続く」場合だけ
+    head_to_bante_boostを掛け、それ以外の同ライン継続はother_same_line_boostを掛ける。
+    """
+    remaining = dict(win_probs)
+    prob = 1.0
+    prev_car = None
+    for car in order:
+        p = remaining.get(car, 0.0)
+        if line_map and prev_car is not None:
+            same_line = line_map.get(car) is not None and line_map.get(car) == line_map.get(prev_car)
+        else:
+            same_line = False
+        if same_line:
+            is_head_to_bante = (
+                pos_map is not None
+                and pos_map.get(prev_car) == 0
+                and pos_map.get(car) == 1
+            )
+            boost = head_to_bante_boost if is_head_to_bante else other_same_line_boost
+        else:
+            boost = 1.0
+        if boost != 1.0 and line_map:
+            boosted = {}
+            for c, v in remaining.items():
+                if line_map.get(c) == line_map.get(prev_car):
+                    if pos_map is not None and pos_map.get(prev_car) == 0 and pos_map.get(c) == 1:
+                        boosted[c] = v * head_to_bante_boost
+                    else:
+                        boosted[c] = v * other_same_line_boost
+                else:
+                    boosted[c] = v
+            denom = sum(boosted.values())
+            cond_p = (boosted.get(car, 0.0) / denom) if denom > 1e-9 else 0.0
+        else:
+            denom = sum(remaining.values())
+            cond_p = (p / denom) if denom > 1e-9 else 0.0
+        prob *= cond_p
+        remaining.pop(car, None)
+        prev_car = car
+    return prob
+
+
+@router.get("/line-boost-sweep-v2")
+def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
+    """
+    line-boost-sweepの結果、「先頭→番手」だけが強く効いており、それ以外の
+    同ライン継続はほぼ効果が無いことが判明した(2026-09-08)。
+    このエンドポイントは、先頭→番手専用の係数(head_to_bante_boost)を
+    より高い範囲まで探索し、頭打ち地点を確認する。
+    それ以外の同ライン継続の係数(other_same_line_boost)は1.0(補正なし)に固定した
+    グリッドと、軽く補正した場合の両方を比較する。
+    本番ロジック(ev.py)は一切呼び出さない読み取り専用診断。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    HEAD_CANDIDATES = [1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0, 50.0, 80.0, 120.0]
+    OTHER_CANDIDATES = [0.8, 1.0, 1.2]
+
+    combos = [(h, o) for h in HEAD_CANDIDATES for o in OTHER_CANDIDATES]
+    stats = {combo: {"n": 0, "log_likelihood_sum": 0.0} for combo in combos}
+
+    evaluated = 0
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            continue
+        actual_order = tuple(canonical[0][:3])
+        if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+            continue
+
+        line_map, _ = calc.line_map_from_race(race)
+        pos_map = _line_position_map(race)
+        evaluated += 1
+
+        for combo in combos:
+            head_boost, other_boost = combo
+            p = _harville_prob_v2(win_probs, actual_order, line_map, pos_map, head_boost, other_boost)
+            st = stats[combo]
+            st["n"] += 1
+            if p > 1e-12:
+                st["log_likelihood_sum"] += math.log(p)
+
+    results = []
+    for combo in combos:
+        st = stats[combo]
+        n = st["n"]
+        results.append({
+            "先頭→番手boost": combo[0],
+            "それ以外の同ラインboost": combo[1],
+            "件数": n,
+            "平均対数尤度": round(st["log_likelihood_sum"] / n, 5) if n else None,
+        })
+    best = max(
+        (r for r in results if r["平均対数尤度"] is not None),
+        key=lambda r: r["平均対数尤度"],
+        default=None,
+    )
+
+    return {
+        "note": (
+            "先頭→番手専用の係数と、それ以外の同ライン継続の係数を分離して探索する"
+            "読み取り専用診断。本番ロジック(ev.py)は一切呼び出していない。"
+        ),
+        "評価対象レース数": evaluated,
+        "結果": results,
+        "最も当てはまりの良い組み合わせ": best,
+        "読み方": (
+            "『先頭→番手boost』の対数尤度が上昇し続けて頭打ちになる値を確認する。"
+            "頭打ちにならず候補の最大値(120)でもまだ改善している場合は、"
+            "さらに高い値も試す必要がある。"
+            "『それ以外の同ラインboost』は0.8/1.0/1.2のどれが良いかも確認できる"
+            "(1.0付近が最良なら、先頭→番手以外は補正不要という結論になる)。"
+        ),
+    }

@@ -2363,6 +2363,47 @@ document.getElementById("loadTrifectaStructureBtn").addEventListener("click", as
   }
 });
 
+document.getElementById("loadLineBoostV2Btn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "先頭→番手専用boost探索（v2）を計算中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/line-boost-sweep-v2"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    const num = (v) => (v == null || v === undefined) ? "-" : v;
+
+    let html = `<p><strong>先頭→番手専用boost探索（v2・読み取り専用・全期間対象）</strong></p>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+    html += `<p class="note">評価対象レース数: ${num(data["評価対象レース数"])}</p>`;
+
+    const best = data["最も当てはまりの良い組み合わせ"];
+    if (best) {
+      html += `<p><strong>最良の組み合わせ: 先頭→番手boost=${best["先頭→番手boost"]} / それ以外の同ラインboost=${best["それ以外の同ラインboost"]}</strong>（平均対数尤度 ${best["平均対数尤度"]}）</p>`;
+    }
+
+    html += `<table><tr><th>先頭→番手boost</th><th>それ以外の同ラインboost</th><th>件数</th><th>平均対数尤度</th></tr>`;
+    for (const r of data["結果"] || []) {
+      html += `<tr>
+        <td>${num(r["先頭→番手boost"])}</td>
+        <td>${num(r["それ以外の同ラインboost"])}</td>
+        <td>${num(r["件数"])}</td>
+        <td>${num(r["平均対数尤度"])}</td>
+      </tr>`;
+    }
+    html += `</table>`;
+    html += `<p class="note" style="margin-top:10px;">${data["読み方"] || ""}</p>`;
+
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibStructBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "補正前後の比較を取得中...";
