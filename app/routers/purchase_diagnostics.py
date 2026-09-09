@@ -3405,3 +3405,188 @@ def diagnostics_race_score_potential(db: Session = Depends(get_db)):
             "得点帯別1着率が単調に上がっていれば、得点は有効なシグナルである。"
         ),
     }
+
+
+@router.get("/race-score-band-factors")
+def diagnostics_race_score_band_factors(db: Session = Depends(get_db)):
+    """
+    課題L続き: 競走得点帯ごとの経験的補正倍率を算出し、
+    現行1着確率に掛けた場合の1着的中率がどう変わるかを遡及検証する読み取り専用診断。
+
+    手順:
+    1. 確定済みレースで、各選手の得点帯ごとの「予測1着確率合計 vs 実際の1着回数」から
+       factor = actual_win_rate / predicted_avg_prob を算出（shrink付き）
+    2. 同じレース群で、現行 blended_win_prob に帯別factorを掛けて再正規化した順位で
+       1着的中率を再計算し、無補正と比較する
+
+    本番ロジック(ev.py)は一切変更しない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    def _score_band(s):
+        if s is None:
+            return None
+        if s < 90:
+            return "90未満"
+        if s < 95:
+            return "90-95"
+        if s < 100:
+            return "95-100"
+        if s < 105:
+            return "100-105"
+        if s < 110:
+            return "105-110"
+        return "110以上"
+
+    # --- Pass 1: 帯別の予測確率合計と実際の1着回数 ---
+    band_pred_sum = {}
+    band_win_count = {}
+    band_n = {}
+
+    parsed_races = []  # (actual_1st, {car: (prob, score, band)})
+    skipped = 0
+
+    for race in races:
+        entries = race.entries or []
+        if len(entries) < 3:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            skipped += 1
+            continue
+        actual = tuple(canonical[0][:3])
+        if len(actual) < 1:
+            skipped += 1
+            continue
+        actual_1st = actual[0]
+
+        car_info = {}
+        for e in entries:
+            if e.car_number is None:
+                continue
+            car = int(e.car_number)
+            p = e.blended_win_prob
+            if p is None and e.app_win_rate is not None:
+                p = e.app_win_rate / 100.0
+            if p is None or p <= 0:
+                continue
+            sc = float(e.race_score) if e.race_score is not None else None
+            band = _score_band(sc)
+            if band is None:
+                continue
+            car_info[car] = (float(p), sc, band)
+
+        if actual_1st not in car_info or len(car_info) < 3:
+            skipped += 1
+            continue
+
+        # レース内で確率を正規化してから帯に積む
+        total_p = sum(v[0] for v in car_info.values())
+        if total_p <= 1e-12:
+            skipped += 1
+            continue
+        for car, (p, sc, band) in car_info.items():
+            pn = p / total_p
+            band_pred_sum[band] = band_pred_sum.get(band, 0.0) + pn
+            band_n[band] = band_n.get(band, 0) + 1
+            if car == actual_1st:
+                band_win_count[band] = band_win_count.get(band, 0) + 1
+
+        parsed_races.append((actual_1st, car_info))
+
+    # 帯別 factor 算出
+    band_order = ["90未満", "90-95", "95-100", "100-105", "105-110", "110以上"]
+    factors = {}
+    factor_rows = []
+    for band in band_order:
+        n = band_n.get(band, 0)
+        wins = band_win_count.get(band, 0)
+        pred = band_pred_sum.get(band, 0.0)
+        if n < 30 or pred <= 1e-9:
+            factors[band] = 1.0
+            factor_rows.append({
+                "得点帯": band,
+                "出走延べ回数": n,
+                "1着回数": wins,
+                "予測確率合計": round(pred, 3),
+                "実績1着率%": round(wins / n * 100, 2) if n else None,
+                "予測平均確率%": round(pred / n * 100, 4) if n else None,
+                "raw_ratio": None,
+                "補正倍率factor": 1.0,
+                "備考": "サンプル不足のため補正なし",
+            })
+            continue
+        act_rate = wins / n
+        pred_avg = pred / n
+        raw = act_rate / pred_avg if pred_avg > 1e-12 else 1.0
+        # shrink: 期待的中数が少ないほど1.0に寄せる
+        expected = pred  # 予測確率合計 = 期待的中数
+        shrink = min(1.0, expected / 20.0)
+        factor = 1.0 + shrink * (raw - 1.0)
+        factor = max(0.5, min(2.0, factor))
+        factors[band] = round(factor, 4)
+        factor_rows.append({
+            "得点帯": band,
+            "出走延べ回数": n,
+            "1着回数": wins,
+            "予測確率合計": round(pred, 3),
+            "実績1着率%": round(act_rate * 100, 2),
+            "予測平均確率%": round(pred_avg * 100, 4),
+            "raw_ratio": round(raw, 4),
+            "補正倍率factor": factors[band],
+            "備考": None,
+        })
+
+    # --- Pass 2: factor適用前後の1着的中率 ---
+    base_correct = 0
+    boosted_correct = 0
+    n_eval = 0
+    for actual_1st, car_info in parsed_races:
+        # 無補正
+        by_base = sorted(car_info.keys(), key=lambda c: car_info[c][0], reverse=True)
+        if by_base[0] == actual_1st:
+            base_correct += 1
+        # 帯別factor適用→再正規化
+        adj = {}
+        for car, (p, sc, band) in car_info.items():
+            adj[car] = p * factors.get(band, 1.0)
+        total = sum(adj.values())
+        if total > 1e-12:
+            adj = {c: v / total for c, v in adj.items()}
+        by_adj = sorted(adj.keys(), key=lambda c: adj[c], reverse=True)
+        if by_adj[0] == actual_1st:
+            boosted_correct += 1
+        n_eval += 1
+
+    return {
+        "note": (
+            "競走得点帯ごとの経験的補正倍率を算出し、現行1着確率に掛けた場合の"
+            "1着的中率変化を遡及検証する読み取り専用診断。本番ロジックは変更していない。"
+        ),
+        "評価対象レース数": n_eval,
+        "除外レース数": skipped,
+        "得点帯別_補正倍率": factor_rows,
+        "1着的中率_補正前後比較": {
+            "無補正(現行順位)%": round(base_correct / n_eval * 100, 2) if n_eval else None,
+            "得点帯factor適用後%": round(boosted_correct / n_eval * 100, 2) if n_eval else None,
+            "差分pt": round((boosted_correct - base_correct) / n_eval * 100, 2) if n_eval else None,
+            "件数": n_eval,
+        },
+        "読み方": (
+            "『補正倍率factor』が1より大きい帯はモデルが過小評価、小さい帯は過大評価している。"
+            "『1着的中率_補正前後比較』でfactor適用後が明確に上がれば、"
+            "本番の1着確率に得点帯補正を入れる価値がある。"
+            "差が小さい・下がる場合は、単純な帯別倍率では不十分（相対順位や得点差の方が有効）の可能性がある。"
+        ),
+    }
+
