@@ -3080,3 +3080,125 @@ def diagnostics_player_stats_potential(db: Session = Depends(get_db)):
             "別の使い方(交互作用・重み付け等)を検討する必要がある。"
         ),
     }
+
+
+def _position_pair_category(pos_prev, pos_next, same_line: bool) -> str:
+    if not same_line:
+        return "別ライン"
+    if pos_prev is None or pos_next is None:
+        return "同ライン(位置不明)"
+    label = {0: "先頭", 1: "番手", 2: "3番手"}
+    p = label.get(pos_prev, f"{pos_prev}番目")
+    n = label.get(pos_next, f"{pos_next}番目")
+    return f"同ライン:{p}→{n}"
+
+
+@router.get("/line-position-matrix")
+def diagnostics_line_position_matrix(db: Session = Depends(get_db)):
+    """
+    課題L対応:先頭→番手boost(20倍)以外の位置ペア
+    (番手→先頭、先頭→3番手、番手→3番手 等)についても、実績に見合った
+    補正倍率がありそうかを一括で確認する読み取り専用診断。
+
+    グリッドサーチではなく、位置ペアの区分ごとに
+    「実際にその遷移が起きた回数」÷「無補正モデルが割り当てていた確率の合計」
+    という経験的な比率(=その区分に必要な補正倍率の目安)を直接計算する。
+    比率が1に近い区分は補正不要、大きく離れている区分は補正の余地がある。
+
+    対象は1着→2着・2着→3着の遷移をあわせたもの。
+    本番ロジック(ev.py)は一切呼び出さない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    actual_count: Dict[str, int] = defaultdict(int)
+    predicted_mass: Dict[str, float] = defaultdict(float)
+    opportunity_count: Dict[str, int] = defaultdict(int)
+
+    evaluated_transitions = 0
+
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            continue
+        actual_order = tuple(canonical[0][:3])
+        if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+            continue
+
+        line_map, _ = calc.line_map_from_race(race)
+        pos_map = calc.line_position_map(race)
+
+        # 1着→2着、2着→3着の2つの遷移をそれぞれ評価する
+        transitions = [
+            (actual_order[0], actual_order[1], {c: v for c, v in win_probs.items() if c != actual_order[0]}),
+            (
+                actual_order[1],
+                actual_order[2],
+                {c: v for c, v in win_probs.items() if c not in (actual_order[0], actual_order[1])},
+            ),
+        ]
+
+        for prev_car, actual_next, remaining in transitions:
+            if not remaining:
+                continue
+            denom = sum(remaining.values())
+            if denom <= 1e-9:
+                continue
+            evaluated_transitions += 1
+            for c, v in remaining.items():
+                same_line = bool(
+                    line_map and line_map.get(c) is not None and line_map.get(c) == line_map.get(prev_car)
+                )
+                pos_prev = pos_map.get(prev_car) if pos_map else None
+                pos_next = pos_map.get(c) if pos_map else None
+                cat = _position_pair_category(pos_prev, pos_next, same_line)
+                predicted_mass[cat] += v / denom
+                opportunity_count[cat] += 1
+            same_line_actual = bool(
+                line_map and line_map.get(actual_next) is not None and line_map.get(actual_next) == line_map.get(prev_car)
+            )
+            cat_actual = _position_pair_category(
+                pos_map.get(prev_car) if pos_map else None,
+                pos_map.get(actual_next) if pos_map else None,
+                same_line_actual,
+            )
+            actual_count[cat_actual] += 1
+
+    results = []
+    for cat in sorted(predicted_mass.keys(), key=lambda k: -predicted_mass[k]):
+        pm = predicted_mass[cat]
+        ac = actual_count.get(cat, 0)
+        results.append({
+            "区分": cat,
+            "候補として現れた延べ回数": opportunity_count.get(cat, 0),
+            "無補正モデルの予測確率合計": round(pm, 3),
+            "実際にその遷移が起きた回数": ac,
+            "経験的補正倍率の目安(実際÷予測)": round(ac / pm, 3) if pm > 1e-6 else None,
+        })
+
+    return {
+        "note": (
+            "位置ペア区分ごとに、実際の遷移回数と無補正モデルの予測確率合計の比率"
+            "(=経験的に必要な補正倍率の目安)を算出する読み取り専用診断。"
+            "本番ロジック(ev.py)は一切呼び出していない。"
+        ),
+        "評価対象遷移数(1着→2着+2着→3着)": evaluated_transitions,
+        "位置ペア区分別": results,
+        "読み方": (
+            "『経験的補正倍率の目安』が1から大きく離れている区分(例: 番手→先頭が2倍等)は、"
+            "現在の先頭→番手boost(20倍)だけでは捉えられていない追加の力学がある可能性が高い。"
+            "候補として現れた延べ回数が少ない区分(数十件未満)は参考程度に留めること"
+            "(過学習・偶然の影響を受けやすいため)。"
+        ),
+    }

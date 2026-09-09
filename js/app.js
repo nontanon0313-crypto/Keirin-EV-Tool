@@ -2404,6 +2404,43 @@ document.getElementById("loadLineBoostV2Btn").addEventListener("click", async ()
   }
 });
 
+document.getElementById("loadPositionMatrixBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "課題L：位置ペア別の補正倍率一覧を計算中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/line-position-matrix"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    const num = (v) => (v == null || v === undefined) ? "-" : v;
+
+    let html = `<p><strong>課題L：位置ペア別の補正倍率一覧（読み取り専用・全期間対象）</strong></p>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+    html += `<p class="note">評価対象遷移数: ${num(data["評価対象遷移数(1着→2着+2着→3着)"])}</p>`;
+
+    html += `<table><tr><th>区分</th><th>延べ出現回数</th><th>無補正予測確率合計</th><th>実際の遷移回数</th><th>経験的補正倍率の目安</th></tr>`;
+    for (const r of data["位置ペア区分別"] || []) {
+      html += `<tr>
+        <td><strong>${r["区分"]}</strong></td>
+        <td>${num(r["候補として現れた延べ回数"])}</td>
+        <td>${num(r["無補正モデルの予測確率合計"])}</td>
+        <td>${num(r["実際にその遷移が起きた回数"])}</td>
+        <td><strong>${num(r["経験的補正倍率の目安(実際÷予測)"])}</strong></td>
+      </tr>`;
+    }
+    html += `</table>`;
+    html += `<p class="note" style="margin-top:10px;">${data["読み方"] || ""}</p>`;
+
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibStructBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "補正前後の比較を取得中...";
