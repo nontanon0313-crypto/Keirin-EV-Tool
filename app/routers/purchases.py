@@ -167,14 +167,12 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
         except Exception:
             continue
         line_map, line_boost = calc.line_map_from_race(race)
-        pos_map = calc.line_position_map(race)
         car_numbers_all = sorted(win_probs.keys())
         norm_mass = {}
         for arity in (2, 3):
             if len(car_numbers_all) >= arity:
                 mass = calc.total_ordered_mass(
                     win_probs, car_numbers_all, arity, line_map=line_map, line_boost=line_boost,
-                    pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
                 )
                 norm_mass[arity] = mass if mass > 1e-9 else 1.0
             else:
@@ -189,7 +187,6 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
             try:
                 prob_raw = calc.estimate_prob_for_bet(
                     win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost,
-                    pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
                 )
                 arity = calc.BET_TYPE_ARITY.get(o.bet_type)
                 if arity in norm_mass:
@@ -1666,14 +1663,12 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
             continue
 
         line_map, line_boost = calc.line_map_from_race(race)
-        pos_map = calc.line_position_map(race)
         car_numbers_all = sorted(win_probs.keys())
         norm_mass = {}
         for arity in (2, 3):
             if len(car_numbers_all) >= arity:
                 mass = calc.total_ordered_mass(
                     win_probs, car_numbers_all, arity, line_map=line_map, line_boost=line_boost,
-                    pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
                 )
                 norm_mass[arity] = mass if mass > 1e-9 else 1.0
             else:
@@ -1756,8 +1751,6 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
                     cars,
                     line_map=line_map,
                     line_boost=line_boost,
-                    pos_map=pos_map,
-                    head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
                 )
                 arity = calc.BET_TYPE_ARITY.get(o.bet_type)
                 if arity in norm_mass:

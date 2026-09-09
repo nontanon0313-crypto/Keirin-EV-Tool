@@ -24,20 +24,33 @@
 
 ## 1. 現在の状況(★これだけ読めば足りる・毎回上書きする)
 
-最終更新: 2026-09-09(Grok) — 課題L:競走得点帯補正を本番1着確率に試験実装
+最終更新: 2026-09-09(Claude) — 先頭→番手専用boostを廃止し同ライン一律1.6倍のシンプルモデルに戻す修正を完了
 
 ### 直近の修正
-- race-score-band-factors診断: 無補正37.99% → 帯別factor適用40.50%(+2.52pt)
-- 本番の `_build_win_probs` / `build_win_probs_from_entries` に得点帯補正を追加
-  (`RACE_SCORE_BAND_FACTORS` + `apply_race_score_band_factors`、再正規化あり)
-- 特に105-110帯 factor=1.4354。110以上はサンプル不足で1.0
-- フラグ `RACE_SCORE_BAND_CORRECTION_ENABLED=True` でオンオフ可能
+- Grok版で巻き戻っていた「先頭→番手だけ20倍」の2パラメータモデルを、
+  line-position-matrix診断の結果(のん承認)に基づき、同ライン継続一律1.6倍の
+  単一パラメータモデル(`SAME_LINE_BOOST=1.6`)に再修正。
+  `app/ev_calculator.py`・`app/routers/ev.py`・`app/routers/purchases.py`の
+  全呼び出し箇所(本番プラン生成・キャリブレーション係数計算・遡及診断×2)から
+  pos_map/head_to_bante_boostの受け渡しを削除し、単一line_boostに統一。
+  (前回セッションがトークン制限で中断し、`purchases.py`の1箇所だけ未修正のまま
+  残っていたのが原因。今回で全箇所完了)
+- 競走得点帯補正(`RACE_SCORE_BAND_FACTORS`・課題L)はGrok実装のまま有効継続で確定
+  (のん承認。同一データでの補正前後比較という検証上の注意点は伝達済み、
+  時系列分割検証は不要と判断)
+- 2パラメータモデル(harville_prob等のpos_map/head_to_bante_boost引数)自体は
+  コードに残置。本番では未使用だが診断ツール(line-boost-sweep-v2等)から呼べる
 
 ### 残作業
-- デプロイ後に少数replayまたは直近PVAで副作用を確認
-- データ増加後に band factors を再推定して更新
-- 課題K・M以降は効果が安定してから
-- 高オッズ二重補正・head_to_bante_boost再検証は並行可
+- のんが本番デプロイ後、データを追加投入して検証予定
+- SAME_LINE_BOOST=1.6は175件规模の検証に基づく値。データが貯まったら
+  line-position-matrixを再実行し、引き続き妥当か確認する
+- 課題M〜Q(1着→2着→3着の順序依存の深掘り・3連単組み合わせ精度・
+  特徴量追加効果測定・過学習リーク対策)は未着手
+- 課題K(選手個人データ単純活用)は効果無しと判明済み、打ち切り済み
+- 高オッズ帯の二重補正(purchase_set_factor×high_odds_residual)の統合要否は未着手
+- 0.ChatGPTへの引き継ぎセクション(2026-09-09)の分析方針(想定回収率348%→実績156%の
+  乖離分解等)は未着手。次回着手する場合はここから
 
 
 ---

@@ -813,9 +813,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     BET_TYPE_SUSPENDED = {"ワイド", "2車単"}
     BET_TYPE_MIN_EV_OVERRIDE = {"2車複": 50.0, "3連複": 50.0}  # ev_pct>=50 は EV150%以上に相当
 
-    # ライン構成を買い目確率に反映(2026-09-08: 先頭→番手専用boostに対応)
+    # ライン構成を買い目確率に反映(2026-09-08: 同ライン一律1.6倍のシンプルモデル。
+    # 先頭→番手専用boostは位置ペア横断検証の結果、区分間の差が小さいことが分かり廃止)
     line_map, line_boost = _line_map_from_race(race)
-    pos_map = _line_position_map_from_race(race)
 
     # boost適用により確率の合計が1を超える(過大カウントになる)ため、
     # 券種の並び方(arity=2 or 3)ごとに正規化係数を1回だけ計算しておく。
@@ -825,7 +825,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         if len(car_numbers_all) >= arity:
             mass = calc.total_ordered_mass(
                 win_probs, car_numbers_all, arity, line_map=line_map, line_boost=line_boost,
-                pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
             )
             norm_mass[arity] = mass if mass > 1e-9 else 1.0
         else:
@@ -835,7 +834,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob_raw = _estimate_prob(
             win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost,
-            pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
         )
         arity = calc.BET_TYPE_ARITY.get(o.bet_type)
         if arity in norm_mass:
@@ -1054,7 +1052,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     outcome_probs = {
         o: _estimate_prob(
             win_probs, "3連単", o, line_map=line_map, line_boost=line_boost,
-            pos_map=pos_map, head_to_bante_boost=calc.HEAD_TO_BANTE_BOOST,
         )
         for o in outcomes
     } if outcomes else {}
