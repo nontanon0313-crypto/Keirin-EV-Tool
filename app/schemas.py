@@ -73,8 +73,8 @@ class BootstrapSimulationRequest(BaseModel):
 
 
 class EvCalcRequest(BaseModel):
-    apply_calibration: bool = True
-    apply_purchase_set_calibration: bool = True  # 購入集合の残差校正（第2段）
+    apply_calibration: bool = False
+    apply_purchase_set_calibration: bool = False  # 購入集合の残差校正（第2段）
     race_id: int
     bankroll: Optional[float] = None  # 未指定なら証拠金残高を自動使用
     fractional_coefficient: float = 0.25  # 固定値として運用(通常は変更不要)
@@ -99,8 +99,8 @@ class RacePlanRequest(BaseModel):
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
     max_items: int = 20  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
     exclude_low_prob_warning: bool = False  # 大穴帯(0-5%・実績未検証)も候補として評価し、警告は表示する
-    apply_calibration: bool = True  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
-    apply_purchase_set_calibration: bool = True  # 購入集合の残差校正（第2段）
+    apply_calibration: bool = False  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
+    apply_purchase_set_calibration: bool = False  # 購入集合の残差校正（第2段）
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
     apply_performance_gates: bool = True  # 不調ステージ見送りのみ(券種・帯の除外はしない。設計厳守)
     apply_odds_safety_margin: bool = True  # 過去のPurchase実績から算出したオッズ安全マージンを適用するか
