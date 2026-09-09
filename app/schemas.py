@@ -80,7 +80,7 @@ class EvCalcRequest(BaseModel):
     fractional_coefficient: float = 0.25  # 固定値として運用(通常は変更不要)
     max_bet_pct_per_bet: float = 0.05
     min_win_prob: float = 0.05
-    min_ev_pct: float = 5.0  # 買い示唆の閾値(オッズ変動への安全マージン)。デフォルトは期待値5%以上
+    min_ev_pct: float = 50.0  # 実績改善を優先した最低EVライン
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
 
 
@@ -95,7 +95,7 @@ class RacePlanRequest(BaseModel):
     max_bet_pct_per_bet: float = 0.05  # 1点あたりの上限比率
     max_race_pct: Optional[float] = None  # 未指定なら資金管理シミュレーションで確認した値(bankroll_state.race_cap_pct)を自動使用
     min_win_prob: float = 0.005
-    min_ev_pct: float = 5.0
+    min_ev_pct: float = 50.0
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
     max_items: int = 20  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
     exclude_low_prob_warning: bool = False  # 大穴帯(0-5%・実績未検証)も候補として評価し、警告は表示する

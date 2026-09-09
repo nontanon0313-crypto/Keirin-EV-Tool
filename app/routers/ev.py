@@ -521,6 +521,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     normalized_market = {}
     for bet_type, odds_map in by_bet_type.items():
         normalized_market[bet_type] = calc.normalize_market_probs(odds_map)
+    line_map, line_boost = _line_map_from_race(race)
 
     # 既存の未反映ev_resultsは作り直す
     db.query(models.EvResult).filter(models.EvResult.race_id == race_id).delete()
@@ -554,7 +555,8 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             is_skip = True
             skip_reason = "理論上の賭け金が最低単位(100円)に満たないため見送り"
         # 100円ベット換算で、安全マージン(オッズ変動対策)を考慮した閾値以上を「買い示唆」とする
-        is_recommended = (not is_skip) and (ev_pct >= req.min_ev_pct)
+        effective_min_ev = max(req.min_ev_pct, 50.0)
+        is_recommended = (not is_skip) and (ev_pct >= effective_min_ev)
 
         ev_result = models.EvResult(
             race_id=race_id,
