@@ -3590,3 +3590,137 @@ def diagnostics_race_score_band_factors(db: Session = Depends(get_db)):
         ),
     }
 
+
+@router.get("/calibration-significance")
+def diagnostics_calibration_significance(
+    since: Optional[str] = Query("calibration_switch"),
+    db: Session = Depends(get_db),
+):
+    """
+    賭式・確率帯ごとの予測確率と実績的中率の乖離が統計的に有意かを確認する読み取り専用診断。
+
+    - 係数や閾値は変更しない
+    - p値が小さい = 予測が実績より高い側に偏っている可能性が高い（片側）
+    - 投資判断の自動変更は行わない
+    """
+    since_dt = purchases_router._parse_since_param(since) if since not in (None, "all") else None
+    q = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result.in_(("win", "lose")))
+    )
+    if since_dt is not None:
+        q = q.filter(models.Purchase.purchased_at >= since_dt)
+    rows = q.all()
+
+    def _prob_band(p: float) -> str:
+        if p < 0.05:
+            return "0-5%(大穴)"
+        if p < 0.15:
+            return "5-15%"
+        if p < 0.30:
+            return "15-30%"
+        return "30%以上(本命)"
+
+    def _odds_band(o: Optional[float]) -> str:
+        if o is None:
+            return "不明"
+        if o < 5:
+            return "1-5倍"
+        if o < 10:
+            return "5-10倍"
+        if o < 30:
+            return "10-30倍"
+        if o < 100:
+            return "30-100倍"
+        if o < 300:
+            return "100-300倍"
+        if o < 1000:
+            return "300-1000倍"
+        if o < 3000:
+            return "1000-3000倍"
+        return "3000倍以上"
+
+    cells = {}  # (bet_type, prob_band) -> list of (win:bool, pred:float, odds)
+    odds_cells = {}  # (bet_type, odds_band) -> same
+
+    for pur in rows:
+        pred = getattr(pur, "win_prob_raw", None)
+        if pred is None:
+            pred = pur.win_prob_at_purchase
+        if pred is None or float(pred) <= 0:
+            continue
+        pred = float(pred)
+        if pred > 1.0:
+            pred = pred / 100.0
+        win = pur.result == "win"
+        bt = pur.bet_type or "不明"
+        pb = _prob_band(pred)
+        ob = _odds_band(float(pur.odds_value) if pur.odds_value is not None else None)
+        cells.setdefault((bt, pb), []).append((win, pred, pur.odds_value))
+        odds_cells.setdefault((bt, ob), []).append((win, pred, pur.odds_value))
+
+    def _summarize(items):
+        n = len(items)
+        if n == 0:
+            return None
+        wins = sum(1 for w, _, _ in items if w)
+        pred_avg = sum(p for _, p, _ in items) / n
+        act = wins / n
+        residual = act - pred_avg
+        # 正規近似の簡易95%CI（的中率）
+        import math
+        se = math.sqrt(max(act * (1 - act), 1e-12) / n)
+        ci_low = max(0.0, act - 1.96 * se)
+        ci_high = min(1.0, act + 1.96 * se)
+        p_value = calc.binomial_lower_tail_p(wins, n, pred_avg)
+        # 補正が必要そうか（有意かつ過大予測）
+        over = pred_avg > act and p_value < 0.05 and n >= 30
+        under = act > pred_avg and p_value > 0.95 and n >= 30
+        return {
+            "件数": n,
+            "的中数": wins,
+            "予測平均確率%": round(pred_avg * 100, 4),
+            "実績的中率%": round(act * 100, 4),
+            "残差pt": round(residual * 100, 4),
+            "実績的中率_95CI%": [round(ci_low * 100, 4), round(ci_high * 100, 4)],
+            "片側p値_過大予測%": round(p_value * 100, 6),
+            "判定": (
+                "有意に過大予測" if over else
+                ("有意に過小予測の疑い" if under else
+                 ("サンプル不足" if n < 30 else "有意差なし/判断保留"))
+            ),
+        }
+
+    by_bet_prob = []
+    for (bt, pb), items in sorted(cells.items(), key=lambda x: (x[0][0], x[0][1])):
+        st = _summarize(items)
+        if st:
+            by_bet_prob.append({"券種": bt, "確率帯": pb, **st})
+
+    by_bet_odds = []
+    for (bt, ob), items in sorted(odds_cells.items(), key=lambda x: (x[0][0], x[0][1])):
+        st = _summarize(items)
+        if st:
+            by_bet_odds.append({"券種": bt, "オッズ帯": ob, **st})
+
+    notable = [r for r in by_bet_prob if r.get("判定") == "有意に過大予測"]
+    notable.sort(key=lambda r: r.get("片側p値_過大予測%", 100))
+
+    return {
+        "note": (
+            "賭式×確率帯（および賭式×オッズ帯）で予測と実績の乖離の有意性を見る読み取り専用診断。"
+            "係数・閾値は変更しない。"
+        ),
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "対象購入数": len(rows),
+        "券種×確率帯": by_bet_prob,
+        "券種×オッズ帯": by_bet_odds,
+        "有意に過大予測のセル": notable[:20],
+        "読み方": (
+            "『有意に過大予測』かつ件数30以上のセルは、補正を検討する候補。"
+            "p値が小さくてもnが小さい場合は偶然の可能性が高い。"
+            "投資判断（買う/買わない）の自動変更には使わない。"
+        ),
+    }
+
