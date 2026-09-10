@@ -1594,11 +1594,11 @@ TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 #
 # 最新の投票基準変更コミット:
 # 6e29ad4f591bc5ba1f2a647aedf9c0978e5f46fc
-# 2026-09-10T09:30:52+09:00
+# 2026-09-10T22:30:00+09:00
 #
 # Purchase.purchased_at はUTCのnaive datetimeとして扱われるため、
 # 内部比較値はUTCに統一する。
-VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 10, 0, 30, 52)
+VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 10, 13, 30, 0)
 
 # 既存の集計・診断・再投票判定コードとの互換用。
 # 今後は VOTING_CRITERIA_UPDATED_AT を「最後の投票基準変更時刻」として扱う。

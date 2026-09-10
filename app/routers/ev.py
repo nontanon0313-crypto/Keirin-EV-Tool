@@ -846,7 +846,10 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     #   ほぼ的中が無いため、購入対象をEV150%以上に絞る。
     # ・3連単: EV150%以上の帯(320件中4的中)で明確に黒字のため現状維持。
     BET_TYPE_SUSPENDED = {"ワイド", "2車単"}
-    BET_TYPE_MIN_EV_OVERRIDE = {"2車複": 50.0, "3連複": 50.0}  # ev_pct>=50 は EV150%以上に相当
+    # 三連単以外はボーダーEVをさらに+100pt（50→150）。
+    # 2車複・3連複の赤字拡大を止め、三連単の検証余力を残す。
+    BET_TYPE_MIN_EV_OVERRIDE = {"2車複": 150.0, "3連複": 150.0}
+    NON_TRIFECTA_MIN_EV = 150.0  # 3連単以外の共通下限
 
     # ライン構成を買い目確率に反映(2026-09-08: 同ライン一律1.6倍のシンプルモデル。
     # 先頭→番手専用boostは位置ペア横断検証の結果、区分間の差が小さいことが分かり廃止)
@@ -894,6 +897,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
         effective_min_ev = max(req.min_ev_pct, 50.0)
+        # 三連単以外は最低EVを+100pt（実質150）まで引き上げ
+        if o.bet_type != "3連単":
+            effective_min_ev = max(effective_min_ev, NON_TRIFECTA_MIN_EV)
         gate_reason = None
         if apply_gates:
             if o.bet_type in BET_TYPE_SUSPENDED:
