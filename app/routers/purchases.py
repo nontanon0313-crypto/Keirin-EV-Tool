@@ -1565,7 +1565,7 @@ def calibration_compare(since: Optional[str] = "calibration_switch", db: Session
     }
 
 
-TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
+TARGET_BET_TYPES = ["3連単"]
 
 # 2026-09-01: 補正係数をPurchase/SkippedBetベース(偏りあり)からretroactiveベース
 # (偏り無し)へ切り替えた日時。それより前の購入は古い(過剰圧縮された)補正で
@@ -1599,6 +1599,9 @@ TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 # Purchase.purchased_at はUTCのnaive datetimeとして扱われるため、
 # 内部比較値はUTCに統一する。
 VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 10, 0, 30, 52)
+# この値は「最後に投票判断そのものを変更した時刻」。
+# UI/診断/ログだけの変更では更新しない。
+# 再投票済み判定・現行基準集計・calibration_switchはこの値を共通利用する。
 
 # 既存の集計・診断・再投票判定コードとの互換用。
 # 今後は VOTING_CRITERIA_UPDATED_AT を「最後の投票基準変更時刻」として扱う。

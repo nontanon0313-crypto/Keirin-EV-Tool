@@ -536,6 +536,10 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     created = []
     low_prob_warnings = {}
     for o in odds_rows:
+        # 現行投票基準では3連単のみを投票対象とする。
+        # 他券種はAI評価・候補化・見送り記録の対象にしない。
+        if o.bet_type != "3連単":
+            continue
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
         if getattr(req, "apply_calibration", False):
@@ -758,18 +762,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         use_cache=(as_of_dt is None),
         as_of_dt=as_of_dt,
     )
-    # 実購入集合で残る楽観バイアス用の追加係数（選別後校正）
-    purchase_set_factors = purchases_router.get_purchase_set_calibration_factors(
-        db,
-        use_cache=(as_of_dt is None),
-        as_of_dt=as_of_dt,
-    )
-    high_odds_residual_factors = purchases_router.get_high_odds_residual_factors(
-        db,
-        use_cache=(as_of_dt is None),
-        as_of_dt=as_of_dt,
-    )
-    _t2 = _time.time()  # ここまで: 校正係数(第1段+第2段)取得
+    # 投票判断では第1段の勝率帯キャリブレーションのみ使用する。
+    # 券種別補正・購入集合補正・オッズ帯補正・高オッズ補正は使用しない。
+    _t2 = _time.time()  # ここまで: 勝率帯キャリブレーション取得
 
     # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
     # (3連複・2車複・ワイド)より難しく、レースのステージ(S級決勝等)によっては
@@ -869,6 +864,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             norm_mass[arity] = 1.0
 
     for o in odds_rows:
+        # 現行投票基準では3連単以外を評価しない。
+        if o.bet_type != "3連単":
+            continue
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob_raw = _estimate_prob(
             win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost,
@@ -881,16 +879,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 est_prob_raw, calibration_factors, bet_type=o.bet_type
             )
             # 第2段: 購入集合で観測された券種×オッズ帯の残差を掛ける
-            if getattr(req, "apply_purchase_set_calibration", False):
-                est_prob = _apply_purchase_set_factor(
-                    est_prob, o.odds_value, o.bet_type, purchase_set_factors
-                )
-                # 方針B: 高オッズ帯は的中率残差でさらに確率を寄せる（禁止ではない）
-                if getattr(req, "apply_purchase_set_calibration", False):
-                    est_prob = _apply_high_odds_residual(
-                        est_prob, o.odds_value, o.bet_type, high_odds_residual_factors
-                    )
-                low_prob_warning = est_prob < 0.05
+            # 現行投票基準ではオッズ帯による確率補正を行わない。
+            # オッズはEV計算の入力値としてのみ使用する。
+            low_prob_warning = est_prob < 0.05
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
