@@ -2806,7 +2806,7 @@ def diagnostics_predicted_vs_actual_return(
     絞り込み（replay直後の効果測定用）:
     - hours: 直近N時間（purchased_at 基準）
     - last_n_races: 直近に購入されたレースをN件分
-    - since: ISO日時
+    - since: ISO日時 または calibration_switch（現行投票基準の開始時刻）
     """
 
     query = (
@@ -2822,17 +2822,21 @@ def diagnostics_predicted_vs_actual_return(
         since_dt = datetime.utcnow() - timedelta(hours=float(hours))
         filter_note.append(f"hours={hours}")
     elif since:
-        try:
-            since_dt = datetime.fromisoformat(
-                since.replace("Z", "+00:00")
-            )
-            if since_dt.tzinfo is not None:
-                since_dt = since_dt.replace(tzinfo=None)
-        except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail="sinceはISO日時を指定してください"
-            )
+        # calibration_switch は現行投票基準の開始時刻ショートカット
+        if since == "calibration_switch":
+            since_dt = CALIBRATION_SWITCH_AT
+        else:
+            try:
+                since_dt = datetime.fromisoformat(
+                    since.replace("Z", "+00:00")
+                )
+                if since_dt.tzinfo is not None:
+                    since_dt = since_dt.replace(tzinfo=None)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="sinceはISO日時、または calibration_switch を指定してください"
+                )
 
     if since_dt is not None:
         if hasattr(models.Purchase, "purchased_at"):
