@@ -55,7 +55,7 @@ def _filter_by_created(q, model, since_dt: Optional[datetime]):
 
 def _load_settled_purchases(db: Session, since_dt: Optional[datetime]) -> List[models.Purchase]:
     # Purchaseにrace relationshipは無い。日付はpurchased_atを使う。
-    q = db.query(models.Purchase).filter(models.Purchase.result.in_(("win", "lose")))
+    q = db.query(models.Purchase).filter(models.Purchase.result.in_(("win", "lose"))).filter(models.Purchase.bet_type == "3連単")
     if since_dt is not None:
         q = q.filter(models.Purchase.purchased_at >= since_dt)
     return q.all()
@@ -739,7 +739,10 @@ def diagnostics_bet_type_funnel(
     stake_map = _default_stakes_by_type(purchases)
 
     by_type: Dict[str, dict] = {}
-    all_types = sorted(set([p.bet_type for p in purchases] + [s.bet_type for s in skips_all]))
+    all_types = ["3連単"] if (
+        any(p.bet_type == "3連単" for p in purchases)
+        or any(s.bet_type == "3連単" for s in skips_all)
+    ) else []
     for bt in all_types:
         ps = [p for p in purchases if p.bet_type == bt]
         ss = [s for s in skips_all if s.bet_type == bt]
@@ -795,7 +798,7 @@ def diagnostics_prob_calibration_grid(
     db: Session = Depends(get_db),
 ):
     """
-    券種×勝率帯で「予測確率 vs 実績的中率」を並べる。
+    旧券種×勝率帯診断。現行の投票判断・集計対象外。
     購入＋結果付き見送りの両方を使う（除外的中の見落としを含む）。
     """
     since_dt = _since_dt(since)
@@ -2069,7 +2072,7 @@ def diagnostics_pick_to_bet_funnel(
     q = (
         db.query(models.Purchase)
         .filter(models.Purchase.result.in_(("win", "lose")))
-        .filter(models.Purchase.bet_type.in_(("3連単", "2車単")))
+        .filter(models.Purchase.bet_type == "3連単")
     )
     if since_dt is not None:
         q = q.filter(models.Purchase.purchased_at >= since_dt)
@@ -3607,7 +3610,7 @@ def diagnostics_calibration_significance(
 
         q = db.query(models.Purchase).filter(
             models.Purchase.result.in_(("win", "lose"))
-        )
+        ).filter(models.Purchase.bet_type == "3連単")
         if since_dt is not None:
             q = q.filter(models.Purchase.purchased_at >= since_dt)
         rows = q.all()

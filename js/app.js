@@ -1974,10 +1974,6 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     html += renderBucketTable("買い目内平均競走得点別", data.by_race_score);
     html += renderBucketTable("買い目内脚質構成別", data.by_leg_style);
     html += renderBucketTable("人気集中度パターン別", data.by_popularity_pattern);
-    if (data.odds_drift && !data.odds_drift.message) {
-      html += `<p style="margin-top:10px;"><strong>オッズ変動の影響</strong></p>`;
-      html += `<p>サンプル数: ${data.odds_drift.sample_count}件 / 平均乖離: ${data.odds_drift.avg_odds_drift_pct}% / 不利方向の割合: ${data.odds_drift.worsened_ratio_pct}%</p>`;
-    }
     resultBox.innerHTML = html;
 
     // 集計結果をもとに、シミュレーションの勝率・オッズを最新値に更新し、
@@ -1991,38 +1987,6 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
   }
 });
 
-document.getElementById("loadOddsCapBtn").addEventListener("click", async () => {
-  const resultBox = document.getElementById("statsResult");
-  resultBox.textContent = "オッズ上限感度を計算中...";
-  try {
-    const res = await fetch(apiUrl("/purchases/diagnostics/odds-cap-sensitivity?since=calibration_switch"));
-    const data = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(data));
-    let html = `<p><strong>オッズ上限の感度分析</strong>(読み取り専用)</p>`;
-    html += `<p class="note">期間: ${data.since_resolved || data.since || "-"} / 確定ベット ${data.total_settled_bets ?? "-"}件</p>`;
-    const rows = data.by_odds_cap || data.scenarios || [];
-    if (!rows.length) {
-      html += `<p class="note">該当データがありません(再投票前や現行基準のPurchaseが0件の可能性)</p>`;
-    } else {
-      html += `<table><tr><th>上限</th><th>件数</th><th>的中</th><th>的中率</th><th>ROI</th><th>損益</th><th>黒字レース率</th><th>最大DD</th><th>上位1的中シェア</th></tr>`;
-      for (const s of rows) {
-        const pc = s.profit_concentration || {};
-        html += `<tr><td>${s.odds_cap ?? s.label ?? "-"}</td><td>${s.bet_count ?? "-"}</td><td>${s.hit_count ?? "-"}</td>` +
-          `<td>${s.hit_rate_pct != null ? s.hit_rate_pct + "%" : (s.actual_hit_rate_pct != null ? s.actual_hit_rate_pct + "%" : "-")}</td>` +
-          `<td>${s.roi_pct != null ? s.roi_pct + "%" : (s.actual_roi_pct != null ? s.actual_roi_pct + "%" : "-")}</td>` +
-          `<td>${s.profit_total != null ? s.profit_total : (s.actual_profit != null ? s.actual_profit : "-")}</td>` +
-          `<td>${s.black_race_rate_pct != null ? s.black_race_rate_pct + "%" : "-"}</td>` +
-          `<td>${s.max_drawdown != null ? s.max_drawdown : "-"}</td>` +
-          `<td>${pc.top1_hit_profit_share_pct != null ? pc.top1_hit_profit_share_pct + "%" : "-"}</td></tr>`;
-      }
-      html += `</table>`;
-    }
-    if (data.note) html += `<p class="note">${data.note}</p>`;
-    resultBox.innerHTML = html;
-  } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
-  }
-});
 
 document.getElementById("loadExcludeTopBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
@@ -2163,104 +2127,6 @@ document.getElementById("loadPipelineBtn").addEventListener("click", async () =>
   }
 });
 
-document.getElementById("loadHighOddsCheckBtn").addEventListener("click", async () => {
-  const resultBox = document.getElementById("statsResult");
-  resultBox.textContent = "ワイド原因調査（高オッズ二重補正チェック）を取得中...";
-  try {
-    const res = await fetch(apiUrl("/purchases/diagnostics/high-odds-correction-check"));
-    if (res.status === 404) {
-      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
-      return;
-    }
-    const data = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(data));
-
-    const roi = (v) => (v == null || v === undefined) ? "-" : `${Number(v).toFixed(1)}%`;
-    const num = (v) => (v == null || v === undefined) ? "-" : v;
-
-    let html = `<p><strong>ワイド原因調査（高オッズ二重補正チェック）</strong>（読み取り専用・全期間対象）</p>`;
-    html += `<p class="note">${data.note || ""}</p>`;
-
-    // 券種別・全期間実績ROI
-    html += `<p style="margin-top:10px;"><strong>券種別・全期間・実購入のみの実績ROI</strong></p>`;
-    html += `<table><tr><th>券種</th><th>件数</th><th>的中数</th><th>的中率</th><th>実績ROI</th><th>損益</th></tr>`;
-    for (const [bt, s] of Object.entries(data["券種別_全期間実績ROI"] || {})) {
-      if (!s) continue;
-      html += `<tr>
-        <td><strong>${bt}</strong></td>
-        <td>${num(s["件数"])}</td>
-        <td>${num(s["的中数"])}</td>
-        <td>${num(s["的中率%"])}%</td>
-        <td>${roi(s["実績ROI%"])}</td>
-        <td>${num(s["損益"])}円</td>
-      </tr>`;
-    }
-    html += `</table>`;
-
-    // ワイドのオッズ帯別内訳
-    html += `<p style="margin-top:10px;"><strong>ワイド・オッズ帯別・全期間実績ROI</strong></p>`;
-    const wideBands = data["ワイド_オッズ帯別_全期間実績ROI"] || {};
-    if (!Object.keys(wideBands).length) {
-      html += `<p class="note">ワイドの実購入データがありません</p>`;
-    } else {
-      html += `<table><tr><th>オッズ帯</th><th>件数</th><th>的中数</th><th>的中率</th><th>実績ROI</th><th>損益</th></tr>`;
-      for (const [band, s] of Object.entries(wideBands)) {
-        if (!s) continue;
-        html += `<tr>
-          <td><strong>${band}</strong></td>
-          <td>${num(s["件数"])}</td>
-          <td>${num(s["的中数"])}</td>
-          <td>${num(s["的中率%"])}%</td>
-          <td>${roi(s["実績ROI%"])}</td>
-          <td>${num(s["損益"])}円</td>
-        </tr>`;
-      }
-      html += `</table>`;
-    }
-
-    // 高オッズ帯の二重補正チェック
-    html += `<p style="margin-top:10px;"><strong>高オッズ帯・二重補正チェック</strong></p>`;
-    html += `<table><tr><th>オッズ帯</th><th>第2段補正の係数</th><th>第2段の件数</th><th>方針B補正の係数</th><th>方針Bの件数</th><th>実際にかかる合計倍率</th></tr>`;
-    for (const [band, c] of Object.entries(data["高オッズ帯_二重補正チェック"] || {})) {
-      html += `<tr>
-        <td><strong>${band}</strong></td>
-        <td>${num(c["第2段補正(purchase_set_factor)の係数"])}</td>
-        <td>${num(c["第2段補正の対象件数"])}</td>
-        <td>${num(c["方針B補正(high_odds_residual)の係数"])}</td>
-        <td>${num(c["方針B補正の対象件数"])}</td>
-        <td><strong>${num(c["実際にrace-planで掛かる合計倍率(2つの積)"])}</strong></td>
-      </tr>`;
-    }
-    html += `</table>`;
-    html += `<p class="note">${data["二重補正チェックの見方"] || ""}</p>`;
-
-    // 券種別EV帯別ROI(母数不足仮説の検証)
-    html += `<p style="margin-top:10px;"><strong>券種別・EV帯別・全期間実績ROI（母数不足仮説の検証）</strong></p>`;
-    html += `<p class="note">EVが高い帯ほど実績ROIも上がるのが本来の姿。上がらない(broken)なら、確率・EV計算そのものに歪みがある可能性が高い。</p>`;
-    for (const [bt, block] of Object.entries(data["券種別_EV帯別_全期間実績ROI"] || {})) {
-      const corr = block.ev_rank_correlation;
-      const corrLabel = corr === "broken" ? "🔴崩れている" : corr === "positive" ? "🟢良好" : corr === "flat" ? "🟡横ばい" : "判定不能";
-      html += `<p style="margin-top:6px;"><strong>${bt}</strong>: ${corrLabel}（${block.note || ""}）</p>`;
-      html += `<table><tr><th>EV帯</th><th>件数</th><th>的中</th><th>実的中率</th><th>予想EV%</th><th>実績ROI</th><th>参考</th></tr>`;
-      for (const b of block.bands || []) {
-        html += `<tr>
-          <td>${b.band}</td>
-          <td>${num(b.bet_count)}</td>
-          <td>${num(b.hit_count)}</td>
-          <td>${b.actual_hit_rate_pct != null ? Number(b.actual_hit_rate_pct).toFixed(1) + "%" : "-"}</td>
-          <td>${b.predicted_average_ev_pct != null ? Number(b.predicted_average_ev_pct).toFixed(1) + "%" : "-"}</td>
-          <td>${roi(b.actual_roi_pct)}</td>
-          <td>${b.n_insufficient ? "件数少" : ""}</td>
-        </tr>`;
-      }
-      html += `</table>`;
-    }
-
-    resultBox.innerHTML = html;
-  } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
-  }
-});
 
 document.getElementById("loadLineBoostSweepBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
@@ -2514,8 +2380,7 @@ document.getElementById("loadCalibStructBtn").addEventListener("click", async ()
     html += `</table>`;
 
     // by bet type x bucket (collapsed summary of largest gaps)
-    html += `<p style="margin-top:14px;"><strong>④ 券種×勝率帯（係数差が大きい順・上位）</strong></p>`;
-    const pairs = [];
+const pairs = [];
     for (const [bt, bands] of Object.entries(data.by_bet_type_bucket || {})) {
       for (const [band, v] of Object.entries(bands || {})) {
         const c = (v || {}).current || {};
@@ -2645,8 +2510,7 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
     html += "</table>";
 
     if (data.by_bet_type_bucket && Object.keys(data.by_bet_type_bucket).length) {
-      html += `<p style="margin-top:12px;"><strong>券種×勝率帯の交差係数</strong></p>`;
-      html += `<table><tr><th>券種</th><th>勝率帯</th><th>試行数</th><th>必要数</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
+html += `<table><tr><th>券種</th><th>勝率帯</th><th>試行数</th><th>必要数</th><th>実績的中率</th><th>予想平均</th><th>ズレ</th><th>偶然の確率</th><th>補正係数</th></tr>`;
       for (const [bt, bands] of Object.entries(data.by_bet_type_bucket)) {
         // APIは { "3連単": { "0-5%(大穴)": {sample_count...} } } の入れ子
         if (!bands || typeof bands !== "object" || bands.sample_count != null) {
@@ -2704,6 +2568,13 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
     html += `<p class="note">各軸のチェックは表示のオンオフです。勝率帯の自動補正そのもののオンオフは、下の「自動補正をプランに適用する」を使います。</p>`;
     html += `<p class="note">📌 判断は主に「乖離(ポイント)」と「実績収支率」(実際に購入した分のみ)で見てください。p値は件数が多いほど、ごくわずかなズレでも「有意」と出やすくなるため、件数が多い条件では0%に近くなりがちです(判断の補助情報として参考程度に)。</p>`;
     for (const [axis, rows] of Object.entries(data.axes || {})) {
+      if (
+        axis.includes("券種×勝率帯") ||
+        axis.includes("バンク×オッズ帯") ||
+        axis.includes("ライン絡み×オッズ帯") ||
+        axis.includes("ライン絡み×勝率帯") ||
+        axis.includes("オッズ")
+      ) continue;
       const on = enabled[axis] !== false;
       html += `<h3>${axis} <label style="font-weight:normal;font-size:13px;"><input type="checkbox" class="calAxisToggle" data-axis="${axis}" ${on ? "checked" : ""}> この軸を表示</label></h3>`;
       if (!on) {

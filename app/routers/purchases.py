@@ -59,7 +59,7 @@ def update_purchase_result(purchase_id: int, update: schemas.PurchaseResultUpdat
     return obj
 
 
-def get_calibration_factors(db: Session) -> dict:
+def get_calibration_factors(db: Session, as_of_dt: Optional[datetime] = None) -> dict:
     """
     勝率帯ごとの自動補正係数を計算する。
     試行数が「200÷帯の代表確率」に達した帯だけ、実績に基づく補正係数を返す(段階的補正)。
@@ -77,7 +77,12 @@ def get_calibration_factors(db: Session) -> dict:
     偏ったサンプルで学習されている可能性がある。偏りの無い検証は
     get_calibration_factors_retroactive()を参照。
     """
-    purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    purchases = (
+        db.query(models.Purchase)
+        .filter(models.Purchase.result != "pending")
+        .filter(models.Purchase.bet_type == "3連単")
+        .all()
+    )
     if as_of_dt is not None:
         race_times = {
             r.id: _race_event_dt(r)
@@ -88,7 +93,12 @@ def get_calibration_factors(db: Session) -> dict:
             if race_times.get(p.race_id) is not None
             and race_times[p.race_id] < as_of_dt
         ]
-    skipped = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None)).all()
+    skipped = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.actual_result.isnot(None))
+        .filter(models.SkippedBet.bet_type == "3連単")
+        .all()
+    )
 
     # Purchase/SkippedBetを「予想確率・的中したか・情報源」という共通の形に正規化して結合する
     # 補正係数は「補正前の予想 vs 実績」から学ぶ。rawが無い旧データは
@@ -1190,7 +1200,11 @@ def calibration_status(db: Session = Depends(get_db)):
 
     purchases = (
         db.query(models.Purchase)
-        .filter(models.Purchase.result != "pending", models.Purchase.win_prob_at_purchase.isnot(None))
+        .filter(
+            models.Purchase.result != "pending",
+            models.Purchase.bet_type == "3連単",
+            models.Purchase.win_prob_at_purchase.isnot(None),
+        )
         .all()
     )
 
@@ -1203,13 +1217,9 @@ def calibration_status(db: Session = Depends(get_db)):
     # 補正後は「今の係数を raw に掛けた値」ではなく、保存済み win_prob_at_purchase
     # (購入時に補正が掛かっていればそれが入る)。比較用に raw×factor も計算する。
     factor_overall = None
-    by_bt = None
-    by_bt_bucket = None
     bucket_only = buckets
     if isinstance(buckets, dict):
         factor_overall = buckets.get("overall")
-        by_bt = buckets.get("by_bet_type")
-        by_bt_bucket = buckets.get("by_bet_type_bucket")
         bucket_only = {
             k: v for k, v in buckets.items()
             if k not in ("by_bet_type", "by_bet_type_bucket", "overall")
@@ -1256,6 +1266,7 @@ def calibration_status(db: Session = Depends(get_db)):
         .outerjoin(models.Race, models.Race.id == models.Purchase.race_id)
         .filter(
             models.Purchase.result != "pending",
+            models.Purchase.bet_type == "3連単",
             models.Purchase.win_prob_at_purchase.isnot(None),
         )
         .all()
@@ -1306,8 +1317,6 @@ def calibration_status(db: Session = Depends(get_db)):
         "overall": overall,
         "factor_overall": factor_overall,
         "buckets": bucket_only,
-        "by_bet_type": by_bt,
-        "by_bet_type_bucket": by_bt_bucket,
         "message": (
             "【見方】主に「補正の効き」と「直近3日/7日」を見てください。"
             "全期間の1本の乖離は母数が大きく数日ではほぼ動きません(参考値)。"
@@ -1326,8 +1335,20 @@ def calibration_compare(since: Optional[str] = "calibration_switch", db: Session
     絞り込むようにした。全期間を見たい場合は since=all を指定する。
     """
     since_dt = _parse_since_param(since) if since != "all" else None
-    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
-    sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
+    pq = (
+        db.query(models.Purchase)
+        .filter(
+            models.Purchase.result != "pending",
+            models.Purchase.bet_type == "3連単",
+        )
+    )
+    sq = (
+        db.query(models.SkippedBet)
+        .filter(
+            models.SkippedBet.actual_result.isnot(None),
+            models.SkippedBet.bet_type == "3連単",
+        )
+    )
     if since_dt is not None:
         pq = pq.filter(models.Purchase.purchased_at >= since_dt)
         sq = sq.filter(models.SkippedBet.created_at >= since_dt)
@@ -1476,10 +1497,6 @@ def calibration_compare(since: Optional[str] = "calibration_switch", db: Session
     def bank_bucket(r):
         race = races_by_id.get(r.race_id)
         return race.venue_name if race else "会場不明"
-
-    def bet_type_bucket(r):
-        return r.bet_type
-
     def prob_bucket_cal(r):
         prob = r.prob_cal if r.prob_cal is not None else r.prob_raw or 0
         name, _ = calc.get_prob_bucket(prob)
@@ -1491,7 +1508,6 @@ def calibration_compare(since: Optional[str] = "calibration_switch", db: Session
     axes = {
         "券種別": bet_type_bucket,
         "勝率帯別": prob_bucket_cal,
-        "券種×勝率帯(新設した交差補正)": bet_type_x_prob_bucket,
         "バンク別": bank_bucket,
         "ライン絡み別": line_bucket,
         "並び有無": lines_presence,
@@ -2103,7 +2119,6 @@ def calibration_factors_compare(db: Session = Depends(get_db)):
         "overall": overall_compare,
         "by_bucket": by_bucket_compare,
         "by_bet_type": by_bet_type_compare,
-        "by_bet_type_bucket": by_bet_type_bucket_compare,
         "condition_specific_correction_candidates": condition_specific_correction_candidates,
         "message": (
             "currentは今まで実際の投票判断に使われてきた係数(Purchase/SkippedBet"
@@ -4135,7 +4150,7 @@ def _compute_purchase_stats(db: Session, since_dt=None):
 
     combo_buckets = {
         "グレード×季節": combo_bucket(grade_bucket, "グレード", season_bucket, "季節"),
-        "券種×勝率帯": combo_bucket(lambda p: p.bet_type, "券種", prob_bucket, "勝率帯"),
+
         "季節×バンク先行有利度": combo_bucket(season_bucket, "季節", bank_lead_bucket, "先行有利度"),
         "券種×ライン絡み": combo_bucket(lambda p: p.bet_type, "券種", line_bucket, "ライン"),
         "券種×人気集中度パターン": combo_bucket(lambda p: p.bet_type, "券種", popularity_pattern_bucket, "人気集中度"),
@@ -4143,12 +4158,11 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         # 差」なのか「特定の券種・オッズ帯がそのバンクに偏っているだけ」なのかを
         # 切り分けるための組み合わせ。
         "バンク×券種": combo_bucket(bank_bucket, "バンク", lambda p: p.bet_type, "券種"),
-        "バンク×オッズ帯": combo_bucket(bank_bucket, "バンク", odds_band_bucket, "オッズ帯"),
+
         # 2026-09-07追加(ChatGPT分析項目7対応): 同ライン絡みの高回収率が
         # 「同ラインだから」なのか「同ライン条件に高オッズの買い目が集中して
         # いるだけ」なのかを切り分けるための組み合わせ。
-        "ライン絡み×オッズ帯": combo_bucket(line_bucket, "ライン", odds_band_bucket, "オッズ帯"),
-        "ライン絡み×勝率帯": combo_bucket(line_bucket, "ライン", prob_bucket, "勝率帯"),
+
     }
     min_sample_for_combo = 8
 
@@ -4378,7 +4392,6 @@ def _compute_purchase_stats(db: Session, since_dt=None):
             k: {kk: vv for kk, vv in v.items() if vv["count"] >= min_sample_for_combo}
             for k, v in combo_buckets.items()
         },
-        "odds_drift": _odds_drift_stats(purchases),
         "note": (
             "「実績」は0%が損益分岐点、「実績収支率」は100%が損益分岐点の表現です(同じ数字を2通りの基準で表しているだけです)。"
             f"件数{min_sample_for_ranking}件未満の条件はランキングから除外しています(判断が不安定なため)。"

@@ -75,155 +75,56 @@ def _estimate_prob(
 
 
 
-def _apply_calibration(est_prob: float, calibration_factors: dict, bet_type: str = None):
+def _apply_calibration(
+    est_prob: float,
+    calibration_factors: dict,
+    bet_type: str = None,
+):
     """
-    勝率帯・券種交差の補正係数を掛けた確率を返す。
-    戻り値: (補正後確率, low_prob_warning, data_sufficiency_pct, prediction_accuracy_pct)
+    勝率帯単体のキャリブレーションだけを適用する。
+
+    券種・オッズ帯・購入集合による確率補正は行わない。
+    オッズはEV計算の入力値としてのみ使用する。
     """
     bucket_name, _ = calc.get_prob_bucket(est_prob)
     info = (calibration_factors or {}).get(bucket_name)
     overall = (calibration_factors or {}).get("overall")
 
-    MIN_CROSS_SAMPLE = 30
-    cross_map = (calibration_factors or {}).get("by_bet_type_bucket") or {}
-    cross_info = (cross_map.get(bet_type) or {}).get(bucket_name) if bet_type else None
-    cross_used = False
-
     factor = 1.0
     data_sufficiency_pct = 0.0
     accuracy_pct = None
 
-    if cross_info and cross_info.get("sample_count", 0) >= MIN_CROSS_SAMPLE and cross_info.get("calibration_factor") is not None:
-        factor = float(cross_info["calibration_factor"])
-        cross_used = True
-        req = max(int(cross_info.get("required_sample_count") or 1), 1)
-        data_sufficiency_pct = min(100.0, 100.0 * float(cross_info.get("sample_count") or 0) / req)
-        accuracy_pct = cross_info.get("prediction_accuracy_pct")
-    elif info and info.get("sample_count", 0) >= 80 and info.get("calibration_factor") is not None:
+    if (
+        info
+        and info.get("sample_count", 0) >= 80
+        and info.get("calibration_factor") is not None
+    ):
         factor = float(info["calibration_factor"])
         req = max(int(info.get("required_sample_count") or 1), 1)
-        data_sufficiency_pct = min(100.0, 100.0 * float(info.get("sample_count") or 0) / req)
+        data_sufficiency_pct = min(
+            100.0,
+            100.0 * float(info.get("sample_count") or 0) / req,
+        )
         accuracy_pct = info.get("prediction_accuracy_pct")
     elif overall and overall.get("calibration_factor") is not None:
         factor = float(overall["calibration_factor"])
         req = max(int(overall.get("required_sample_count") or 1), 1)
-        data_sufficiency_pct = min(100.0, 100.0 * float(overall.get("sample_count") or 0) / req)
+        data_sufficiency_pct = min(
+            100.0,
+            100.0 * float(overall.get("sample_count") or 0) / req,
+        )
         accuracy_pct = overall.get("prediction_accuracy_pct")
 
-    if not cross_used:
-        by_bt = (calibration_factors or {}).get("by_bet_type") or {}
-        if bet_type and bet_type in by_bt and overall and overall.get("calibration_factor"):
-            bt_f = float(by_bt[bet_type]["calibration_factor"])
-            ov_f = float(overall["calibration_factor"])
-            if ov_f > 1e-9:
-                residual = bt_f / ov_f
-                residual = 1.0 + 0.5 * (residual - 1.0)
-                factor *= residual
-
-    # 下限0.25は帯校正用。購入集合の追加係数は別関数で掛ける
     factor = max(0.25, min(2.0, factor))
-    calibrated = est_prob if abs(factor - 1.0) < 1e-9 else max(0.0, min(1.0, est_prob * factor))
+    calibrated = max(0.0, min(1.0, est_prob * factor))
     low_prob_warning = calibrated < 0.05
-    return calibrated, low_prob_warning, round(data_sufficiency_pct, 1), accuracy_pct
 
-
-def _odds_band_key(odds: float) -> str:
-    """実績ゲート・購入集合残差と揃えた細分化オッズ帯。"""
-    if odds is None or odds <= 0:
-        return "不明"
-    if odds < 5:
-        return "1-5倍"
-    if odds < 10:
-        return "5-10倍"
-    if odds < 30:
-        return "10-30倍"
-    if odds < 100:
-        return "30-100倍"
-    if odds < 300:
-        return "100-300倍"
-    if odds < 1000:
-        return "300-1000倍"
-    if odds < 3000:
-        return "1000-3000倍"
-    return "3000倍以上"
-
-
-def _apply_purchase_set_factor(est_prob: float, odds_value: float, bet_type: str, purchase_factors: dict) -> float:
-    """
-    実購入集合で観測された「予測p vs 実績的中」から求めた追加係数。
-
-    優先（具体 → 粗い）:
-      券種×オッズ帯 → オッズ帯 → 券種 → 全体
-    さらに券種係数がある場合は **上限として券種係数を掛ける（cap）**。
-    - 2車単のように券種全体が悪いのに帯だけ甘い、を防ぐ
-    - 3連単のように券種が妥当なのに overall の min で潰す、も防ぐ
-    """
-    if not purchase_factors or est_prob is None or est_prob <= 0:
-        return est_prob
-    band = _odds_band_key(float(odds_value) if odds_value else 0)
-
-    factor = None
-    cross = (purchase_factors.get("by_bet_type_odds_band") or {}).get(bet_type) or {}
-    info = cross.get(band)
-    if info and info.get("n", 0) >= 20 and info.get("factor") is not None:
-        factor = float(info["factor"])
-    if factor is None:
-        info = (purchase_factors.get("by_odds_band") or {}).get(band)
-        if info and info.get("n", 0) >= 50 and info.get("factor") is not None:
-            factor = float(info["factor"])
-    bt_info = (purchase_factors.get("by_bet_type") or {}).get(bet_type)
-    bt_factor = None
-    if bt_info and bt_info.get("n", 0) >= 30 and bt_info.get("factor") is not None:
-        bt_factor = float(bt_info["factor"])
-        if factor is None:
-            factor = bt_factor
-    if factor is None:
-        overall = purchase_factors.get("overall") or {}
-        if overall.get("factor") is not None and (overall.get("n") or 0) >= 100:
-            factor = float(overall["factor"])
-
-    if factor is None:
-        return est_prob
-
-    # 券種が明確に悪い/良いときは券種係数で上限を掛ける
-    if bt_factor is not None:
-        factor = min(factor, bt_factor)
-
-    factor = max(0.08, min(1.5, factor))
-    return max(0.0, min(1.0, float(est_prob) * factor))
-
-
-
-
-def _apply_high_odds_residual(est_prob: float, odds_value: float, bet_type: str, high_odds_factors: dict) -> float:
-    """
-    300-1000 / 1000-3000 / 3000倍以上帯の的中率残差を掛ける(方針B)。
-    券種×帯があれば優先、なければ帯全体。係数が無ければそのまま。
-    """
-    if not high_odds_factors or est_prob is None or est_prob <= 0:
-        return est_prob
-    try:
-        odds = float(odds_value) if odds_value is not None else 0.0
-    except (TypeError, ValueError):
-        return est_prob
-    band = _odds_band_key(odds)
-    if band not in ("300-1000倍", "1000-3000倍", "3000倍以上"):
-        return est_prob
-
-    factor = None
-    cross = (high_odds_factors.get("by_bet_type_odds_band") or {}).get(bet_type) or {}
-    info = cross.get(band)
-    if info and info.get("factor") is not None:
-        factor = float(info["factor"])
-    if factor is None:
-        info = (high_odds_factors.get("by_odds_band") or {}).get(band)
-        if info and info.get("factor") is not None:
-            factor = float(info["factor"])
-    if factor is None:
-        return est_prob
-    factor = max(0.08, min(1.5, factor))
-    return max(0.0, min(1.0, float(est_prob) * factor))
-
+    return (
+        calibrated,
+        low_prob_warning,
+        round(data_sufficiency_pct, 1),
+        accuracy_pct,
+    )
 
 def _save_skipped_bets(db: Session, race_id: int, skipped_for_verification: list) -> int:
     """
@@ -516,6 +417,8 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     # 券種ごとにオッズをまとめ、正規化した市場確率を使えるようにする
     by_bet_type = {}
     for o in odds_rows:
+        if o.bet_type != "3連単":
+            continue
         by_bet_type.setdefault(o.bet_type, {})[o.combination] = o.odds_value
 
     normalized_market = {}
@@ -772,7 +675,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # そのステージでの結果確定済みレース数がまだ少ないうちは、着順指定の券種だけ
     # 見送り、顔ぶれ判定の券種は通常通り投票対象にする。件数が閾値を超えたら
     # 自動的に通常運用へ戻る(のんの要望により追加)。
-    ORDER_SENSITIVE_BET_TYPES = {"3連単", "2車単"}
+    ORDER_SENSITIVE_BET_TYPES = {"3連単"}
     MIN_STAGE_SAMPLE_FOR_ORDER_BETS = 30
     stage_sample_n = None
     if race.race_stage:
@@ -840,11 +743,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     #    3連複 270件中2的中の帯で実績51.2%)。EV105〜150%のデッドゾーンでは
     #   ほぼ的中が無いため、購入対象をEV150%以上に絞る。
     # ・3連単: EV150%以上の帯(320件中4的中)で明確に黒字のため現状維持。
-    BET_TYPE_SUSPENDED = {"ワイド", "2車単"}
     # 三連単以外はボーダーEVをさらに+100pt（50→150）。
     # 2車複・3連複の赤字拡大を止め、三連単の検証余力を残す。
-    BET_TYPE_MIN_EV_OVERRIDE = {"2車複": 150.0, "3連複": 150.0}
-    NON_TRIFECTA_MIN_EV = 150.0  # 3連単以外の共通下限
 
     # ライン構成を買い目確率に反映(2026-09-08: 同ライン一律1.6倍のシンプルモデル。
     # 先頭→番手専用boostは位置ペア横断検証の結果、区分間の差が小さいことが分かり廃止)
@@ -878,9 +778,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(
                 est_prob_raw, calibration_factors, bet_type=o.bet_type
             )
-            # 第2段: 購入集合で観測された券種×オッズ帯の残差を掛ける
-            # 現行投票基準ではオッズ帯による確率補正を行わない。
-            # オッズはEV計算の入力値としてのみ使用する。
             low_prob_warning = est_prob < 0.05
         else:
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
@@ -888,29 +785,20 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
         effective_min_ev = max(req.min_ev_pct, 50.0)
-        # 三連単以外は最低EVを+100pt（実質150）まで引き上げ
-        if o.bet_type != "3連単":
-            effective_min_ev = max(effective_min_ev, NON_TRIFECTA_MIN_EV)
         gate_reason = None
         if apply_gates:
-            if o.bet_type in BET_TYPE_SUSPENDED:
-                gate_reason = (
-                    f"不調券種除外({o.bet_type}:全期間実績ROI0%・EV150%以上帯でも的中なし。"
-                    f"2026-09-08のん承認)"
-                )
-            else:
-                override = BET_TYPE_MIN_EV_OVERRIDE.get(o.bet_type)
-                if override is not None:
-                    effective_min_ev = max(effective_min_ev, override)
-                # 不調ステージのみ除外(券種は問わない)。券種・帯・購入集合ゲートは禁止。
-                if race.race_stage and race.race_stage in stage_exp_map:
-                    st = stage_exp_map[race.race_stage]
-                    if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
-                        gate_reason = (
-                            f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
-                            f"{st['n']}件)"
-                        )
-
+            # 現行仕様:
+            # - 券種別ゲートなし
+            # - オッズ帯ゲートなし
+            # - 購入集合ゲートなし
+            # - 不調レースステージのみ見送り
+            if race.race_stage and race.race_stage in stage_exp_map:
+                st = stage_exp_map[race.race_stage]
+                if st["expectancy_pct"] < STAGE_EXPECTANCY_CUTOFF:
+                    gate_reason = (
+                        f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
+                        f"{st['n']}件)"
+                    )
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
         stage_order_gate = apply_gates and stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
         if stage_order_gate:
