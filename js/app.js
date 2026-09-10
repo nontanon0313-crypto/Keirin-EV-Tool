@@ -2756,7 +2756,7 @@ function loadCalAxisEnabled() {
 
 function isCalibrationApplyEnabled() {
   const el = document.getElementById("applyCalibrationCheckbox");
-  return !el || el.checked;
+  return !!el && el.checked;
 }
 
 // 自動補正ON/OFFチェックボックスの状態を保存・復元する。
@@ -2765,10 +2765,10 @@ function isCalibrationApplyEnabled() {
 (function initCalibrationApplyCheckbox() {
   const el = document.getElementById("applyCalibrationCheckbox");
   if (!el) return;
-  const saved = localStorage.getItem("keirin_apply_calibration");
-  el.checked = saved === null ? true : saved === "true";
+  const saved = localStorage.getItem("keirin_apply_calibration_v2");
+  el.checked = saved === "true";
   el.addEventListener("change", () => {
-    localStorage.setItem("keirin_apply_calibration", String(el.checked));
+    localStorage.setItem("keirin_apply_calibration_v2", String(el.checked));
   });
 })();
 
