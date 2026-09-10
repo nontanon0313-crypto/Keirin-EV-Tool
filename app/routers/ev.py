@@ -533,7 +533,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     for o in odds_rows:
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
-        if getattr(req, "apply_calibration", True):
+        if getattr(req, "apply_calibration", False):
             est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob_raw, calibration_factors, bet_type=o.bet_type)
         else:
             est_prob, low_prob_warning = est_prob_raw, False
@@ -840,17 +840,17 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         arity = calc.BET_TYPE_ARITY.get(o.bet_type)
         if arity in norm_mass:
             est_prob_raw = est_prob_raw / norm_mass[arity]
-        if getattr(req, "apply_calibration", True):
+        if getattr(req, "apply_calibration", False):
             est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(
                 est_prob_raw, calibration_factors, bet_type=o.bet_type
             )
             # 第2段: 購入集合で観測された券種×オッズ帯の残差を掛ける
-            if getattr(req, "apply_purchase_set_calibration", True):
+            if getattr(req, "apply_purchase_set_calibration", False):
                 est_prob = _apply_purchase_set_factor(
                     est_prob, o.odds_value, o.bet_type, purchase_set_factors
                 )
                 # 方針B: 高オッズ帯は的中率残差でさらに確率を寄せる（禁止ではない）
-                if getattr(req, "apply_purchase_set_calibration", True):
+                if getattr(req, "apply_purchase_set_calibration", False):
                     est_prob = _apply_high_odds_residual(
                         est_prob, o.odds_value, o.bet_type, high_odds_residual_factors
                     )
@@ -860,7 +860,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
-        effective_min_ev = req.min_ev_pct
+        effective_min_ev = max(req.min_ev_pct, 50.0)
         gate_reason = None
         if apply_gates:
             if o.bet_type in BET_TYPE_SUSPENDED:
