@@ -800,7 +800,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                         f"{st['n']}件)"
                     )
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
-        stage_order_gate = apply_gates and stage_sample_insufficient and o.bet_type in ORDER_SENSITIVE_BET_TYPES
+        # 2026-09-10確定: ステージサンプル不足による着順券の一律見送りは使わない
+        stage_order_gate = False
         if stage_order_gate:
             is_recommended = False
             stage_gated_keys.add((o.bet_type, o.combination))

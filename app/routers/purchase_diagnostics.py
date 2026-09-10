@@ -3740,3 +3740,74 @@ def diagnostics_calibration_significance(
             "traceback": traceback.format_exc()[-3000:],
         }
 
+@router.get("/first-place-signal-compare")
+def diagnostics_first_place_signal_compare(db: Session = Depends(get_db)):
+    """1着信号比較（読み取り専用）。フィルター・購入は見ない。"""
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+    n = 0
+    hits = {"blended_top": 0, "race_score_top": 0, "band_adjusted_top": 0, "agree": 0, "agree_hit": 0}
+    skipped = 0
+    for race in races:
+        entries = [e for e in (race.entries or []) if e.car_number is not None]
+        if len(entries) < 3:
+            skipped += 1
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            skipped += 1
+            continue
+        actual_1st = canonical[0][0]
+        blended, scores = {}, {}
+        for e in entries:
+            car = int(e.car_number)
+            p = e.blended_win_prob if e.blended_win_prob is not None else e.ai_win_prob
+            if p is None and e.app_win_rate is not None:
+                p = float(e.app_win_rate)/100.0 if float(e.app_win_rate)>1 else float(e.app_win_rate)
+            if p is not None:
+                blended[car] = float(p)
+            if e.race_score is not None:
+                scores[car] = float(e.race_score)
+        if len(blended) < 3:
+            skipped += 1
+            continue
+        n += 1
+        b_top = max(blended, key=lambda c: blended[c])
+        s_top = max(scores, key=lambda c: scores[c]) if scores else None
+        try:
+            adjusted = calc.apply_race_score_band_factors(dict(blended), entries)
+            a_top = max(adjusted, key=lambda c: adjusted[c]) if adjusted else b_top
+        except Exception:
+            a_top = b_top
+        if b_top == actual_1st: hits["blended_top"] += 1
+        if s_top is not None and s_top == actual_1st: hits["race_score_top"] += 1
+        if a_top == actual_1st: hits["band_adjusted_top"] += 1
+        if s_top is not None and b_top == s_top:
+            hits["agree"] += 1
+            if b_top == actual_1st: hits["agree_hit"] += 1
+    def rate(k):
+        return round(hits[k]/n*100, 2) if n else None
+    return {
+        "note": "1着予測信号の比較。投票有無は見ない。",
+        "評価レース数": n,
+        "除外": skipped,
+        "1着的中率%": {
+            "blended最大": rate("blended_top"),
+            "競走得点最大": rate("race_score_top"),
+            "得点帯factor適用後": rate("band_adjusted_top"),
+        },
+        "blendedと得点の一致": {
+            "一致レース数": hits["agree"],
+            "一致かつ1着的中率%": round(hits["agree_hit"]/hits["agree"]*100, 2) if hits["agree"] else None,
+        },
+    }
+
