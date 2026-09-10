@@ -1587,9 +1587,22 @@ TARGET_BET_TYPES = ["2車単", "2車複", "3連単", "3連複", "ワイド"]
 #
 # Purchase.purchased_at は datetime.utcnow() で保存されるため、naiveな
 # 「日付の0時」をJSTの暦日の始まりと取り違えないこと。
-CALIBRATION_SWITCH_AT = datetime(2026, 9, 8, 2, 0, 0)
+# 現行の投票基準へ切り替わった正確な日時。
+#
+# 集計対象・再投票済み判定・calibration_switch の基準は、
+# 暦日ではなく「最後に投票基準を変更したコミット時刻」を使用する。
+#
+# 最新の投票基準変更コミット:
+# 6e29ad4f591bc5ba1f2a647aedf9c0978e5f46fc
+# 2026-09-10T09:30:52+09:00
+#
+# Purchase.purchased_at はUTCのnaive datetimeとして扱われるため、
+# 内部比較値はUTCに統一する。
+VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 10, 0, 30, 52)
 
-
+# 既存の集計・診断・再投票判定コードとの互換用。
+# 今後は VOTING_CRITERIA_UPDATED_AT を「最後の投票基準変更時刻」として扱う。
+CALIBRATION_SWITCH_AT = VOTING_CRITERIA_UPDATED_AT
 def _parse_since_param(since: Optional[str]) -> Optional[datetime]:
     """
     'calibration_switch' というショートカットか、ISO日時文字列を受け取る。
