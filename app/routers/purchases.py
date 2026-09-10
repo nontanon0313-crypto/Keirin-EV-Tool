@@ -78,6 +78,16 @@ def get_calibration_factors(db: Session) -> dict:
     get_calibration_factors_retroactive()を参照。
     """
     purchases = db.query(models.Purchase).filter(models.Purchase.result != "pending").all()
+    if as_of_dt is not None:
+        race_times = {
+            r.id: _race_event_dt(r)
+            for r in db.query(models.Race).all()
+        }
+        purchases = [
+            p for p in purchases
+            if race_times.get(p.race_id) is not None
+            and race_times[p.race_id] < as_of_dt
+        ]
     skipped = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None)).all()
 
     # Purchase/SkippedBetを「予想確率・的中したか・情報源」という共通の形に正規化して結合する
@@ -112,7 +122,29 @@ _purchase_set_calibration_cache = {"computed_at": 0.0, "value": None}
 RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS = 60 * 60  # 60分（replay中に再計算しない）
 
 
-def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> dict:
+def _race_event_dt(race):
+    """
+    リプレイ時の時系列基準。
+    post_time(発走予定時刻)を最優先し、無ければrace_date、created_atへフォールバック。
+    as_of付き集計では時刻不明のレースを未来情報混入防止のため除外する。
+    """
+    return (
+        getattr(race, "post_time", None)
+        or getattr(race, "race_date", None)
+        or getattr(race, "created_at", None)
+    )
+
+
+def _race_is_before_as_of(race, as_of_dt):
+    if as_of_dt is None:
+        return True
+    event_dt = _race_event_dt(race)
+    return event_dt is not None and event_dt < as_of_dt
+
+
+
+
+def get_calibration_factors_retroactive(db: Session, use_cache: bool = True, as_of_dt: Optional[datetime] = None) -> dict:
     """
     Purchase/SkippedBetの記録(過去の運用ロジックの挙動に依存し、偏りがあり得る)に
     頼らず、確定済みレース全件・オッズが存在する組み合わせを毎回全て使って
@@ -131,7 +163,7 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
     比較エンドポイントは常に最新を見せたいのでキャッシュを使わない)。
     """
     now = _time.time()
-    if use_cache:
+    if use_cache and as_of_dt is None:
         cached = _retroactive_calibration_cache["value"]
         if cached is not None and (now - _retroactive_calibration_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
             return cached
@@ -143,6 +175,8 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
         .options(joinedload(models.Race.entries))
         .all()
     )
+    if as_of_dt is not None:
+        races = [r for r in races if _race_is_before_as_of(r, as_of_dt)]
     from collections import defaultdict
     odds_by_race = defaultdict(list)
     race_ids = [r.id for r in races]
@@ -197,13 +231,14 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True) -> 
             records.append((prob_raw, won, "retroactive", o.bet_type))
 
     result = _compute_calibration_factors_from_records(records)
-    _retroactive_calibration_cache["value"] = result
-    _retroactive_calibration_cache["computed_at"] = now
+    if as_of_dt is None:
+        _retroactive_calibration_cache["value"] = result
+        _retroactive_calibration_cache["computed_at"] = now
     return result
 
 
 
-def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) -> dict:
+def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True, as_of_dt: Optional[datetime] = None) -> dict:
     """
     「実際に購入した集合」だけでの予測確率 vs 実績的中から追加補正係数を作る。
 
@@ -214,7 +249,7 @@ def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) ->
     """
     global _purchase_set_calibration_cache
     now = _time.time()
-    if use_cache:
+    if use_cache and as_of_dt is None:
         cached = _purchase_set_calibration_cache.get("value")
         if cached is not None and (now - _purchase_set_calibration_cache.get("computed_at", 0)) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
             return cached
@@ -225,6 +260,16 @@ def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) ->
         .filter(models.Purchase.win_prob_at_purchase.isnot(None))
         .all()
     )
+    if as_of_dt is not None:
+        race_times = {
+            r.id: _race_event_dt(r)
+            for r in db.query(models.Race).all()
+        }
+        purchases = [
+            p for p in purchases
+            if race_times.get(p.race_id) is not None
+            and race_times[p.race_id] < as_of_dt
+        ]
 
     def _band(odds):
         return odds_band_label(odds)
@@ -303,8 +348,9 @@ def get_purchase_set_calibration_factors(db: Session, use_cache: bool = True) ->
             "race-planでは帯校正の後にこの係数を掛ける。"
         ),
     }
-    _purchase_set_calibration_cache["value"] = result
-    _purchase_set_calibration_cache["computed_at"] = now
+    if as_of_dt is None:
+        _purchase_set_calibration_cache["value"] = result
+        _purchase_set_calibration_cache["computed_at"] = now
     return result
 
 
@@ -484,7 +530,7 @@ _bet_type_odds_band_expectancy_cache = {"computed_at": 0.0, "value": None}
 _high_odds_residual_cache = {"computed_at": 0.0, "value": None}
 
 
-def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool = True) -> dict:
+def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool = True, as_of_dt: Optional[datetime] = None) -> dict:
     """
     レースステージごとの実績収支率(回収率-100)を返す。
     サンプルが min_samples 未満のステージは含めない。
@@ -500,7 +546,7 @@ def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool
          実購入だけを対象にする方式に戻した。
     """
     now = _time.time()
-    if use_cache:
+    if use_cache and as_of_dt is None:
         cached = _stage_expectancy_cache["value"]
         if cached is not None and (now - _stage_expectancy_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
             return cached
@@ -513,6 +559,15 @@ def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool
         .filter(models.Race.race_stage.isnot(None))
         .all()
     )
+    if as_of_dt is not None:
+        rows = [
+            (p, stage)
+            for p, stage in rows
+            if _race_is_before_as_of(
+                db.query(models.Race).get(p.race_id),
+                as_of_dt,
+            )
+        ]
     buckets = {}
     for p, stage in rows:
         if not stage:
@@ -534,8 +589,9 @@ def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool
             "expectancy_pct": round(exp, 2),
             "win_rate_pct": round(b["wins"] / b["n"] * 100, 2),
         }
-    _stage_expectancy_cache["value"] = out
-    _stage_expectancy_cache["computed_at"] = now
+    if as_of_dt is None:
+        _stage_expectancy_cache["value"] = out
+        _stage_expectancy_cache["computed_at"] = now
     return out
 
 
@@ -689,7 +745,7 @@ def get_bet_type_odds_band_expectancy_map(
 HIGH_ODDS_BANDS = ("300-1000倍", "1000-3000倍", "3000倍以上")
 
 
-def get_high_odds_residual_factors(db: Session, use_cache: bool = True) -> dict:
+def get_high_odds_residual_factors(db: Session, use_cache: bool = True, as_of_dt: Optional[datetime] = None) -> dict:
     """
     高オッズ帯(300-1000 / 1000-3000 / 3000以上)専用の的中率残差係数。
 
@@ -704,7 +760,7 @@ def get_high_odds_residual_factors(db: Session, use_cache: bool = True) -> dict:
       }
     """
     now = _time.time()
-    if use_cache:
+    if use_cache and as_of_dt is None:
         cached = _high_odds_residual_cache["value"]
         if (
             cached is not None
@@ -794,8 +850,9 @@ def get_high_odds_residual_factors(db: Session, use_cache: bool = True) -> dict:
             out_bt[bt] = cell
 
     out = {"by_odds_band": out_band, "by_bet_type_odds_band": out_bt}
-    _high_odds_residual_cache["value"] = out
-    _high_odds_residual_cache["computed_at"] = now
+    if as_of_dt is None:
+        _high_odds_residual_cache["value"] = out
+        _high_odds_residual_cache["computed_at"] = now
     return out
 
 

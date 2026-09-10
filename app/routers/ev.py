@@ -526,7 +526,12 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     # 既存の未反映ev_resultsは作り直す
     db.query(models.EvResult).filter(models.EvResult.race_id == race_id).delete()
 
-    calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
+    as_of_dt = getattr(race, "post_time", None) or getattr(race, "race_date", None)
+    calibration_factors = purchases_router.get_calibration_factors_retroactive(
+        db,
+        use_cache=(as_of_dt is None),
+        as_of_dt=as_of_dt,
+    )
 
     created = []
     low_prob_warnings = {}
@@ -743,10 +748,27 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 買い示唆に至ったかどうかに関わらず、評価した組み合わせを全て保持しておく
     # (下で見送り記録に使うため)。
     all_evaluated = []
-    calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
+
+    # リプレイ時の未来情報混入を防ぐ。
+    # 発走時刻より後に確定した結果は、このレースの判断材料に含めない。
+    as_of_dt = getattr(race, "post_time", None) or getattr(race, "race_date", None)
+
+    calibration_factors = purchases_router.get_calibration_factors_retroactive(
+        db,
+        use_cache=(as_of_dt is None),
+        as_of_dt=as_of_dt,
+    )
     # 実購入集合で残る楽観バイアス用の追加係数（選別後校正）
-    purchase_set_factors = purchases_router.get_purchase_set_calibration_factors(db)
-    high_odds_residual_factors = purchases_router.get_high_odds_residual_factors(db)
+    purchase_set_factors = purchases_router.get_purchase_set_calibration_factors(
+        db,
+        use_cache=(as_of_dt is None),
+        as_of_dt=as_of_dt,
+    )
+    high_odds_residual_factors = purchases_router.get_high_odds_residual_factors(
+        db,
+        use_cache=(as_of_dt is None),
+        as_of_dt=as_of_dt,
+    )
     _t2 = _time.time()  # ここまで: 校正係数(第1段+第2段)取得
 
     # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
@@ -759,12 +781,18 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     MIN_STAGE_SAMPLE_FOR_ORDER_BETS = 30
     stage_sample_n = None
     if race.race_stage:
-        stage_sample_n = (
+        stage_rows = (
             db.query(models.Race)
             .filter(models.Race.race_stage == race.race_stage)
             .filter(models.Race.actual_result.isnot(None))
-            .count()
+            .all()
         )
+        if as_of_dt is not None:
+            stage_rows = [
+                r for r in stage_rows
+                if purchases_router._race_is_before_as_of(r, as_of_dt)
+            ]
+        stage_sample_n = len(stage_rows)
     stage_sample_insufficient = (
         race.race_stage is not None and stage_sample_n is not None
         and stage_sample_n < MIN_STAGE_SAMPLE_FOR_ORDER_BETS
@@ -779,7 +807,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     stage_exp_map = {}
     if apply_gates:
         try:
-            stage_exp_map = purchases_router.get_stage_expectancy_map(db, min_samples=50)
+            stage_exp_map = purchases_router.get_stage_expectancy_map(
+                db,
+                min_samples=50,
+                use_cache=(as_of_dt is None),
+                as_of_dt=as_of_dt,
+            )
         except Exception:
             stage_exp_map = {}
 
