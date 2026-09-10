@@ -9,9 +9,10 @@ from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
 
 logger = logging.getLogger("keirin.database")
 
-# DATABASE_URL          = 主系 (Neon など)
-# DATABASE_URL_FALLBACK = 副系 (Supabase など)  ← Neon制限時に自動使用
-# DATABASE_PREFER       = primary | fallback
+# DATABASE_URL           = 主系 (Neon など)
+# DATABASE_URL_FALLBACK  = 副系 (Supabase など)  ← 主系制限時に自動使用
+# DATABASE_URL_FALLBACK2 = 第3系 (Aiven など)     ← 主系・副系ともに制限時に自動使用
+# DATABASE_PREFER        = primary | fallback | fallback2
 
 Base = declarative_base()
 
@@ -19,6 +20,13 @@ _lock = threading.RLock()
 _active_name = "primary"
 _engines = {}
 _sessions = {}
+
+_TIER_ORDER = ("primary", "fallback", "fallback2")
+_TIER_ENV_VARS = {
+    "primary": ("DATABASE_URL",),
+    "fallback": ("DATABASE_URL_FALLBACK", "DATABASE_URL_SECONDARY"),
+    "fallback2": ("DATABASE_URL_FALLBACK2", "DATABASE_URL_TERTIARY"),
+}
 
 
 def _normalize_url(url: str) -> str:
@@ -49,34 +57,33 @@ def _make_engine(url: str):
     )
 
 
-PRIMARY_URL = _normalize_url(os.environ.get("DATABASE_URL", ""))
-FALLBACK_URL = _normalize_url(
-    os.environ.get("DATABASE_URL_FALLBACK", "")
-    or os.environ.get("DATABASE_URL_SECONDARY", "")
-)
+_TIER_URLS = {}
+for _name in _TIER_ORDER:
+    _url = ""
+    for _env_key in _TIER_ENV_VARS[_name]:
+        _url = os.environ.get(_env_key, "")
+        if _url:
+            break
+    _TIER_URLS[_name] = _normalize_url(_url)
+
+PRIMARY_URL = _TIER_URLS["primary"]
+FALLBACK_URL = _TIER_URLS["fallback"]
+FALLBACK2_URL = _TIER_URLS["fallback2"]
+
 PREFER = (os.environ.get("DATABASE_PREFER", "primary") or "primary").strip().lower()
-if PREFER not in ("primary", "fallback"):
+if PREFER not in _TIER_ORDER:
     PREFER = "primary"
 
-if PRIMARY_URL:
-    _engines["primary"] = _make_engine(PRIMARY_URL)
-    _sessions["primary"] = sessionmaker(
-        autocommit=False, autoflush=False, bind=_engines["primary"]
-    )
-if FALLBACK_URL:
-    _engines["fallback"] = _make_engine(FALLBACK_URL)
-    _sessions["fallback"] = sessionmaker(
-        autocommit=False, autoflush=False, bind=_engines["fallback"]
-    )
+for _name in _TIER_ORDER:
+    _url = _TIER_URLS[_name]
+    if _url:
+        _engines[_name] = _make_engine(_url)
+        _sessions[_name] = sessionmaker(autocommit=False, autoflush=False, bind=_engines[_name])
 
-if PREFER == "fallback" and "fallback" in _engines:
-    _active_name = "fallback"
-elif "primary" in _engines:
-    _active_name = "primary"
-elif "fallback" in _engines:
-    _active_name = "fallback"
-else:
-    _active_name = "primary"
+_default_order = [n for n in _TIER_ORDER if n in _engines]
+if PREFER in _default_order:
+    _default_order = [PREFER] + [n for n in _default_order if n != PREFER]
+_active_name = _default_order[0] if _default_order else "primary"
 
 engine = _engines.get(_active_name)
 SessionLocal = _sessions.get(_active_name)
@@ -92,34 +99,38 @@ def _host_of(url: str) -> str:
 
 
 def get_active_db_info() -> dict:
-    """稼働中DBの情報。primary が失敗している場合は primary_error に理由を入れる。"""
+    """稼働中DBの情報。各系が失敗している場合は対応する *_error に理由を入れる。"""
     with _lock:
         active = _active_name
         prefer = PREFER
-    primary_error = None
-    fallback_error = None
-    if "primary" in _sessions:
-        try:
-            _ping(_sessions["primary"])
-        except Exception as e:
-            primary_error = str(e)[:500]
-    if "fallback" in _sessions:
-        try:
-            _ping(_sessions["fallback"])
-        except Exception as e:
-            fallback_error = str(e)[:500]
+    errors = {}
+    ok = {}
+    for name in _TIER_ORDER:
+        if name in _sessions:
+            try:
+                _ping(_sessions[name])
+                ok[name] = True
+                errors[name] = None
+            except Exception as e:
+                ok[name] = False
+                errors[name] = str(e)[:500]
+    active_url = _TIER_URLS.get(active, "")
     return {
         "active": active,
-        "host": _host_of(PRIMARY_URL if active == "primary" else FALLBACK_URL),
+        "host": _host_of(active_url),
         "primary_host": _host_of(PRIMARY_URL),
         "fallback_host": _host_of(FALLBACK_URL),
+        "fallback2_host": _host_of(FALLBACK2_URL),
         "has_primary": "primary" in _engines,
         "has_fallback": "fallback" in _engines,
+        "has_fallback2": "fallback2" in _engines,
         "prefer": prefer,
-        "primary_ok": primary_error is None and "primary" in _sessions,
-        "fallback_ok": fallback_error is None and "fallback" in _sessions,
-        "primary_error": primary_error,
-        "fallback_error": fallback_error,
+        "primary_ok": ok.get("primary", False),
+        "fallback_ok": ok.get("fallback", False),
+        "fallback2_ok": ok.get("fallback2", False),
+        "primary_error": errors.get("primary"),
+        "fallback_error": errors.get("fallback"),
+        "fallback2_error": errors.get("fallback2"),
     }
 
 
@@ -177,12 +188,9 @@ def _switch_to(name: str) -> bool:
         return True
 
 
-def _other_name(name: str) -> Optional[str]:
-    if name == "primary" and "fallback" in _engines:
-        return "fallback"
-    if name == "fallback" and "primary" in _engines:
-        return "primary"
-    return None
+def _other_names(name: str):
+    """設定済みの系統のうち、name以外の全てを返す(スキーマ同期用)。"""
+    return [n for n in _TIER_ORDER if n in _engines and n != name]
 
 
 def _ping(session_factory) -> None:
@@ -195,10 +203,11 @@ def _ping(session_factory) -> None:
 
 
 def _preferred_order():
-    """DATABASE_PREFER に従った接続試行順。"""
-    if PREFER == "fallback":
-        return [n for n in ("fallback", "primary") if n in _engines]
-    return [n for n in ("primary", "fallback") if n in _engines]
+    """DATABASE_PREFER に従った接続試行順(primary/fallback/fallback2の中で設定済みのもの)。"""
+    available = [n for n in _TIER_ORDER if n in _engines]
+    if PREFER in available:
+        return [PREFER] + [n for n in available if n != PREFER]
+    return available
 
 
 def ensure_active_connection() -> None:
@@ -320,20 +329,19 @@ def init_db():
 
     _seed_bank_master()
 
-    other = _other_name(_active_name)
-    if other and other in _engines:
+    for _other in _other_names(_active_name):
         try:
-            Base.metadata.create_all(bind=_engines[other])
-            with _engines[other].connect() as conn:
+            Base.metadata.create_all(bind=_engines[_other])
+            with _engines[_other].connect() as conn:
                 for stmt in migrations:
                     try:
                         conn.execute(text(stmt))
                         conn.commit()
                     except Exception:
                         conn.rollback()
-            logger.info("schema ensured on secondary database as well")
+            logger.info("schema ensured on %s database as well", _other)
         except Exception as e:
-            logger.warning("could not prepare secondary schema: %s", e)
+            logger.warning("could not prepare %s schema: %s", _other, e)
 
 
 def _seed_bank_master():
