@@ -977,28 +977,42 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 券種ごとに推定確率(win_prob)が高い順の上位N件だけは、期待値がマイナスでも
     # 検証用に残す。実際に勝つ組み合わせの大半は確率上位に来るはずなので、
     # DB容量を抑えつつ検証の見落としを大きく減らせる。
-    NEGATIVE_EV_VERIFICATION_TOP_N = 30  # 除外群ROI検証のため枠を拡大(のんの診断要望)
+    # 券種ごとの検証用記録枠。
+    # 3連単・2車単は組み合わせ数が多く、上位30件だと的中買い目が記録から漏れ、
+    # bet-type-diagnostics上で「候補生成漏れ」に誤分類されやすい。
+    # 着順指定券種だけ枠を広げ、他券種は容量のため30件のままにする。
+    NEGATIVE_EV_VERIFICATION_TOP_N_DEFAULT = 30
+    NEGATIVE_EV_VERIFICATION_TOP_N_BY_TYPE = {
+        "3連単": 120,
+        "2車単": 60,
+    }
     _t5 = _time.time()  # ここまで: 候補評価ループ(for o in odds_rows)本体
     negative_ev_by_type = {}
     for e in all_evaluated:
         if e["ev_pct"] <= 0:
             negative_ev_by_type.setdefault(e["bet_type"], []).append(e)
     negative_ev_keep_keys = set()
+    keep_n_by_key = {}
     for bt, items in negative_ev_by_type.items():
-        top_items = sorted(items, key=lambda x: x["win_prob"], reverse=True)[:NEGATIVE_EV_VERIFICATION_TOP_N]
+        top_n = NEGATIVE_EV_VERIFICATION_TOP_N_BY_TYPE.get(bt, NEGATIVE_EV_VERIFICATION_TOP_N_DEFAULT)
+        top_items = sorted(items, key=lambda x: x["win_prob"], reverse=True)[:top_n]
         for item in top_items:
-            negative_ev_keep_keys.add((item["bet_type"], item["combination"]))
+            key = (item["bet_type"], item["combination"])
+            negative_ev_keep_keys.add(key)
+            keep_n_by_key[key] = top_n
 
     recommended_keys = {(c["bet_type"], c["combination"]) for c in candidates}
     skipped_for_verification = []  # (candidate, reason) 後でSkippedBetとして記録する
     for e in all_evaluated:
-        if e["ev_pct"] <= 0 and (e["bet_type"], e["combination"]) not in negative_ev_keep_keys:
+        key = (e["bet_type"], e["combination"])
+        if e["ev_pct"] <= 0 and key not in negative_ev_keep_keys:
             continue  # 期待値マイナス、かつ券種内の確率上位N件にも入らないものは検証対象にしない
-        if (e["bet_type"], e["combination"]) not in recommended_keys:
+        if key not in recommended_keys:
             if e["ev_pct"] <= 0:
+                top_n = keep_n_by_key.get(key, NEGATIVE_EV_VERIFICATION_TOP_N_DEFAULT)
                 skipped_for_verification.append((
                     e,
-                    f"期待値マイナス(確率上位{NEGATIVE_EV_VERIFICATION_TOP_N}件のため検証用に記録)",
+                    f"期待値マイナス(確率上位{top_n}件のため検証用に記録)",
                 ))
             elif (e["bet_type"], e["combination"]) in stage_gated_keys:
                 skipped_for_verification.append((
