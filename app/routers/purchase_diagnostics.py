@@ -3644,20 +3644,34 @@ def diagnostics_calibration_significance(
     odds_cells = {}  # (bet_type, odds_band) -> same
 
     for pur in rows:
-        pred = getattr(pur, "win_prob_raw", None)
-        if pred is None:
-            pred = pur.win_prob_at_purchase
-        if pred is None or float(pred) <= 0:
+        try:
+            pred = getattr(pur, "win_prob_raw", None)
+            if pred is None:
+                pred = pur.win_prob_at_purchase
+            if pred is None:
+                continue
+            pred = float(pred)
+            if pred <= 0:
+                continue
+            if pred > 1.0:
+                pred = pred / 100.0
+            # 0-1に正規化した後も帯判定用にガード
+            if pred >= 1.0:
+                pred = 0.999999
+            win = pur.result == "win"
+            bt = str(pur.bet_type or "不明")
+            pb = _prob_band(pred)
+            odds_val = None
+            if pur.odds_value is not None:
+                try:
+                    odds_val = float(pur.odds_value)
+                except (TypeError, ValueError):
+                    odds_val = None
+            ob = _odds_band(odds_val)
+            cells.setdefault((bt, pb), []).append((win, pred, odds_val))
+            odds_cells.setdefault((bt, ob), []).append((win, pred, odds_val))
+        except (TypeError, ValueError):
             continue
-        pred = float(pred)
-        if pred > 1.0:
-            pred = pred / 100.0
-        win = pur.result == "win"
-        bt = pur.bet_type or "不明"
-        pb = _prob_band(pred)
-        ob = _odds_band(float(pur.odds_value) if pur.odds_value is not None else None)
-        cells.setdefault((bt, pb), []).append((win, pred, pur.odds_value))
-        odds_cells.setdefault((bt, ob), []).append((win, pred, pur.odds_value))
 
     def _summarize(items):
         n = len(items)
