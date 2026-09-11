@@ -40,9 +40,13 @@
 ### 今回追加
 - `/purchases/diagnostics/bank-player-style`
 - `/purchases/diagnostics/prediction-factors`
+- `/purchases/diagnostics/line-position-matrix`
 - 自動補正ボタンのRender wake-up/timeout対策
 - 補正前後比較ボタンのRender wake-up/timeout対策
 - `/stats` から人気集中度・バンク×券種を除外
+- 位置ペア診断は「同ライン/異ライン × ライン内位置」の実績/予測比を検証
+- `loadCalibrationBtn` の重複 `const data` を修正
+- 予想要因診断ボタンの重複表示を修正
 
 ---
 

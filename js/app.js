@@ -2284,7 +2284,7 @@ document.getElementById("loadPositionMatrixBtn").addEventListener("click", async
 
     const num = (v) => (v == null || v === undefined) ? "-" : v;
 
-    let html = `<p><strong>課題L：位置ペア別の補正倍率一覧（読み取り専用・全期間対象）</strong></p>`;
+    let html = `<p><strong>位置ペア別の実績/予測比較（読み取り専用）</strong></p>`;
     html += `<p class="note">${data.note || ""}</p>`;
     html += `<p class="note">評価対象遷移数: ${num(data["評価対象遷移数(1着→2着+2着→3着)"])}</p>`;
 
@@ -2451,7 +2451,6 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
       clearTimeout(timer);
     }
 
-    const data = await res.json();
     const data = await res.json();
     let html = "";
 

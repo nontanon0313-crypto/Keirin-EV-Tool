@@ -4241,6 +4241,244 @@ def prediction_factors_diagnostics(
     }
 
 
+
+@router.get("/diagnostics/line-position-matrix")
+def line_position_matrix_diagnostics(
+    since: Optional[str] = "calibration_switch",
+    min_samples: int = 20,
+    db: Session = Depends(get_db),
+):
+    """
+    ライン内位置ペア別の予測と実績を検証する。
+
+    目的:
+      「先頭→番手」「番手→3番手」など、
+      ライン内の位置関係そのものに予測上の優位性があるかを確認する。
+
+    購入履歴・SkippedBet・オッズは使用しない。
+    結果確定済みRace/Entryだけを使用する。
+
+    予測確率:
+      harville_prob((A,B))
+      = 現在の1着確率モデルから算出した
+        Aが1着、Bが2着になる条件付き確率。
+
+    実績:
+      実際の1着→2着、2着→3着の隣接遷移。
+
+    経験的補正倍率:
+      実際の遷移回数 / 無補正予測確率合計
+
+    これは投票条件を直接変更する診断ではなく、
+    位置関係に系統的なズレがあるかを確認するための読み取り専用分析。
+    """
+
+    since_dt = _parse_since_param(since) if since != "all" else None
+
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    # 区分ごとの集計
+    stats = {}
+
+    evaluated_races = 0
+    evaluated_transitions = 0
+
+    def normalize_position(pos):
+        if pos is None:
+            return None
+        if pos == 0:
+            return "先頭"
+        if pos == 1:
+            return "番手"
+        return "3番手以降"
+
+    def add_stat(category, predicted_prob, actual):
+        g = stats.setdefault(
+            category,
+            {
+                "候補として現れた延べ回数": 0,
+                "無補正モデルの予測確率合計": 0.0,
+                "実際にその遷移が起きた回数": 0,
+            },
+        )
+        g["候補として現れた延べ回数"] += 1
+        g["無補正モデルの予測確率合計"] += float(predicted_prob or 0.0)
+        g["実際にその遷移が起きた回数"] += int(actual)
+
+    for race in races:
+        event_dt = _race_event_dt(race)
+
+        if since_dt is not None:
+            if event_dt is None or event_dt < since_dt:
+                continue
+
+        entries = [
+            e for e in race.entries
+            if e.blended_win_prob is not None
+        ]
+
+        if len(entries) < 3:
+            continue
+
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            continue
+
+        # 同着を含む場合は、最初のcanonical orderを使用する。
+        # 位置ペア診断では同着による重複カウントを避ける。
+        actual_order = list(canonical[0])
+        if len(actual_order) < 3:
+            continue
+
+        line_map, line_boost = calc.line_map_from_race(race)
+        pos_map = calc.line_position_map(race)
+
+        if not line_map or not pos_map:
+            continue
+
+        win_probs = {
+            int(e.car_number): float(e.blended_win_prob)
+            for e in entries
+            if e.car_number is not None
+        }
+
+        if len(win_probs) < 3:
+            continue
+
+        cars = sorted(win_probs.keys())
+
+        # --------------------------------------------------------
+        # 全候補の「A→B」遷移をモデル確率で集計
+        # --------------------------------------------------------
+        for a in cars:
+            for b in cars:
+                if a == b:
+                    continue
+
+                pos_a = pos_map.get(a)
+                pos_b = pos_map.get(b)
+
+                if pos_a is None or pos_b is None:
+                    continue
+
+                same_line = (
+                    line_map.get(a) is not None
+                    and line_map.get(a) == line_map.get(b)
+                )
+
+                relation = "同ライン" if same_line else "異ライン"
+
+                pos_a_label = normalize_position(pos_a)
+                pos_b_label = normalize_position(pos_b)
+
+                category = f"{relation}: {pos_a_label}→{pos_b_label}"
+
+                try:
+                    predicted_prob = calc.harville_prob(
+                        win_probs,
+                        (a, b),
+                        line_map=line_map,
+                        line_boost=line_boost,
+                    )
+                except Exception:
+                    continue
+
+                # 実績側はこの後の1→2 / 2→3と一致する場合のみ1
+                actual = 0
+
+                # 1→2
+                if (
+                    len(actual_order) >= 2
+                    and actual_order[0] == a
+                    and actual_order[1] == b
+                ):
+                    actual = 1
+
+                # 2→3
+                elif (
+                    len(actual_order) >= 3
+                    and actual_order[1] == a
+                    and actual_order[2] == b
+                ):
+                    actual = 1
+
+                add_stat(category, predicted_prob, actual)
+
+        evaluated_races += 1
+        evaluated_transitions += 2
+
+    if not stats:
+        return {
+            "message": "位置ペアとして分析可能なレースがありません",
+            "since": since,
+            "since_resolved": since_dt.isoformat() if since_dt else None,
+        }
+
+    rows = []
+
+    for category, g in stats.items():
+        n = g["候補として現れた延べ回数"]
+        predicted = g["無補正モデルの予測確率合計"]
+        actual = g["実際にその遷移が起きた回数"]
+
+        if n < min_samples:
+            continue
+
+        multiplier = None
+        if predicted > 1e-12:
+            multiplier = actual / predicted
+
+        rows.append({
+            "区分": category,
+            "候補として現れた延べ回数": n,
+            "無補正モデルの予測確率合計": round(predicted, 6),
+            "実際にその遷移が起きた回数": actual,
+            "経験的補正倍率の目安(実際÷予測)": (
+                round(multiplier, 4)
+                if multiplier is not None
+                else None
+            ),
+        })
+
+    rows.sort(
+        key=lambda x: (
+            -x["候補として現れた延べ回数"],
+            x["区分"],
+        )
+    )
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "min_samples": min_samples,
+        "評価対象レース数": evaluated_races,
+        "評価対象遷移数(1着→2着+2着→3着)": evaluated_transitions,
+        "位置ペア区分別": rows,
+        "note": (
+            "購入履歴・SkippedBet・オッズを使わず、結果確定済みレースの"
+            "ライン内位置関係を分析しています。"
+            "予測値は現在のHarville型1着確率モデルから算出したA→Bの"
+            "2着までの遷移確率です。"
+            "実績値は各レースの1→2および2→3の実際の遷移です。"
+            "経験的補正倍率は実際の遷移回数÷モデル予測確率合計です。"
+            "1.0より小さい場合はモデルがその位置ペアを過大評価、"
+            "1.0より大きい場合は過小評価していることを意味します。"
+            "この値だけでは十分条件ではないため、母数と他の位置ペアとの比較を"
+            "併せて判断します。"
+        ),
+    }
+
+
 @router.get("/pending")
 def list_pending_purchases(db: Session = Depends(get_db)):
     """まだ結果未確定の購入履歴一覧(結果入力画面用)。レースごとにまとめられるよう、レース情報も付与する。"""
