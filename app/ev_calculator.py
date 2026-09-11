@@ -659,6 +659,7 @@ def build_win_probs_from_entries(entries: list) -> dict:
     if total > 0:
         probs = {k: v / total for k, v in probs.items()}
     probs = apply_race_score_band_factors(probs, entries)
+    probs = blend_race_score_rank_into_probs(probs, entries)
     return probs
 
 

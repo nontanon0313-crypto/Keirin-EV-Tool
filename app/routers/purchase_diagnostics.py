@@ -3992,3 +3992,138 @@ def diagnostics_first_place_signal_compare(db: Session = Depends(get_db)):
         },
     }
 
+
+@router.get("/order-place-signals")
+def diagnostics_order_place_signals(db: Session = Depends(get_db)):
+    """2着・3着の条件付き信号比較。ラインブーストなし。"""
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    def _scores(entries):
+        out = {}
+        for e in entries or []:
+            if e.car_number is None or e.race_score is None:
+                continue
+            try:
+                out[int(e.car_number)] = float(e.race_score)
+            except (TypeError, ValueError):
+                pass
+        return out
+
+    c2 = {"n": 0, "prob_top": 0, "score_top": 0, "same_line_score_top": 0,
+          "same_line_n": 0, "diff_line_score_top": 0, "diff_line_n": 0, "actual_same_line": 0}
+    c3 = {"n": 0, "prob_top": 0, "score_top": 0, "same_line_score_top": 0,
+          "same_line_n": 0, "diff_line_score_top": 0, "diff_line_n": 0, "actual_same_line_as_1st": 0}
+    skipped = 0
+
+    for race in races:
+        entries = race.entries or []
+        win_probs = calc.build_win_probs_from_entries(entries)
+        if not win_probs or len(win_probs) < 3:
+            skipped += 1
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical or len(canonical[0]) < 3:
+            skipped += 1
+            continue
+        a1, a2, a3 = canonical[0][0], canonical[0][1], canonical[0][2]
+        if a1 not in win_probs or a2 not in win_probs or a3 not in win_probs:
+            skipped += 1
+            continue
+        scores = _scores(entries)
+        line_map, _ = calc.line_map_from_race(race)
+
+        remain2 = {c: p for c, p in win_probs.items() if c != a1}
+        if len(remain2) < 2:
+            skipped += 1
+            continue
+        mass2 = sum(remain2.values()) or 1.0
+        cond2 = {c: p / mass2 for c, p in remain2.items()}
+        p2_top = max(cond2, key=lambda c: cond2[c])
+        s2 = {c: scores[c] for c in remain2 if c in scores}
+        s2_top = max(s2, key=lambda c: s2[c]) if s2 else None
+        c2["n"] += 1
+        if p2_top == a2:
+            c2["prob_top"] += 1
+        if s2_top is not None and s2_top == a2:
+            c2["score_top"] += 1
+        if line_map and line_map.get(a1) is not None:
+            lid = line_map.get(a1)
+            same = {c: scores[c] for c in remain2 if c in scores and line_map.get(c) == lid}
+            diff = {c: scores[c] for c in remain2 if c in scores and line_map.get(c) != lid}
+            if same:
+                c2["same_line_n"] += 1
+                if max(same, key=lambda c: same[c]) == a2:
+                    c2["same_line_score_top"] += 1
+            if diff:
+                c2["diff_line_n"] += 1
+                if max(diff, key=lambda c: diff[c]) == a2:
+                    c2["diff_line_score_top"] += 1
+            if line_map.get(a2) == lid:
+                c2["actual_same_line"] += 1
+
+        remain3 = {c: p for c, p in win_probs.items() if c not in (a1, a2)}
+        if not remain3:
+            continue
+        mass3 = sum(remain3.values()) or 1.0
+        cond3 = {c: p / mass3 for c, p in remain3.items()}
+        p3_top = max(cond3, key=lambda c: cond3[c])
+        s3 = {c: scores[c] for c in remain3 if c in scores}
+        s3_top = max(s3, key=lambda c: s3[c]) if s3 else None
+        c3["n"] += 1
+        if p3_top == a3:
+            c3["prob_top"] += 1
+        if s3_top is not None and s3_top == a3:
+            c3["score_top"] += 1
+        if line_map and line_map.get(a1) is not None:
+            lid = line_map.get(a1)
+            same = {c: scores[c] for c in remain3 if c in scores and line_map.get(c) == lid}
+            diff = {c: scores[c] for c in remain3 if c in scores and line_map.get(c) != lid}
+            if same:
+                c3["same_line_n"] += 1
+                if max(same, key=lambda c: same[c]) == a3:
+                    c3["same_line_score_top"] += 1
+            if diff:
+                c3["diff_line_n"] += 1
+                if max(diff, key=lambda c: diff[c]) == a3:
+                    c3["diff_line_score_top"] += 1
+            if line_map.get(a3) == lid:
+                c3["actual_same_line_as_1st"] += 1
+
+    def pack(d, same_key):
+        n = d["n"] or 1
+        out = {
+            "件数": d["n"],
+            "残存確率最大の的中率%": round(d["prob_top"] / n * 100, 2) if d["n"] else None,
+            "残存得点最大の的中率%": round(d["score_top"] / n * 100, 2) if d["n"] else None,
+        }
+        if d.get("same_line_n"):
+            out["同ライン残存得点最大"] = {
+                "対象レース数": d["same_line_n"],
+                "的中率%": round(d["same_line_score_top"] / d["same_line_n"] * 100, 2),
+            }
+        if d.get("diff_line_n"):
+            out["異ライン残存得点最大"] = {
+                "対象レース数": d["diff_line_n"],
+                "的中率%": round(d["diff_line_score_top"] / d["diff_line_n"] * 100, 2),
+            }
+        if d["n"]:
+            out["実際が1着と同ラインだった率%"] = round(d[same_key] / d["n"] * 100, 2)
+        return out
+
+    return {
+        "note": "2着=実際1着固定 / 3着=実際1-2着固定。ラインブーストなし。",
+        "除外": skipped,
+        "2着_1着固定時": pack(c2, "actual_same_line"),
+        "3着_1着2着固定時": pack(c3, "actual_same_line_as_1st"),
+    }
+
