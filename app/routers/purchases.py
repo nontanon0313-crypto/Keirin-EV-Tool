@@ -3665,7 +3665,7 @@ def car_pick_accuracy(since: Optional[str] = "calibration_switch", db: Session =
 
 @router.get("/diagnostics/prediction-factors")
 def prediction_factors_diagnostics(
-    since: Optional[str] = "calibration_switch",
+    since: Optional[str] = "all",
     min_samples: int = 20,
     db: Session = Depends(get_db),
 ):
@@ -3912,7 +3912,7 @@ def prediction_factors_diagnostics(
 
 @router.get("/diagnostics/bank-player-style")
 def bank_player_style_diagnostics(
-    since: Optional[str] = "calibration_switch",
+    since: Optional[str] = "all",
     min_samples: int = 10,
     db: Session = Depends(get_db),
 ):
@@ -4046,7 +4046,7 @@ def bank_player_style_diagnostics(
 
 @router.get("/diagnostics/line-position-matrix")
 def line_position_matrix_diagnostics(
-    since: Optional[str] = "calibration_switch",
+    since: Optional[str] = "all",
     min_samples: int = 20,
     db: Session = Depends(get_db),
 ):
