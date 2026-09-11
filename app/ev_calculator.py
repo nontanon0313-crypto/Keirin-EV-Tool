@@ -670,10 +670,10 @@ def build_win_probs_from_entries(entries: list) -> dict:
 # ではなく「同ラインの継続全般」がほぼ一律の力学であることが分かった
 # (のん承認・2026-09-08)。4区分の加重平均(実際175件÷予測質量108)は約1.62倍。
 # 「先頭→番手だけ20倍」という複雑な2パラメータモデルは廃止し、
-# 同ライン継続は一律SAME_LINE_BOOST倍というシンプルな単一パラメータモデルに戻す。
+# 2026-09-11確定: ラインブーストは採用しない（SAME_LINE_BOOST=1.0）。
 # (2パラメータモデル自体はharville_prob等に引き続き実装されており、
 #  pos_map/head_to_bante_boostを明示的に渡した場合のみ有効。本番では使わない)
-SAME_LINE_BOOST = 1.6
+SAME_LINE_BOOST = 1.0
 HEAD_TO_BANTE_BOOST = 20.0  # 2パラメータモデル用に残置(本番では未使用。診断ツール用)
 OTHER_SAME_LINE_BOOST = SAME_LINE_BOOST  # 後方互換のためのエイリアス
 

@@ -2357,7 +2357,7 @@ def diagnostics_line_boost_sweep(db: Session = Depends(get_db)):
     現在の確率モデルは、AIが予測する「1着になる確率」しか持っておらず、
     2着・3着はHarville式(1着を除いた残りの中から確率比で機械的に按分)で
     導出しているだけ。競輪特有の「同ラインの選手が連続して上位に来やすい」
-    力学を反映するために line_boost という係数(現在1.2固定)を掛けているが、
+    力学を反映するために line_boost という係数を掛けていたが、2026-09-11確定で本番は1.0(補正なし)。
     この値は一度も実績データで検証されたことがない(PROGRESS.md記載の
     既知の未検証項目)。
 
@@ -2511,7 +2511,7 @@ def diagnostics_line_boost_sweep(db: Session = Depends(get_db)):
 @router.get("/trifecta-order-structure")
 def diagnostics_trifecta_order_structure(
     db: Session = Depends(get_db),
-    line_boost: float = Query(1.2, description="検証に使うline_boost値(既定は本番値1.2)"),
+    line_boost: float = Query(1.0, description="検証に使うline_boost値(既定は本番値1.0=補正なし)"),
 ):
     """
     課題J(3連単の条件付き着順構造)に対応する読み取り専用診断。
