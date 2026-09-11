@@ -2770,14 +2770,18 @@ def _harville_prob_v2(
 @router.get("/line-boost-sweep-v2")
 def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
     """
-    line-boost-sweepの結果、「先頭→番手」だけが強く効いており、それ以外の
-    同ライン継続はほぼ効果が無いことが判明した(2026-09-08)。
-    このエンドポイントは、先頭→番手専用の係数(head_to_bante_boost)を
-    より高い範囲まで探索し、頭打ち地点を確認する。
-    それ以外の同ライン継続の係数(other_same_line_boost)は1.0(補正なし)に固定した
-    グリッドと、軽く補正した場合の両方を比較する。
-    本番ロジック(ev.py)は一切呼び出さない読み取り専用診断。
+    先頭→番手boostの頭打ちを検証する読み取り専用診断。
+
+    単純な固定上限探索ではなく、対数スケールで広範囲を探索し、
+    各点の対数尤度・前点との差・改善率を返す。
+
+    重要:
+    - 本番ロジック(ev.py)は呼び出さない
+    - boostを本番値へ変更しない
+    - 自動最適化はしない
+    - 「探索上限に到達した」のか「改善が飽和した」のかを分離する
     """
+
     races = (
         db.query(models.Race)
         .filter(models.Race.actual_result.isnot(None))
@@ -2785,79 +2789,233 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
         .all()
     )
 
+    # 低い領域は細かく、高い領域は桁単位で確認する。
+    # 1,000万倍まで探索するが、頭打ち判定が成立した時点で
+    # それ以上を「必要な探索」とは扱わない。
     HEAD_CANDIDATES = [
-        1.0, 2.0, 3.0, 5.0, 8.0, 10.0,
+        1.0, 1.2, 1.5, 2.0, 3.0, 5.0, 8.0, 10.0,
         15.0, 20.0, 30.0, 50.0, 80.0, 120.0,
-        160.0, 200.0, 300.0, 500.0, 800.0,
-        1200.0, 2000.0, 3000.0, 5000.0,
-        8000.0, 100000.0, 20000.0, 30000.0,
-        50000.0, 80000.0, 120000.0, 200000.0,
-        300000.0, 500000.0, 800000.0, 1200000.0
+        200.0, 300.0, 500.0, 800.0, 1200.0,
+        2000.0, 3000.0, 5000.0, 8000.0, 12000.0,
+        20000.0, 30000.0, 50000.0, 80000.0,
+        120000.0, 200000.0, 300000.0, 500000.0,
+        800000.0, 1200000.0, 2000000.0, 3000000.0,
+        5000000.0, 8000000.0, 10000000.0,
     ]
+
     OTHER_CANDIDATES = [0.8, 1.0, 1.2]
 
-    combos = [(h, o) for h in HEAD_CANDIDATES for o in OTHER_CANDIDATES]
-    stats = {combo: {"n": 0, "log_likelihood_sum": 0.0} for combo in combos}
+    combos = [
+        (h, o)
+        for h in HEAD_CANDIDATES
+        for o in OTHER_CANDIDATES
+    ]
+
+    stats = {
+        combo: {
+            "n": 0,
+            "log_likelihood_sum": 0.0,
+            "prob_sum": 0.0,
+            "zero_count": 0,
+        }
+        for combo in combos
+    }
 
     evaluated = 0
+    skipped_no_win_probs = 0
+    skipped_no_result = 0
+
     for race in races:
         win_probs = calc.build_win_probs_from_entries(race.entries)
         if not win_probs:
+            skipped_no_win_probs += 1
             continue
+
         try:
             parsed = calc.parse_actual_result(race.actual_result)
         except Exception:
+            skipped_no_result += 1
             continue
+
         canonical = parsed.get("canonical_orderings") or []
         if not canonical:
+            skipped_no_result += 1
             continue
+
         actual_order = tuple(canonical[0][:3])
+
         if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+            skipped_no_result += 1
             continue
 
         line_map, _ = calc.line_map_from_race(race)
         pos_map = _line_position_map(race)
+
         evaluated += 1
 
         for combo in combos:
             head_boost, other_boost = combo
-            p = _harville_prob_v2(win_probs, actual_order, line_map, pos_map, head_boost, other_boost)
+
+            prob = _harville_prob_v2(
+                win_probs,
+                actual_order,
+                line_map,
+                pos_map,
+                head_boost,
+                other_boost,
+            )
+
             st = stats[combo]
             st["n"] += 1
-            if p > 1e-12:
-                st["log_likelihood_sum"] += math.log(p)
+            st["prob_sum"] += prob
+
+            if prob > 1e-300:
+                st["log_likelihood_sum"] += math.log(prob)
+            else:
+                st["zero_count"] += 1
+                # log(0)相当。極端なboostで確率が消失した場合も
+                # 尤度比較から除外しない。
+                st["log_likelihood_sum"] += math.log(1e-300)
 
     results = []
-    for combo in combos:
-        st = stats[combo]
-        n = st["n"]
+
+    for other_boost in OTHER_CANDIDATES:
+        series = []
+
+        for head_boost in HEAD_CANDIDATES:
+            st = stats[(head_boost, other_boost)]
+            n = st["n"]
+
+            ll = (
+                st["log_likelihood_sum"] / n
+                if n else None
+            )
+
+            avg_prob = (
+                st["prob_sum"] / n
+                if n else None
+            )
+
+            series.append({
+                "先頭→番手boost": head_boost,
+                "それ以外の同ラインboost": other_boost,
+                "件数": n,
+                "平均対数尤度_raw": ll,
+                "平均対数尤度": round(ll, 8) if ll is not None else None,
+                "平均予測確率": avg_prob,
+                "平均予測確率%": (
+                    round(avg_prob * 100.0, 8)
+                    if avg_prob is not None else None
+                ),
+                "確率ほぼ0件数": st["zero_count"],
+            })
+
+        previous = None
+
+        for row in series:
+            ll = row["平均対数尤度_raw"]
+
+            if previous is None or ll is None:
+                row["前点との差"] = None
+                row["改善率_pct"] = None
+            else:
+                delta = ll - previous
+                row["前点との差"] = round(delta, 10)
+
+                if abs(previous) > 1e-15:
+                    row["改善率_pct"] = round(
+                        delta / abs(previous) * 100.0,
+                        8,
+                    )
+                else:
+                    row["改善率_pct"] = None
+
+            previous = ll
+
+        # 「改善が極めて小さい」を絶対値で判定する。
+        # 平均対数尤度なので、0.00001未満は1レースあたりの
+        # 情報量改善として非常に小さい。
+        SATURATION_DELTA = 0.00001
+        CONSECUTIVE_SATURATION = 3
+
+        saturation_streak = 0
+        saturation_at = None
+
+        for row in series:
+            delta = row.get("前点との差")
+
+            if delta is not None and 0.0 <= delta < SATURATION_DELTA:
+                saturation_streak += 1
+            else:
+                saturation_streak = 0
+
+            if (
+                saturation_streak >= CONSECUTIVE_SATURATION
+                and saturation_at is None
+            ):
+                saturation_at = row["先頭→番手boost"]
+
+        valid = [
+            r for r in series
+            if r["平均対数尤度_raw"] is not None
+        ]
+
+        best = (
+            max(
+                valid,
+                key=lambda r: r["平均対数尤度_raw"],
+            )
+            if valid else None
+        )
+
         results.append({
-            "先頭→番手boost": combo[0],
-            "それ以外の同ラインboost": combo[1],
-            "件数": n,
-            "平均対数尤度": round(st["log_likelihood_sum"] / n, 5) if n else None,
+            "それ以外の同ラインboost": other_boost,
+            "系列": [
+                {
+                    k: v
+                    for k, v in row.items()
+                    if k != "平均対数尤度_raw"
+                }
+                for row in series
+            ],
+            "最良値": best,
+            "頭打ち候補": saturation_at,
+            "頭打ち判定閾値": SATURATION_DELTA,
+            "連続判定回数": CONSECUTIVE_SATURATION,
+            "探索上限到達": bool(
+                valid
+                and valid[-1]["先頭→番手boost"] == HEAD_CANDIDATES[-1]
+            ),
         })
-    best = max(
-        (r for r in results if r["平均対数尤度"] is not None),
-        key=lambda r: r["平均対数尤度"],
-        default=None,
+
+    # other=1.0を主系列として、最も説明力の高い点を取得。
+    main = next(
+        (
+            r for r in results
+            if r["それ以外の同ラインboost"] == 1.0
+        ),
+        None,
     )
 
     return {
         "note": (
-            "先頭→番手専用の係数と、それ以外の同ライン継続の係数を分離して探索する"
-            "読み取り専用診断。本番ロジック(ev.py)は一切呼び出していない。"
+            "先頭→番手boostの飽和点を検証する読み取り専用診断。"
+            "対数スケールで最大10000000倍まで探索し、各点の"
+            "平均対数尤度・前点との差・改善率を記録する。"
+            "改善が極めて小さい状態が3点連続した場合を頭打ち候補とする。"
+            "頭打ち候補は必要条件ではなく、探索を打ち切るための"
+            "診断上の目安である。"
         ),
         "評価対象レース数": evaluated,
+        "除外(勝率データ無し)": skipped_no_win_probs,
+        "除外(結果パース不可)": skipped_no_result,
+        "探索上限": HEAD_CANDIDATES[-1],
+        "飽和判定": {
+            "1レース平均対数尤度の改善量": 0.00001,
+            "連続回数": 3,
+        },
         "結果": results,
-        "最も当てはまりの良い組み合わせ": best,
-        "読み方": (
-            "『先頭→番手boost』の対数尤度が上昇し続けて頭打ちになる値を確認する。"
-            "頭打ちにならず候補の最大値(120)でもまだ改善している場合は、"
-            "さらに高い値も試す必要がある。"
-            "『それ以外の同ラインboost』は0.8/1.0/1.2のどれが良いかも確認できる"
-            "(1.0付近が最良なら、先頭→番手以外は補正不要という結論になる)。"
-        ),
+        "主系列_other_boost_1.0": main,
     }
 
 
