@@ -3474,22 +3474,6 @@ def profit_concentration(since: Optional[str] = "calibration_switch", db: Sessio
         "総損益": round(total_payout - total_stake, 0),
     }
 
-    hit_odds = [p.payout_amount / p.stake_amount for p in hits if p.stake_amount > 0]
-    bunpu = {}
-    if hit_odds:
-        s = sorted(hit_odds)
-        def pct(q):
-            idx = min(len(s) - 1, int(len(s) * q))
-            return round(s[idx], 2)
-        bunpu = {
-            "件数_オッズ判明": len(s),
-            "中央値倍": pct(0.5),
-            "平均倍": round(sum(s) / len(s), 2),
-            "75%点倍": pct(0.75),
-            "90%点倍": pct(0.9),
-            "最大倍": round(s[-1], 2),
-            "最小倍": round(s[0], 2),
-        }
 
     def profit(p):
         return p.payout_amount - p.stake_amount
@@ -3544,18 +3528,6 @@ def profit_concentration(since: Optional[str] = "calibration_switch", db: Sessio
     if shuchuudo["黒字レース割合%"] is not None and shuchuudo["黒字レース割合%"] < 30:
         hanteil.append("黒字レースの割合が3割未満です。多くのレースで負けながら、一部の大きな的中でカバーしている収支構造です。")
 
-    # オッズ帯別
-    band_defs = [("〜10倍", 0, 10), ("10〜30倍", 10, 30), ("30〜100倍", 30, 100), ("100倍以上", 100, float("inf"))]
-    band_result = {}
-    for label, lo, hi in band_defs:
-        group = [p for p in hits if p.stake_amount > 0 and lo <= p.payout_amount / p.stake_amount < hi]
-        pf = sum(profit(p) for p in group)
-        band_result[label] = {
-            "的中件数": len(group),
-            "払戻合計": round(sum(p.payout_amount for p in group), 0),
-            "利益合計": round(pf, 0),
-            "利益が全体利益に占める割合%": round(pf / total_profit * 100, 1) if total_profit else None,
-        }
 
     # 券種別(的中のみ)
     bet_result = {}
@@ -3586,7 +3558,6 @@ def profit_concentration(since: Optional[str] = "calibration_switch", db: Sessio
             "レースID": p.race_id,
             "券種": p.bet_type,
             "買い目": p.combination,
-            "オッズ": round(p.payout_amount / p.stake_amount, 2) if p.stake_amount else None,
             "投資額": round(p.stake_amount, 0),
             "払戻": round(p.payout_amount, 0),
             "利益": round(profit(p), 0),
@@ -3595,10 +3566,8 @@ def profit_concentration(since: Optional[str] = "calibration_switch", db: Sessio
 
     return {
         "概要": gaiyou,
-        "的中オッズの分布": bunpu,
         "集中度": shuchuudo,
         "判定": hanteil,
-        "的中オッズ帯別": band_result,
         "的中の券種別": bet_result,
         "的中の想定勝率帯別": prob_result,
         "利益の大きい的中_上位": tops,
@@ -3690,6 +3659,253 @@ def car_pick_accuracy(since: Optional[str] = "calibration_switch", db: Session =
         "test_direction": "one_sided_lower(実績が予想より低すぎないかだけを検定する片側検定)",
         "judgement": judgement,
         "items": sorted(items, key=lambda x: -x["race_id"]),
+    }
+
+
+
+@router.get("/diagnostics/prediction-factors")
+def prediction_factors_diagnostics(
+    since: Optional[str] = "calibration_switch",
+    min_samples: int = 20,
+    db: Session = Depends(get_db),
+):
+    """
+    予想精度だけを検証するレース単位診断。
+
+    Purchase/SkippedBet/オッズを評価母集団に使わない。
+    これにより「購入フィルターで結果が変わった」のか
+    「AIの予想そのものが改善した」のかを分離する。
+
+    主指標:
+      - 1着的中率
+      - Top3包含率
+      - 1-2-3完全順序率
+
+    条件:
+      - バンク
+      - バンク×予測1着選手×脚質
+      - バンク×脚質
+      - 同ライン/異なるライン
+      - レースステージ
+      - グレード
+      - 競走得点帯
+      - 脚質
+    """
+    since_dt = _parse_since_param(since) if since != "all" else None
+
+    q = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+    )
+
+    races = q.all()
+
+    def normalize_style(value):
+        if not value:
+            return "脚質情報なし"
+        t = str(value)
+        if "逃" in t:
+            return "逃げ"
+        if "捲" in t:
+            return "捲り"
+        if "差" in t:
+            return "差し"
+        if "追" in t:
+            return "追込"
+        if "両" in t:
+            return "両方"
+        return t
+
+    def race_event_dt(r):
+        return _race_event_dt(r)
+
+    rows = []
+
+    for race in races:
+        if since_dt is not None:
+            event_dt = race_event_dt(race)
+            if event_dt is None or event_dt < since_dt:
+                continue
+
+        entries = [e for e in race.entries if e.blended_win_prob is not None]
+        if not entries:
+            continue
+
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+
+        groups = parsed.get("groups") or []
+        if not groups:
+            continue
+
+        actual_order = []
+        for g in groups:
+            if isinstance(g, (list, tuple, set)):
+                actual_order.extend(list(g))
+            else:
+                actual_order.append(g)
+
+        if len(actual_order) < 3:
+            continue
+
+        ranked = sorted(
+            entries,
+            key=lambda e: float(e.blended_win_prob or 0),
+            reverse=True,
+        )
+
+        top1 = ranked[0]
+        top3 = ranked[:3]
+
+        top1_hit = top1.car_number == actual_order[0]
+        top3_hit = top1.car_number in actual_order[:3]
+
+        exact123 = (
+            len(top3) >= 3
+            and top3[0].car_number == actual_order[0]
+            and top3[1].car_number == actual_order[1]
+            and top3[2].car_number == actual_order[2]
+        )
+
+        second_after_first = (
+            len(top3) >= 2
+            and top3[0].car_number == actual_order[0]
+            and top3[1].car_number == actual_order[1]
+        )
+
+        third_after_first_two = (
+            len(top3) >= 3
+            and top3[0].car_number == actual_order[0]
+            and top3[1].car_number == actual_order[1]
+            and top3[2].car_number == actual_order[2]
+        )
+
+        entry_by_car = {e.car_number: e for e in entries}
+        predicted_style = normalize_style(top1.leg_style)
+        predicted_player = top1.player_name or f"車番{top1.car_number}"
+
+        line_map = {}
+        if race.lines_data:
+            for line_idx, line in enumerate(race.lines_data):
+                for car in line:
+                    try:
+                        line_map[int(car)] = line_idx
+                    except (TypeError, ValueError):
+                        pass
+
+        predicted_line = line_map.get(top1.car_number)
+        actual_first_line = line_map.get(actual_order[0])
+
+        if predicted_line is None or actual_first_line is None:
+            line_relation = "ライン情報なし"
+        elif predicted_line == actual_first_line:
+            line_relation = "同ライン"
+        else:
+            line_relation = "異なるライン"
+
+        score = top1.race_score
+        if score is None:
+            score_band = "得点情報なし"
+        elif score < 55:
+            score_band = "55未満"
+        elif score < 65:
+            score_band = "55-65"
+        elif score < 75:
+            score_band = "65-75"
+        else:
+            score_band = "75以上"
+
+        rows.append({
+            "race_id": race.id,
+            "bank": race.venue_name or "不明",
+            "player": predicted_player,
+            "style": predicted_style,
+            "line_relation": line_relation,
+            "stage": race.race_stage or "不明",
+            "grade": race.grade or "不明",
+            "score_band": score_band,
+            "top1_hit": top1_hit,
+            "top3_hit": top3_hit,
+            "exact123": exact123,
+            "second_after_first": second_after_first,
+            "third_after_first_two": third_after_first_two,
+        })
+
+    if not rows:
+        return {
+            "message": "条件に該当する予想済み・結果確定レースがありません",
+            "since": since,
+            "since_resolved": since_dt.isoformat() if since_dt else None,
+        }
+
+    def summarize(items):
+        n = len(items)
+        if not n:
+            return None
+
+        top1 = sum(1 for r in items if r["top1_hit"])
+        top3 = sum(1 for r in items if r["top3_hit"])
+        exact = sum(1 for r in items if r["exact123"])
+        second = sum(1 for r in items if r["second_after_first"])
+        third = sum(1 for r in items if r["third_after_first_two"])
+
+        return {
+            "n": n,
+            "top1_hit_count": top1,
+            "top1_hit_rate_pct": round(top1 / n * 100, 2),
+            "top3_count": top3,
+            "top3_rate_pct": round(top3 / n * 100, 2),
+            "exact123_count": exact,
+            "exact123_rate_pct": round(exact / n * 100, 2),
+            "second_after_first_rate_pct": round(second / n * 100, 2),
+            "third_after_first_two_rate_pct": round(third / n * 100, 2),
+        }
+
+    def grouped(field_names):
+        groups = {}
+        for r in rows:
+            key = " × ".join(str(r[f]) for f in field_names)
+            groups.setdefault(key, []).append(r)
+
+        result = []
+        for key, items in groups.items():
+            if len(items) < min_samples:
+                continue
+            x = summarize(items)
+            x["condition"] = key
+            result.append(x)
+
+        result.sort(key=lambda x: (-x["n"], -x["top1_hit_rate_pct"], x["condition"]))
+        return result
+
+    overall = summarize(rows)
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "min_samples": min_samples,
+        "overall": overall,
+        "axes": {
+            "バンク": grouped(["bank"]),
+            "バンク×予測1着選手×脚質": grouped(["bank", "player", "style"]),
+            "バンク×脚質": grouped(["bank", "style"]),
+            "予測1着と実際1着のライン関係": grouped(["line_relation"]),
+            "レースステージ": grouped(["stage"]),
+            "グレード": grouped(["grade"]),
+            "予測1着競走得点帯": grouped(["score_band"]),
+            "予測1着脚質": grouped(["style"]),
+        },
+        "note": (
+            "この診断は購入履歴・見送り履歴・オッズを評価母集団に使わず、"
+            "結果確定済みレースについてAIの予測1着車番を1レース1試行として評価します。"
+            "したがって購入フィルターによる見かけ上の改善を予想精度の改善として扱いません。"
+            "バンク×予測1着選手×脚質は、バンク条件下で特定選手・脚質の1着予測が"
+            "安定しているかを確認するための分析です。"
+            "件数がmin_samples未満の条件は表示しません。"
+        ),
     }
 
 
@@ -4132,7 +4348,6 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         "グレード別": bucket_stats(grade_bucket),
         "買い目内平均競走得点別": bucket_stats(race_score_bucket),
         "買い目内脚質構成別": bucket_stats(leg_style_bucket),
-        "人気集中度パターン別": bucket_stats(popularity_pattern_bucket),
     }
 
     # 単一条件(例:「グレード別」だけ)の集計は、他の要因との交絡(本当の原因が別にある)
@@ -4153,11 +4368,6 @@ def _compute_purchase_stats(db: Session, since_dt=None):
 
         "季節×バンク先行有利度": combo_bucket(season_bucket, "季節", bank_lead_bucket, "先行有利度"),
         "券種×ライン絡み": combo_bucket(lambda p: p.bet_type, "券種", line_bucket, "ライン"),
-        "券種×人気集中度パターン": combo_bucket(lambda p: p.bet_type, "券種", popularity_pattern_bucket, "人気集中度"),
-        # 2026-09-07追加(ChatGPT分析項目6対応): バンク別の収益差が「バンク自体の
-        # 差」なのか「特定の券種・オッズ帯がそのバンクに偏っているだけ」なのかを
-        # 切り分けるための組み合わせ。
-        "バンク×券種": combo_bucket(bank_bucket, "バンク", lambda p: p.bet_type, "券種"),
 
         # 2026-09-07追加(ChatGPT分析項目7対応): 同ライン絡みの高回収率が
         # 「同ラインだから」なのか「同ライン条件に高オッズの買い目が集中して
