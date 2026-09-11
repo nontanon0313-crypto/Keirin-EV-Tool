@@ -33,6 +33,7 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
     if total > 0:
         probs = {k: v / total for k, v in probs.items()}
     probs = calc.apply_race_score_band_factors(probs, entries)
+    probs = calc.blend_race_score_rank_into_probs(probs, entries)
     return probs
 
 

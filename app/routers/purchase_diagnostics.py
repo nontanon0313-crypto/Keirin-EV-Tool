@@ -3906,7 +3906,14 @@ def diagnostics_first_place_signal_compare(db: Session = Depends(get_db)):
         .all()
     )
     n = 0
-    hits = {"blended_top": 0, "race_score_top": 0, "band_adjusted_top": 0, "agree": 0, "agree_hit": 0}
+    hits = {
+        "blended_top": 0,
+        "race_score_top": 0,
+        "band_adjusted_top": 0,
+        "score_rank_blend_top": 0,
+        "agree": 0,
+        "agree_hit": 0,
+    }
     skipped = 0
     for race in races:
         entries = [e for e in (race.entries or []) if e.car_number is not None]
@@ -3928,7 +3935,7 @@ def diagnostics_first_place_signal_compare(db: Session = Depends(get_db)):
             car = int(e.car_number)
             p = e.blended_win_prob if e.blended_win_prob is not None else e.ai_win_prob
             if p is None and e.app_win_rate is not None:
-                p = float(e.app_win_rate)/100.0 if float(e.app_win_rate)>1 else float(e.app_win_rate)
+                p = float(e.app_win_rate) / 100.0 if float(e.app_win_rate) > 1 else float(e.app_win_rate)
             if p is not None:
                 blended[car] = float(p)
             if e.race_score is not None:
@@ -3943,27 +3950,45 @@ def diagnostics_first_place_signal_compare(db: Session = Depends(get_db)):
             adjusted = calc.apply_race_score_band_factors(dict(blended), entries)
             a_top = max(adjusted, key=lambda c: adjusted[c]) if adjusted else b_top
         except Exception:
+            adjusted = dict(blended)
             a_top = b_top
-        if b_top == actual_1st: hits["blended_top"] += 1
-        if s_top is not None and s_top == actual_1st: hits["race_score_top"] += 1
-        if a_top == actual_1st: hits["band_adjusted_top"] += 1
+        try:
+            mixed = calc.blend_race_score_rank_into_probs(dict(adjusted), entries)
+            m_top = max(mixed, key=lambda c: mixed[c]) if mixed else a_top
+        except Exception:
+            m_top = a_top
+        if b_top == actual_1st:
+            hits["blended_top"] += 1
+        if s_top is not None and s_top == actual_1st:
+            hits["race_score_top"] += 1
+        if a_top == actual_1st:
+            hits["band_adjusted_top"] += 1
+        if m_top == actual_1st:
+            hits["score_rank_blend_top"] += 1
         if s_top is not None and b_top == s_top:
             hits["agree"] += 1
-            if b_top == actual_1st: hits["agree_hit"] += 1
+            if b_top == actual_1st:
+                hits["agree_hit"] += 1
+
     def rate(k):
-        return round(hits[k]/n*100, 2) if n else None
+        return round(hits[k] / n * 100, 2) if n else None
+
     return {
-        "note": "1着予測信号の比較。投票有無は見ない。",
+        "note": "1着予測信号の比較。投票有無は見ない。得点ランク合成は本番_build_win_probsと同じ処理。",
         "評価レース数": n,
         "除外": skipped,
+        "合成重み": getattr(calc, "RACE_SCORE_RANK_BLEND_WEIGHT", None),
         "1着的中率%": {
             "blended最大": rate("blended_top"),
             "競走得点最大": rate("race_score_top"),
             "得点帯factor適用後": rate("band_adjusted_top"),
+            "得点ランク合成後": rate("score_rank_blend_top"),
         },
         "blendedと得点の一致": {
             "一致レース数": hits["agree"],
-            "一致かつ1着的中率%": round(hits["agree_hit"]/hits["agree"]*100, 2) if hits["agree"] else None,
+            "一致かつ1着的中率%": (
+                round(hits["agree_hit"] / hits["agree"] * 100, 2) if hits["agree"] else None
+            ),
         },
     }
 

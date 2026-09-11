@@ -743,6 +743,71 @@ def apply_race_score_band_factors(probs: dict, entries: list) -> dict:
 
 
 
+
+# 2026-09-11: first-place-signal-compare (452レース)
+#   blended最大 36.95% / 競走得点最大 40.71% / 帯factor適用後 39.38%
+# 得点ランキングを1着確率に明示合成する。
+RACE_SCORE_RANK_BLEND_WEIGHT = 0.55
+RACE_SCORE_RANK_BLEND_ENABLED = True
+
+
+def blend_race_score_rank_into_probs(probs: dict, entries: list, weight: float = None) -> dict:
+    """競走得点の相対順位を1着確率に合成し再正規化する。"""
+    if not RACE_SCORE_RANK_BLEND_ENABLED or not probs:
+        return probs
+    if weight is None:
+        weight = RACE_SCORE_RANK_BLEND_WEIGHT
+    try:
+        w = float(weight)
+    except (TypeError, ValueError):
+        w = 0.55
+    w = max(0.0, min(1.0, w))
+    if w <= 0:
+        return probs
+
+    score_by_car = {}
+    for e in entries or []:
+        car = getattr(e, "car_number", None)
+        if car is None:
+            continue
+        try:
+            car = int(car)
+        except (TypeError, ValueError):
+            continue
+        sc = getattr(e, "race_score", None)
+        if sc is None:
+            continue
+        try:
+            score_by_car[car] = float(sc)
+        except (TypeError, ValueError):
+            continue
+
+    cars = [c for c in probs.keys() if c in score_by_car]
+    if len(cars) < 2:
+        return probs
+
+    vals = [score_by_car[c] for c in cars]
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 1e-9:
+        score_probs = {c: 1.0 / len(cars) for c in cars}
+    else:
+        raw = {c: (score_by_car[c] - lo) / (hi - lo) + 0.05 for c in cars}
+        tot = sum(raw.values())
+        score_probs = {c: v / tot for c, v in raw.items()}
+
+    mixed = {}
+    for c, p in probs.items():
+        sp = score_probs.get(c)
+        if sp is None:
+            mixed[c] = float(p) * (1.0 - w)
+        else:
+            mixed[c] = (1.0 - w) * float(p) + w * sp
+    total = sum(mixed.values())
+    if total <= 1e-12:
+        return probs
+    return {c: v / total for c, v in mixed.items()}
+
+
 def line_map_from_race(race) -> tuple:
     """app/routers/ev.pyの_line_map_from_raceと同じロジック(遡及検証用に複製)。"""
     line_map = None
