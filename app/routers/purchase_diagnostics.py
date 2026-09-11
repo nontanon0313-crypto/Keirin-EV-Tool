@@ -2628,16 +2628,28 @@ def diagnostics_trifecta_order_structure(
                     cond2_top_correct += 1
                 cond2_prob_sum += boosted.get(actual_order[1], 0.0) / denom2
 
-        # 3. 1着2着→3着の条件付き精度(実際の1着・2着車を固定)
+        # 3. 1着2着→3着（本番: 1着or2着と同ライン残があれば和集合、無ければ全体）
         remaining_after_2nd = {c: v for c, v in win_probs.items() if c not in (actual_order[0], actual_order[1])}
         if remaining_after_2nd:
-            if line_map and line_boost != 1.0:
+            boosted3 = remaining_after_2nd
+            if getattr(calc, "SAME_LINE_REMAIN_3RD_RESTRICT", False) and line_map:
+                lids = set()
+                for pc in (actual_order[0], actual_order[1]):
+                    lid = line_map.get(pc)
+                    if lid is not None:
+                        lids.add(lid)
+                if lids:
+                    union = {
+                        c: v for c, v in remaining_after_2nd.items()
+                        if line_map.get(c) in lids
+                    }
+                    if union:
+                        boosted3 = union
+            elif line_map and line_boost != 1.0:
                 boosted3 = {
                     c: (v * line_boost if line_map.get(c) == line_map.get(actual_order[1]) else v)
                     for c, v in remaining_after_2nd.items()
                 }
-            else:
-                boosted3 = remaining_after_2nd
             denom3 = sum(boosted3.values())
             if denom3 > 1e-9:
                 cond3_n += 1
