@@ -2785,7 +2785,13 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
         .all()
     )
 
-    HEAD_CANDIDATES = [1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 20.0, 30.0, 50.0, 80.0, 120.0]
+    HEAD_CANDIDATES = [
+        1.0, 2.0, 3.0, 5.0, 8.0, 10.0,
+        15.0, 20.0, 30.0, 50.0, 80.0, 120.0,
+        160.0, 200.0, 300.0, 500.0, 800.0,
+        1200.0, 2000.0, 3000.0, 5000.0,
+        8000.0, 12000.0
+    ]
     OTHER_CANDIDATES = [0.8, 1.0, 1.2]
 
     combos = [(h, o) for h in HEAD_CANDIDATES for o in OTHER_CANDIDATES]
