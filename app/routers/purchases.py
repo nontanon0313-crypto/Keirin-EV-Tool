@@ -1610,11 +1610,11 @@ TARGET_BET_TYPES = ["3連単"]
 #
 # 最新の投票基準変更コミット:
 # 6e29ad4f591bc5ba1f2a647aedf9c0978e5f46fc
-# 2026-09-10T09:30:52+09:00
+# 2026-09-12T01:00:00+09:00
 #
 # Purchase.purchased_at はUTCのnaive datetimeとして扱われるため、
 # 内部比較値はUTCに統一する。
-VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 10, 0, 30, 52)
+VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 11, 16, 0, 0)
 # この値は「最後に投票判断そのものを変更した時刻」。
 # UI/診断/ログだけの変更では更新しない。
 # 再投票済み判定・現行基準集計・calibration_switchはこの値を共通利用する。
