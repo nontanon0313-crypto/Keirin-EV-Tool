@@ -2599,15 +2599,27 @@ def diagnostics_trifecta_order_structure(
             n_1st_correct += 1
 
         # 2. 1着→2着の条件付き精度(実際の1着車を固定)
+        # 本番 harville_prob と同じ: 同ライン残があれば2着候補を同ラインに限定
         remaining_after_1st = {c: v for c, v in win_probs.items() if c != actual_order[0]}
         if remaining_after_1st:
-            if line_map and line_boost != 1.0:
+            boosted = remaining_after_1st
+            if (
+                getattr(calc, "SAME_LINE_REMAIN_2ND_RESTRICT", False)
+                and line_map
+                and line_map.get(actual_order[0]) is not None
+            ):
+                lid = line_map.get(actual_order[0])
+                same_remain = {
+                    c: v for c, v in remaining_after_1st.items()
+                    if line_map.get(c) == lid
+                }
+                if same_remain:
+                    boosted = same_remain
+            elif line_map and line_boost != 1.0:
                 boosted = {
                     c: (v * line_boost if line_map.get(c) == line_map.get(actual_order[0]) else v)
                     for c, v in remaining_after_1st.items()
                 }
-            else:
-                boosted = remaining_after_1st
             denom2 = sum(boosted.values())
             if denom2 > 1e-9:
                 cond2_n += 1
