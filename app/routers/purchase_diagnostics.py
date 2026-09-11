@@ -4241,3 +4241,114 @@ def diagnostics_same_line_remain_2nd(db: Session = Depends(get_db)):
         "最良ルールとの差pt": delta,
     }
 
+
+@router.get("/same-line-remain-3rd")
+def diagnostics_same_line_remain_3rd(db: Session = Depends(get_db)):
+    """3着: 実際の1着2着固定時のルール比較。"""
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+    rules = {
+        "残存確率最大": 0,
+        "残存得点最大": 0,
+        "1着と同ライン残があればその中の確率最大_なければ全体確率最大": 0,
+        "2着と同ライン残があればその中の確率最大_なければ全体確率最大": 0,
+        "1着または2着と同ライン残があればその中の確率最大_なければ全体": 0,
+        "1着と同ライン確率を1.15倍してから最大": 0,
+    }
+    n = 0
+    n_same1 = 0
+    n_same2 = 0
+    skipped = 0
+    for race in races:
+        entries = race.entries or []
+        win_probs = calc.build_win_probs_from_entries(entries)
+        if not win_probs or len(win_probs) < 3:
+            skipped += 1
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical or len(canonical[0]) < 3:
+            skipped += 1
+            continue
+        a1, a2, a3 = canonical[0][0], canonical[0][1], canonical[0][2]
+        if a1 not in win_probs or a2 not in win_probs or a3 not in win_probs:
+            skipped += 1
+            continue
+        remain = {c: float(p) for c, p in win_probs.items() if c not in (a1, a2)}
+        if not remain:
+            skipped += 1
+            continue
+        mass = sum(remain.values()) or 1.0
+        cond = {c: p / mass for c, p in remain.items()}
+        scores = {}
+        for e in entries:
+            if e.car_number is None or e.race_score is None:
+                continue
+            try:
+                scores[int(e.car_number)] = float(e.race_score)
+            except (TypeError, ValueError):
+                pass
+        line_map, _ = calc.line_map_from_race(race)
+        same1, same2 = {}, {}
+        if line_map:
+            if line_map.get(a1) is not None:
+                lid1 = line_map.get(a1)
+                same1 = {c: cond[c] for c in cond if line_map.get(c) == lid1}
+            if line_map.get(a2) is not None:
+                lid2 = line_map.get(a2)
+                same2 = {c: cond[c] for c in cond if line_map.get(c) == lid2}
+        n += 1
+        if same1:
+            n_same1 += 1
+        if same2:
+            n_same2 += 1
+        pick_prob = max(cond, key=lambda c: cond[c])
+        if pick_prob == a3:
+            rules["残存確率最大"] += 1
+        score_cands = {c: scores[c] for c in remain if c in scores}
+        if score_cands and max(score_cands, key=lambda c: score_cands[c]) == a3:
+            rules["残存得点最大"] += 1
+        if (max(same1, key=lambda c: same1[c]) if same1 else pick_prob) == a3:
+            rules["1着と同ライン残があればその中の確率最大_なければ全体確率最大"] += 1
+        if (max(same2, key=lambda c: same2[c]) if same2 else pick_prob) == a3:
+            rules["2着と同ライン残があればその中の確率最大_なければ全体確率最大"] += 1
+        union = dict(same1)
+        union.update(same2)
+        if (max(union, key=lambda c: union[c]) if union else pick_prob) == a3:
+            rules["1着または2着と同ライン残があればその中の確率最大_なければ全体"] += 1
+        boosted = dict(cond)
+        if same1:
+            for c in same1:
+                boosted[c] = cond[c] * 1.15
+        if max(boosted, key=lambda c: boosted[c]) == a3:
+            rules["1着と同ライン確率を1.15倍してから最大"] += 1
+
+    def rate(hits):
+        return round(hits / n * 100, 2) if n else None
+
+    ranked = sorted(
+        [{"ルール": k, "的中率%": rate(v), "的中数": v} for k, v in rules.items()],
+        key=lambda x: (-(x["的中率%"] or 0), x["ルール"]),
+    )
+    base = rate(rules["残存確率最大"])
+    best = ranked[0] if ranked else None
+    delta = round(best["的中率%"] - base, 2) if best and base is not None else None
+    return {
+        "note": "3着・実際の1着2着固定。",
+        "評価レース数": n,
+        "1着と同ライン残があるレース数": n_same1,
+        "2着と同ライン残があるレース数": n_same2,
+        "除外": skipped,
+        "ルール別的中率": ranked,
+        "ベースライン的中率%": base,
+        "最良ルールとの差pt": delta,
+    }
+
