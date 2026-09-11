@@ -2805,98 +2805,71 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
 
     OTHER_CANDIDATES = [0.8, 1.0, 1.2]
 
-    combos = [
-        (h, o)
-        for h in HEAD_CANDIDATES
-        for o in OTHER_CANDIDATES
-    ]
-
-    stats = {
-        combo: {
-            "n": 0,
-            "log_likelihood_sum": 0.0,
-            "prob_sum": 0.0,
-            "zero_count": 0,
-        }
-        for combo in combos
-    }
-
-    evaluated = 0
-    skipped_no_win_probs = 0
-    skipped_no_result = 0
-
-    for race in races:
-        win_probs = calc.build_win_probs_from_entries(race.entries)
-        if not win_probs:
-            skipped_no_win_probs += 1
-            continue
-
-        try:
-            parsed = calc.parse_actual_result(race.actual_result)
-        except Exception:
-            skipped_no_result += 1
-            continue
-
-        canonical = parsed.get("canonical_orderings") or []
-        if not canonical:
-            skipped_no_result += 1
-            continue
-
-        actual_order = tuple(canonical[0][:3])
-
-        if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
-            skipped_no_result += 1
-            continue
-
-        line_map, _ = calc.line_map_from_race(race)
-        pos_map = _line_position_map(race)
-
-        evaluated += 1
-
-        for combo in combos:
-            head_boost, other_boost = combo
-
-            prob = _harville_prob_v2(
-                win_probs,
-                actual_order,
-                line_map,
-                pos_map,
-                head_boost,
-                other_boost,
-            )
-
-            st = stats[combo]
-            st["n"] += 1
-            st["prob_sum"] += prob
-
-            if prob > 1e-300:
-                st["log_likelihood_sum"] += math.log(prob)
-            else:
-                st["zero_count"] += 1
-                # log(0)相当。極端なboostで確率が消失した場合も
-                # 尤度比較から除外しない。
-                st["log_likelihood_sum"] += math.log(1e-300)
+    # 頭打ち判定。
+    # 平均対数尤度の改善量が極めて小さい状態が3点連続したら、
+    # その系列について以降のboost探索を打ち切る。
+    SATURATION_DELTA = 0.00001
+    SATURATION_RELATIVE_PCT = 0.0001
+    CONSECUTIVE_SATURATION = 3
 
     results = []
 
     for other_boost in OTHER_CANDIDATES:
         series = []
+        previous_ll = None
+        saturation_streak = 0
+        saturation_at = None
 
         for head_boost in HEAD_CANDIDATES:
-            st = stats[(head_boost, other_boost)]
-            n = st["n"]
+            log_likelihood_sum = 0.0
+            prob_sum = 0.0
+            zero_count = 0
+            n = 0
 
-            ll = (
-                st["log_likelihood_sum"] / n
-                if n else None
-            )
+            for race in races:
+                win_probs = calc.build_win_probs_from_entries(race.entries)
+                if not win_probs:
+                    continue
 
-            avg_prob = (
-                st["prob_sum"] / n
-                if n else None
-            )
+                try:
+                    parsed = calc.parse_actual_result(race.actual_result)
+                except Exception:
+                    continue
 
-            series.append({
+                canonical = parsed.get("canonical_orderings") or []
+                if not canonical:
+                    continue
+
+                actual_order = tuple(canonical[0][:3])
+
+                if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+                    continue
+
+                line_map, _ = calc.line_map_from_race(race)
+                pos_map = _line_position_map(race)
+
+                prob = _harville_prob_v2(
+                    win_probs,
+                    actual_order,
+                    line_map,
+                    pos_map,
+                    head_boost,
+                    other_boost,
+                )
+
+                n += 1
+                prob_sum += prob
+
+                if prob > 1e-300:
+                    log_likelihood_sum += math.log(prob)
+                else:
+                    zero_count += 1
+                    log_likelihood_sum += math.log(1e-300)
+
+            ll = log_likelihood_sum / n if n else None
+            avg_prob = prob_sum / n if n else None
+
+            row = {
                 "先頭→番手boost": head_boost,
                 "それ以外の同ラインboost": other_boost,
                 "件数": n,
@@ -2907,53 +2880,50 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
                     round(avg_prob * 100.0, 8)
                     if avg_prob is not None else None
                 ),
-                "確率ほぼ0件数": st["zero_count"],
-            })
+                "確率ほぼ0件数": zero_count,
+            }
 
-        previous = None
-
-        for row in series:
-            ll = row["平均対数尤度_raw"]
-
-            if previous is None or ll is None:
+            if previous_ll is None or ll is None:
                 row["前点との差"] = None
                 row["改善率_pct"] = None
             else:
-                delta = ll - previous
+                delta = ll - previous_ll
                 row["前点との差"] = round(delta, 10)
 
-                if abs(previous) > 1e-15:
+                if abs(previous_ll) > 1e-15:
                     row["改善率_pct"] = round(
-                        delta / abs(previous) * 100.0,
+                        delta / abs(previous_ll) * 100.0,
                         8,
                     )
                 else:
                     row["改善率_pct"] = None
 
-            previous = ll
+                is_saturated = (
+                    0.0 <= delta < SATURATION_DELTA
+                    or (
+                        row["改善率_pct"] is not None
+                        and 0.0 <= row["改善率_pct"] < SATURATION_RELATIVE_PCT
+                    )
+                )
 
-        # 「改善が極めて小さい」を絶対値で判定する。
-        # 平均対数尤度なので、0.00001未満は1レースあたりの
-        # 情報量改善として非常に小さい。
-        SATURATION_DELTA = 0.00001
-        CONSECUTIVE_SATURATION = 3
+                if is_saturated:
+                    saturation_streak += 1
+                else:
+                    saturation_streak = 0
 
-        saturation_streak = 0
-        saturation_at = None
+                if (
+                    saturation_streak >= CONSECUTIVE_SATURATION
+                    and saturation_at is None
+                ):
+                    saturation_at = head_boost
 
-        for row in series:
-            delta = row.get("前点との差")
+                    # このboostまでは記録し、それ以降は探索しない。
+                    series.append(row)
+                    previous_ll = ll
+                    break
 
-            if delta is not None and 0.0 <= delta < SATURATION_DELTA:
-                saturation_streak += 1
-            else:
-                saturation_streak = 0
-
-            if (
-                saturation_streak >= CONSECUTIVE_SATURATION
-                and saturation_at is None
-            ):
-                saturation_at = row["先頭→番手boost"]
+            series.append(row)
+            previous_ll = ll
 
         valid = [
             r for r in series
@@ -2981,6 +2951,7 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
             "最良値": best,
             "頭打ち候補": saturation_at,
             "頭打ち判定閾値": SATURATION_DELTA,
+            "頭打ち相対改善率_pct": SATURATION_RELATIVE_PCT,
             "連続判定回数": CONSECUTIVE_SATURATION,
             "探索上限到達": bool(
                 valid
@@ -2988,7 +2959,7 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
             ),
         })
 
-    # other=1.0を主系列として、最も説明力の高い点を取得。
+    # other=1.0を主系列として取得。
     main = next(
         (
             r for r in results
@@ -3011,8 +2982,9 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
         "除外(結果パース不可)": skipped_no_result,
         "探索上限": HEAD_CANDIDATES[-1],
         "飽和判定": {
-            "1レース平均対数尤度の改善量": 0.00001,
-            "連続回数": 3,
+            "1レース平均対数尤度の改善量": SATURATION_DELTA,
+            "改善率_pct": SATURATION_RELATIVE_PCT,
+            "連続回数": CONSECUTIVE_SATURATION,
         },
         "結果": results,
         "主系列_other_boost_1.0": main,
