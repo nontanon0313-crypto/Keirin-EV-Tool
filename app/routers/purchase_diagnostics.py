@@ -2805,6 +2805,45 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
 
     OTHER_CANDIDATES = [0.8, 1.0, 1.2]
 
+    # レスポンス用の共通評価件数。
+    # boost系列ごとに再計算するが、評価対象レース自体は共通。
+    evaluated = 0
+    skipped_no_win_probs = 0
+    skipped_no_result = 0
+
+    # まず実際に評価可能なレースを確定する。
+    valid_races = []
+
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs:
+            skipped_no_win_probs += 1
+            continue
+
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped_no_result += 1
+            continue
+
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            skipped_no_result += 1
+            continue
+
+        actual_order = tuple(canonical[0][:3])
+
+        if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
+            skipped_no_result += 1
+            continue
+
+        line_map, _ = calc.line_map_from_race(race)
+        pos_map = _line_position_map(race)
+
+        valid_races.append((win_probs, actual_order, line_map, pos_map))
+
+    evaluated = len(valid_races)
+
     # 頭打ち判定。
     # 平均対数尤度の改善量が極めて小さい状態が3点連続したら、
     # その系列について以降のboost探索を打ち切る。
@@ -2826,28 +2865,7 @@ def diagnostics_line_boost_sweep_v2(db: Session = Depends(get_db)):
             zero_count = 0
             n = 0
 
-            for race in races:
-                win_probs = calc.build_win_probs_from_entries(race.entries)
-                if not win_probs:
-                    continue
-
-                try:
-                    parsed = calc.parse_actual_result(race.actual_result)
-                except Exception:
-                    continue
-
-                canonical = parsed.get("canonical_orderings") or []
-                if not canonical:
-                    continue
-
-                actual_order = tuple(canonical[0][:3])
-
-                if len(actual_order) < 3 or not all(c in win_probs for c in actual_order):
-                    continue
-
-                line_map, _ = calc.line_map_from_race(race)
-                pos_map = _line_position_map(race)
-
+            for win_probs, actual_order, line_map, pos_map in valid_races:
                 prob = _harville_prob_v2(
                     win_probs,
                     actual_order,
