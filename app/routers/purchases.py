@@ -3909,6 +3909,338 @@ def prediction_factors_diagnostics(
     }
 
 
+
+@router.get("/diagnostics/bank-player-style")
+def bank_player_style_diagnostics(
+    since: Optional[str] = "calibration_switch",
+    min_samples: int = 10,
+    db: Session = Depends(get_db),
+):
+    """
+    バンク×AI予測1着選手×脚質を1レース=1試行で検証する。
+
+    購入履歴を使わず、各レースでAIが最も高く評価した選手を
+    「予測1着選手」として評価する。
+    これにより購入フィルター・オッズ・投資額による選択バイアスを排除する。
+    """
+    since_dt = _parse_since_param(since) if since != "all" else None
+
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    groups = {}
+    overall_n = 0
+    overall_wins = 0
+
+    for race in races:
+        if since_dt is not None and not _race_is_before_as_of(race, datetime.utcnow()):
+            # race_date/post_timeを使った厳密なas-ofではなく、
+            # calibration_switch以前/以降の既存データ境界は下で判定する。
+            pass
+
+        event_dt = _race_event_dt(race)
+        if since_dt is not None:
+            if event_dt is None or event_dt < since_dt:
+                continue
+
+        candidates = [
+            e for e in race.entries
+            if e.blended_win_prob is not None
+        ]
+        if not candidates:
+            continue
+
+        top = max(candidates, key=lambda e: e.blended_win_prob)
+
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+
+        groups_actual = parsed.get("groups") or []
+        if not groups_actual:
+            continue
+
+        actual_first = groups_actual[0]
+        won = top.car_number in actual_first
+
+        style = str(top.leg_style or "脚質情報なし")
+        style = style.replace("追", "追込") if style == "追" else style
+        bank = race.venue_name or "バンク情報なし"
+        player = top.player_name or "選手名不明"
+
+        key = (bank, player, style)
+
+        g = groups.setdefault(
+            key,
+            {
+                "bank": bank,
+                "player": player,
+                "leg_style": style,
+                "n": 0,
+                "wins": 0,
+            },
+        )
+
+        g["n"] += 1
+        g["wins"] += int(won)
+
+        overall_n += 1
+        overall_wins += int(won)
+
+    if overall_n == 0:
+        return {
+            "message": "条件に該当するAI予測済みレースがありません",
+            "since": since,
+        }
+
+    overall_rate = overall_wins / overall_n
+
+    rows = []
+    for g in groups.values():
+        if g["n"] < min_samples:
+            continue
+
+        rate = g["wins"] / g["n"]
+        lo, hi = calc.wilson_score_interval(g["wins"], g["n"])
+
+        rows.append({
+            "bank": g["bank"],
+            "player": g["player"],
+            "leg_style": g["leg_style"],
+            "n": g["n"],
+            "wins": g["wins"],
+            "hit_rate_pct": round(rate * 100, 2),
+            "ci95_low_pct": round(lo * 100, 2),
+            "ci95_high_pct": round(hi * 100, 2),
+            "delta_vs_overall_pt": round((rate - overall_rate) * 100, 2),
+        })
+
+    rows.sort(
+        key=lambda r: (-r["n"], -r["hit_rate_pct"], r["bank"], r["player"])
+    )
+
+    return {
+        "since": since,
+        "min_samples": min_samples,
+        "overall": {
+            "n": overall_n,
+            "wins": overall_wins,
+            "hit_rate_pct": round(overall_rate * 100, 2),
+        },
+        "groups": rows,
+        "group_count": len(rows),
+        "note": (
+            "購入履歴ではなく、各レースのAI予測1位車番を1試行として評価しています。"
+            "選手はAIが1着予想した車番の選手、脚質はその選手の脚質です。"
+            "オッズ・購入フィルター・投資額はこの診断の評価には使用しません。"
+        ),
+    }
+
+
+
+@router.get("/diagnostics/prediction-factors")
+def prediction_factors_diagnostics(
+    since: Optional[str] = "calibration_switch",
+    min_samples: int = 20,
+    db: Session = Depends(get_db),
+):
+    """
+    AI予想そのものの要因別1着精度を1レース=1試行で検証する。
+
+    オッズ・購入履歴・購入フィルターは評価に使用しない。
+    """
+    since_dt = _parse_since_param(since) if since != "all" else None
+
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    observations = []
+
+    for race in races:
+        event_dt = _race_event_dt(race)
+
+        if since_dt is not None:
+            if event_dt is None or event_dt < since_dt:
+                continue
+
+        candidates = [
+            e for e in race.entries
+            if e.blended_win_prob is not None
+        ]
+
+        if len(candidates) < 3:
+            continue
+
+        ranked = sorted(
+            candidates,
+            key=lambda e: -e.blended_win_prob,
+        )
+
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+
+        groups = parsed.get("groups") or []
+        if len(groups) < 3:
+            continue
+
+        actual_pos = [
+            g[0] if len(g) == 1 else None
+            for g in groups[:3]
+        ]
+
+        if actual_pos[0] is None:
+            continue
+
+        top = ranked[0]
+        predicted_top3 = [e.car_number for e in ranked[:3]]
+
+        # 同ライン/異ライン
+        line_relation = "ライン情報なし"
+        if race.lines_data:
+            line_map = {}
+            for idx, line in enumerate(race.lines_data):
+                for car in line:
+                    try:
+                        line_map[int(car)] = idx
+                    except (TypeError, ValueError):
+                        pass
+
+            line_ids = [
+                line_map.get(e.car_number)
+                for e in ranked[:3]
+            ]
+
+            if all(x is not None for x in line_ids):
+                line_relation = (
+                    "同ライン"
+                    if len(set(line_ids)) == 1
+                    else "異なるライン"
+                )
+
+        # 競走得点
+        score = top.race_score
+        if score is None:
+            score_band = "得点情報なし"
+        elif score < 55:
+            score_band = "55未満"
+        elif score < 65:
+            score_band = "55-65"
+        elif score < 75:
+            score_band = "65-75"
+        else:
+            score_band = "75以上"
+
+        style = str(top.leg_style or "脚質情報なし")
+        if style == "追":
+            style = "追込"
+
+        observations.append({
+            "race_id": race.id,
+            "top1": top.car_number,
+            "top1_won": top.car_number == actual_pos[0],
+            "top1_top3": top.car_number in parsed["top3_set"],
+            "top2_correct_given_top1": (
+                top1 := (top.car_number == actual_pos[0])
+            ) and ranked[1].car_number == actual_pos[1],
+            "exact123": (
+                predicted_top3 == actual_pos
+            ),
+            "bank": race.venue_name or "不明",
+            "stage": race.race_stage or "不明",
+            "grade": race.grade or "不明",
+            "score_band": score_band,
+            "style": style,
+            "line_relation": line_relation,
+        })
+
+    if not observations:
+        return {
+            "message": "分析可能なレースがありません",
+            "since": since,
+        }
+
+    def aggregate(rows):
+        if len(rows) < min_samples:
+            return None
+
+        n = len(rows)
+        top1 = sum(r["top1_won"] for r in rows)
+        top3 = sum(r["top1_top3"] for r in rows)
+        exact = sum(r["exact123"] for r in rows)
+
+        first_correct = [r for r in rows if r["top1_won"]]
+        second_given_first = sum(
+            r["top2_correct_given_top1"]
+            for r in first_correct
+        )
+
+        return {
+            "n": n,
+            "top1_hit_rate_pct": round(top1 / n * 100, 2),
+            "top3_rate_pct": round(top3 / n * 100, 2),
+            "second_after_first_rate_pct": (
+                round(
+                    second_given_first / len(first_correct) * 100,
+                    2,
+                )
+                if first_correct else None
+            ),
+            "exact123_rate_pct": round(exact / n * 100, 2),
+        }
+
+    def group_by(key):
+        groups = {}
+        for row in observations:
+            groups.setdefault(row[key], []).append(row)
+
+        result = []
+        for condition, rows in groups.items():
+            a = aggregate(rows)
+            if a is None:
+                continue
+
+            result.append({
+                "condition": condition,
+                **a,
+            })
+
+        result.sort(key=lambda x: (-x["n"], x["condition"]))
+        return result
+
+    overall = aggregate(observations)
+
+    return {
+        "since": since,
+        "min_samples": min_samples,
+        "overall": overall,
+        "axes": {
+            "バンク": group_by("bank"),
+            "レースステージ": group_by("stage"),
+            "グレード": group_by("grade"),
+            "予測1着選手の競走得点帯": group_by("score_band"),
+            "予測1着選手の脚質": group_by("style"),
+            "予測Top3のライン関係": group_by("line_relation"),
+        },
+        "note": (
+            "1レース=1試行。各レースのAI予測1位を1着予想として評価します。"
+            "オッズ・購入履歴・購入フィルターは評価に使用しません。"
+            "「2着」は1着予想が的中したレースだけの条件付き精度です。"
+            "「3連単完全順序」はAI上位3車と実際の1〜3着が完全一致した割合です。"
+        ),
+    }
+
+
 @router.get("/pending")
 def list_pending_purchases(db: Session = Depends(get_db)):
     """まだ結果未確定の購入履歴一覧(結果入力画面用)。レースごとにまとめられるよう、レース情報も付与する。"""
@@ -4356,12 +4688,6 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     # 組み合わせは母数が単一条件より減るため、最低サンプル数を高めに設定する。
     def combo_bucket(key_fn_a, label_a, key_fn_b, label_b):
         return bucket_stats(lambda p: f"{label_a}:{key_fn_a(p)} × {label_b}:{key_fn_b(p)}")
-
-    def odds_band_bucket(p):
-        odds = p.odds_at_purchase
-        if odds is None or odds <= 0:
-            odds = p.final_odds
-        return odds_band_label(odds)
 
     combo_buckets = {
         "グレード×季節": combo_bucket(grade_bucket, "グレード", season_bucket, "季節"),

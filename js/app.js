@@ -2430,7 +2430,28 @@ document.getElementById("loadCalibrationBtn").addEventListener("click", async ()
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "読み込み中...";
   try {
-    const res = await fetch(apiUrl("/purchases/calibration"));
+    const awake = await wakeUpBackend((msg) => {
+      resultBox.textContent = msg;
+    });
+    if (!awake) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 85000);
+
+    let res;
+    try {
+      res = await fetch(
+        apiUrl("/purchases/calibration?since=calibration_switch"),
+        {
+          cache: "no-store",
+          signal: controller.signal,
+        }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const data = await res.json();
     const data = await res.json();
     let html = "";
 
@@ -2550,7 +2571,27 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
   const box = document.getElementById("statsResult");
   box.textContent = "キャリブレーション比較を読み込み中...";
   try {
-    const res = await fetch(apiUrl("/purchases/calibration-compare"));
+    const awake = await wakeUpBackend((msg) => {
+      box.textContent = msg;
+    });
+    if (!awake) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 85000);
+
+    let res;
+    try {
+      res = await fetch(
+        apiUrl("/purchases/calibration-compare?since=calibration_switch"),
+        {
+          cache: "no-store",
+          signal: controller.signal,
+        }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
     const enabled = loadCalAxisEnabled();
@@ -2737,6 +2778,166 @@ document.getElementById("loadCarPickBtn").addEventListener("click", async () => 
   }
 });
 
+
+
+document.getElementById("loadPredictionFactorsBtn").addEventListener("click", async () => {
+  const box = document.getElementById("statsResult");
+  box.textContent = "予想要因別の1着精度を計算中...";
+
+  try {
+    const awake = await wakeUpBackend((msg) => {
+      box.textContent = msg;
+    });
+    if (!awake) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 85000);
+
+    let res;
+    try {
+      res = await fetch(
+        apiUrl("/purchases/diagnostics/prediction-factors?since=calibration_switch&min_samples=20"),
+        {
+          cache: "no-store",
+          signal: controller.signal,
+        }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || `サーバーエラー(${res.status})`);
+    }
+
+    if (data.message) {
+      box.textContent = data.message;
+      return;
+    }
+
+    const o = data.overall || {};
+    let html = `<h3>予想要因別の1着精度</h3>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+    html += `<p><strong>全体:</strong> ${o.n ?? 0}レース / `
+      + `1着 ${o.top1_hit_rate_pct ?? "-"}% / `
+      + `Top3 ${o.top3_rate_pct ?? "-"}% / `
+      + `1→2 ${o.second_after_first_rate_pct ?? "-"}% / `
+      + `1→2→3 ${o.exact123_rate_pct ?? "-"}%</p>`;
+
+    for (const [axis, rows] of Object.entries(data.axes || {})) {
+      html += `<h4>${axis}</h4>`;
+      if (!rows || !rows.length) {
+        html += `<p class="note">母数${data.min_samples ?? 20}件以上の条件なし</p>`;
+        continue;
+      }
+
+      html += `<table>
+        <tr>
+          <th>条件</th>
+          <th>件数</th>
+          <th>1着</th>
+          <th>Top3</th>
+          <th>1→2</th>
+          <th>1→2→3</th>
+        </tr>`;
+
+      for (const r of rows) {
+        html += `<tr>
+          <td>${r.condition}</td>
+          <td>${r.n}</td>
+          <td>${r.top1_hit_rate_pct}%</td>
+          <td>${r.top3_rate_pct}%</td>
+          <td>${r.second_after_first_rate_pct ?? "-"}%</td>
+          <td>${r.exact123_rate_pct}%</td>
+        </tr>`;
+      }
+
+      html += `</table>`;
+    }
+
+    box.innerHTML = html;
+  } catch (e) {
+    box.textContent = e.name === "AbortError"
+      ? "エラー: 予想要因別診断が85秒以内に完了しませんでした。"
+      : "エラー: " + e.message;
+  }
+});
+
+document.getElementById("loadBankPlayerStyleBtn").addEventListener("click", async () => {
+  const box = document.getElementById("statsResult");
+  box.textContent = "バンク×選手×脚質を計算中...";
+
+  try {
+    const awake = await wakeUpBackend((msg) => {
+      box.textContent = msg;
+    });
+    if (!awake) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 85000);
+
+    let res;
+    try {
+      res = await fetch(
+        apiUrl("/purchases/diagnostics/bank-player-style?since=calibration_switch&min_samples=10"),
+        {
+          cache: "no-store",
+          signal: controller.signal,
+        }
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.detail || `サーバーエラー(${res.status})`);
+    }
+
+    if (data.message) {
+      box.textContent = data.message;
+      return;
+    }
+
+    const o = data.overall || {};
+
+    let html = `<h3>バンク×予測1着選手×脚質</h3>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+    html += `<p>全体: ${o.wins ?? 0}/${o.n ?? 0} = ${o.hit_rate_pct ?? "-"}%</p>`;
+
+    html += `<table>
+      <tr>
+        <th>バンク</th>
+        <th>予測1着選手</th>
+        <th>脚質</th>
+        <th>件数</th>
+        <th>1着</th>
+        <th>95%CI</th>
+        <th>全体差</th>
+      </tr>`;
+
+    for (const r of data.groups || []) {
+      const delta = r.delta_vs_overall_pt;
+      html += `<tr>
+        <td>${r.bank}</td>
+        <td>${r.player}</td>
+        <td>${r.leg_style}</td>
+        <td>${r.n}</td>
+        <td>${r.hit_rate_pct}%</td>
+        <td>${r.ci95_low_pct}%〜${r.ci95_high_pct}%</td>
+        <td>${delta >= 0 ? "+" : ""}${delta}pt</td>
+      </tr>`;
+    }
+
+    html += `</table>`;
+    box.innerHTML = html;
+  } catch (e) {
+    box.textContent = e.name === "AbortError"
+      ? "エラー: バンク×選手×脚質診断が85秒以内に完了しませんでした。"
+      : "エラー: " + e.message;
+  }
+});
 
 document.getElementById("loadReadinessBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
