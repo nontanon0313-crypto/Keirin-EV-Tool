@@ -4127,3 +4127,105 @@ def diagnostics_order_place_signals(db: Session = Depends(get_db)):
         "3着_1着2着固定時": pack(c3, "actual_same_line_as_1st"),
     }
 
+
+@router.get("/same-line-remain-2nd")
+def diagnostics_same_line_remain_2nd(db: Session = Depends(get_db)):
+    """2着: 同ライン残への軽い優先ルール比較。全面line_boostは使わない。"""
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+    rules = {
+        "残存確率最大": 0,
+        "同ラインがいれば同ライン内の確率最大_なければ全体確率最大": 0,
+        "同ライン確率を1.15倍してから最大": 0,
+        "同ライン確率を1.3倍してから最大": 0,
+        "同ラインがいれば同ライン内の得点最大_なければ全体確率最大": 0,
+    }
+    n = 0
+    n_has_same = 0
+    skipped = 0
+    for race in races:
+        entries = race.entries or []
+        win_probs = calc.build_win_probs_from_entries(entries)
+        if not win_probs or len(win_probs) < 3:
+            skipped += 1
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical or len(canonical[0]) < 2:
+            skipped += 1
+            continue
+        a1, a2 = canonical[0][0], canonical[0][1]
+        if a1 not in win_probs or a2 not in win_probs:
+            skipped += 1
+            continue
+        remain = {c: float(p) for c, p in win_probs.items() if c != a1}
+        if not remain:
+            skipped += 1
+            continue
+        mass = sum(remain.values()) or 1.0
+        cond = {c: p / mass for c, p in remain.items()}
+        scores = {}
+        for e in entries:
+            if e.car_number is None or e.race_score is None:
+                continue
+            try:
+                scores[int(e.car_number)] = float(e.race_score)
+            except (TypeError, ValueError):
+                pass
+        line_map, _ = calc.line_map_from_race(race)
+        lid = line_map.get(a1) if line_map else None
+        same = {}
+        if lid is not None and line_map:
+            same = {c: cond[c] for c in cond if line_map.get(c) == lid}
+        n += 1
+        if same:
+            n_has_same += 1
+        pick_a = max(cond, key=lambda c: cond[c])
+        if pick_a == a2:
+            rules["残存確率最大"] += 1
+        pick_b = max(same, key=lambda c: same[c]) if same else pick_a
+        if pick_b == a2:
+            rules["同ラインがいれば同ライン内の確率最大_なければ全体確率最大"] += 1
+        for mult, name in ((1.15, "同ライン確率を1.15倍してから最大"), (1.3, "同ライン確率を1.3倍してから最大")):
+            boosted = dict(cond)
+            if same:
+                for c in same:
+                    boosted[c] = cond[c] * mult
+            if max(boosted, key=lambda c: boosted[c]) == a2:
+                rules[name] += 1
+        if same:
+            same_scores = {c: scores[c] for c in same if c in scores}
+            pick_e = max(same_scores, key=lambda c: same_scores[c]) if same_scores else max(same, key=lambda c: same[c])
+        else:
+            pick_e = pick_a
+        if pick_e == a2:
+            rules["同ラインがいれば同ライン内の得点最大_なければ全体確率最大"] += 1
+
+    def rate(hits):
+        return round(hits / n * 100, 2) if n else None
+
+    ranked = sorted(
+        [{"ルール": k, "的中率%": rate(v), "的中数": v} for k, v in rules.items()],
+        key=lambda x: (-(x["的中率%"] or 0), x["ルール"]),
+    )
+    base = rate(rules["残存確率最大"])
+    best = ranked[0] if ranked else None
+    delta = round(best["的中率%"] - base, 2) if best and base is not None else None
+    return {
+        "note": "2着・同ライン残の軽い優先比較。全面line_boostではない。",
+        "評価レース数": n,
+        "同ライン残があるレース数": n_has_same,
+        "除外": skipped,
+        "ルール別的中率": ranked,
+        "ベースライン的中率%": base,
+        "最良ルールとの差pt": delta,
+    }
+
