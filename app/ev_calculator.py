@@ -82,6 +82,7 @@ def harville_prob(
     remaining_probs = dict(win_probs)
     prob = 1.0
     prev_car = None
+    place_idx = 0  # 0=1着, 1=2着, ...
     for car in order:
         p = remaining_probs.get(car, 0.0)
         same_line = (
@@ -90,7 +91,27 @@ def harville_prob(
             and line_map.get(car) is not None
             and line_map.get(car) == line_map.get(prev_car)
         )
-        if two_param_mode and same_line:
+        use_2nd_same_line_restrict = (
+            SAME_LINE_REMAIN_2ND_RESTRICT
+            and place_idx == 1
+            and line_map is not None
+            and prev_car is not None
+            and line_map.get(prev_car) is not None
+        )
+        same_line_remain = None
+        if use_2nd_same_line_restrict:
+            lid = line_map.get(prev_car)
+            same_line_remain = {
+                c: v for c, v in remaining_probs.items()
+                if line_map.get(c) == lid
+            }
+            if not same_line_remain:
+                same_line_remain = None
+
+        if same_line_remain is not None:
+            denom = sum(same_line_remain.values())
+            cond_p = (same_line_remain.get(car, 0.0) / denom) if denom > 1e-9 else 0.0
+        elif two_param_mode and same_line:
             boosted = {}
             for c, v in remaining_probs.items():
                 if line_map.get(c) == line_map.get(prev_car):
@@ -120,6 +141,7 @@ def harville_prob(
         prob *= cond_p
         remaining_probs.pop(car, None)
         prev_car = car
+        place_idx += 1
     return max(prob, 0.0)
 
 
@@ -677,6 +699,9 @@ def build_win_probs_from_entries(entries: list) -> dict:
 SAME_LINE_BOOST = 1.0
 HEAD_TO_BANTE_BOOST = 20.0  # 2パラメータモデル用に残置(本番では未使用。診断ツール用)
 OTHER_SAME_LINE_BOOST = SAME_LINE_BOOST  # 後方互換のためのエイリアス
+
+# 2026-09-12: 2着は同ライン残があれば同ラインに限定
+SAME_LINE_REMAIN_2ND_RESTRICT = True
 
 # 2026-09-09: race-score-band-factors診断結果に基づく1着確率の得点帯補正(のん承認待ちの試験値)。
 # 診断: 無補正37.99% → 適用後40.50% (+2.52pt)。105-110帯が特に過小評価(factor≈1.44)。
