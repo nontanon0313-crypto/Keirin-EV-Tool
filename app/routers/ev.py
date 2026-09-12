@@ -178,8 +178,9 @@ def _select_portfolio(
     outcomes,
     odds_safety_margins,
     max_single_bet_pct_of_race_cap=1.0,
+    prefer_hit_rate: bool = False,
 ):
-    """固定ケリー額を使い、ガラミ制約を満たす期待利益最大のポートフォリオを構成する。"""
+    """固定ケリー額でポートフォリオ構成。prefer_hit_rate時は的中確率寄与を優先。"""
     prepared = []
     # avoid_garami=True(既定値)の時、関数末尾でこの変数を使うが初期化されていなかった
     # ため、avoid_garami有効時は必ずUnboundLocalErrorで race-plan が500エラーになる
@@ -212,10 +213,14 @@ def _select_portfolio(
                 )
             ]
 
+        if prefer_hit_rate:
+            value = stake * float(c["win_prob"])
+        else:
+            value = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         prepared.append({
             **c,
             "_stake": stake,
-            "_value": stake * (c["win_prob"] * c["odds_value"] - 1.0),
+            "_value": value,
             "_winning": winning_cache[key],
         })
 
@@ -1010,6 +1015,31 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         combination_str = "-".join(str(c) for c in cars)
         return [o for o in outcomes if calc.judge_purchase_result(bet_type, combination_str, list(o))]
 
+    prefer_hit_rate = bool(getattr(req, "prefer_hit_rate", True))
+    honmei_car = max(win_probs, key=win_probs.get) if win_probs else None
+    if prefer_hit_rate and honmei_car is not None:
+        kept = []
+        for c in candidates:
+            if c.get("bet_type") != "3連単":
+                skipped_for_verification.append((c, "的中率重視のため三連単以外を見送り"))
+                continue
+            try:
+                first = int(str(c["combination"]).split("-")[0])
+            except (ValueError, IndexError):
+                skipped_for_verification.append((c, "組み合わせ解析不能"))
+                continue
+            if first != int(honmei_car):
+                skipped_for_verification.append((c, f"的中率重視:1着が本命{honmei_car}以外"))
+                continue
+            if float(c.get("win_prob") or 0) < float(req.min_win_prob):
+                skipped_for_verification.append((c, "的中率重視:最低的中確率未満"))
+                continue
+            kept.append(c)
+        candidates = sorted(
+            kept,
+            key=lambda x: (-float(x.get("win_prob") or 0), -float(x.get("ev_pct") or 0)),
+        )
+
     selected, payout_by_outcome, excluded_by_garami_count, prepared_count = _select_portfolio(
         candidates=candidates,
         race_cap=race_cap,
@@ -1018,6 +1048,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         outcomes=outcomes,
         odds_safety_margins=odds_safety_margins,
         max_single_bet_pct_of_race_cap=getattr(req, "max_single_bet_pct_of_race_cap", 1.0),
+        prefer_hit_rate=prefer_hit_rate,
     )
 
     items = []
@@ -1097,7 +1128,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # プラン0件でも「1件でも見える化」するため、落ちた候補の上位を返す
     # (のんの指摘「投票プランありが分からない」への対応の一環。Grok案を統合)
     preview_candidates = []
-    for c in sorted(candidates, key=lambda x: -x.get("ev_pct", 0))[:15]:
+    _preview_key = (
+        (lambda x: (-float(x.get("win_prob") or 0), -float(x.get("ev_pct") or 0)))
+        if bool(getattr(req, "prefer_hit_rate", True))
+        else (lambda x: (-float(x.get("ev_pct") or 0),))
+    )
+    for c in sorted(candidates, key=_preview_key)[:15]:
         key = (c["bet_type"], c["combination"])
         if key in selected_keys:
             continue
