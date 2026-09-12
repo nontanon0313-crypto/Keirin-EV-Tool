@@ -4478,3 +4478,74 @@ def diagnostics_race_score_method_compare(db: Session = Depends(get_db)):
         ),
     }
 
+
+
+@router.get("/leg-style-first-place")
+def diagnostics_leg_style_first_place(db: Session = Depends(get_db)):
+    """脚質ラベル×実際1着。本番未使用。"""
+    def norm_style(raw) -> str:
+        if not raw:
+            return "脚質情報なし"
+        t = str(raw)
+        if "逃" in t and "逃げ" not in t:
+            t = t.replace("逃", "逃げ")
+        if "追" in t and "追込" not in t:
+            t = t.replace("追", "追込")
+        if "逃げ" in t:
+            return "逃げ"
+        if "追込" in t:
+            return "追込"
+        if "両" in t:
+            return "両方"
+        return t[:20]
+
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+    field_n, win_n, pick_n, pick_hit = Counter(), Counter(), Counter(), Counter()
+    evaluated = skipped = 0
+    for race in races:
+        entries = [e for e in (race.entries or []) if e.car_number is not None]
+        if len(entries) < 3:
+            skipped += 1
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped += 1
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            skipped += 1
+            continue
+        actual_first = int(canonical[0][0])
+        evaluated += 1
+        by_car = {int(e.car_number): e for e in entries}
+        for e in entries:
+            field_n[norm_style(getattr(e, "leg_style", None))] += 1
+        w = by_car.get(actual_first)
+        if w is not None:
+            win_n[norm_style(getattr(w, "leg_style", None))] += 1
+        ranked = [e for e in entries if e.blended_win_prob is not None or e.ai_win_prob is not None]
+        if ranked:
+            top = max(ranked, key=lambda e: float((e.blended_win_prob if e.blended_win_prob is not None else e.ai_win_prob) or 0))
+            pst = norm_style(getattr(top, "leg_style", None))
+            pick_n[pst] += 1
+            if int(top.car_number) == actual_first:
+                pick_hit[pst] += 1
+    field_rows = [{
+        "脚質": st, "出走延べ": n, "実際1着回数": win_n.get(st, 0),
+        "1着率%": round(win_n.get(st, 0) / n * 100, 2) if n else None,
+    } for st, n in sorted(field_n.items(), key=lambda x: -x[1])]
+    pick_rows = [{
+        "本命の脚質": st, "本命レース数": n, "的中": pick_hit.get(st, 0),
+        "的中率%": round(pick_hit.get(st, 0) / n * 100, 2) if n else None,
+    } for st, n in sorted(pick_n.items(), key=lambda x: -x[1])]
+    return {
+        "note": "ラベルと実際1着のみ。展開は見ない。本番未反映。",
+        "評価レース数": evaluated, "スキップ": skipped,
+        "脚質別_実際1着": field_rows, "本命脚質別_的中": pick_rows,
+    }

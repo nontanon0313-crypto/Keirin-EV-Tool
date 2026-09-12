@@ -1105,7 +1105,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             if ev_pct < effective_min_ev:
                 continue
             min_odds = float(getattr(req, "min_odds", 0) or 0)
-            if min_odds > 0 and float(e.get("odds_value") or 0) < min_odds:
+            if min_odds > 0 and float(e.get("odds_value") or 0) <= min_odds:
                 continue
             if e.get("gate_reason"):
                 continue
@@ -1161,7 +1161,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 )
                 continue
             min_odds = float(getattr(req, "min_odds", 0) or 0)
-            if min_odds > 0 and float(c.get("odds_value") or 0) < min_odds:
+            if min_odds > 0 and float(c.get("odds_value") or 0) <= min_odds:
                 skipped_for_verification.append((c, f"的中率重視:オッズ下限未満(<{min_odds})"))
                 continue
             kept.append(c)
@@ -1169,7 +1169,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             kept,
             key=lambda x: (
                 -float(x.get("win_prob") or 0),
-                -_front_style_score(x.get("combination"), style_by_car),
                 -float(x.get("odds_value") or 0),
             ),
         )
