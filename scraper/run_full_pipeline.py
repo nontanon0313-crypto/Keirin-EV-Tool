@@ -66,20 +66,65 @@ def _is_transient_network_error(e):
 
 
 def _post_with_retry(url, **kwargs):
-    """一時的なネットワークエラーは数秒待って最大3回までリトライする"""
+    """
+    POSTの一時障害・HTTP 429を吸収する共通リトライ。
+    特にCloudflare/Render側の429はレスポンスとして返るため、
+    requests.post()の例外だけを見ていた旧実装では再試行されなかった。
+    Retry-Afterがあればそれを優先し、無ければ指数バックオフする。
+    """
+    last_response = None
     last_err = None
-    for attempt in range(3):
+
+    max_attempts = 6
+
+    for attempt in range(max_attempts):
         try:
-            return requests.post(url, **kwargs)
+            r = requests.post(url, **kwargs)
+            last_response = r
+
+            if r.status_code != 429:
+                return r
+
+            # HTTP 429:
+            # Retry-Afterが数値ならそれを優先。
+            # Cloudflare等でRetry-Afterが無い場合は指数バックオフ。
+            retry_after = r.headers.get("Retry-After")
+            try:
+                wait = float(retry_after) if retry_after else min(15 * (2 ** attempt), 120)
+            except (TypeError, ValueError):
+                wait = min(15 * (2 ** attempt), 120)
+
+            wait = max(1.0, min(wait, 120.0))
+
+            body = r.text[:120].replace("\n", " ")
+            log(
+                f" HTTP 429 のため{wait:g}秒待って再試行します "
+                f"({attempt + 1}/{max_attempts}): {url} "
+                f"response={body}"
+            )
+            time.sleep(wait)
+
         except Exception as e:
             last_err = e
-            if attempt < 2 and _is_transient_network_error(e):
-                wait = 5 * (attempt + 1)
-                log(f"   一時的な通信エラーのため{wait}秒待って再試行します({attempt + 1}/2回目): {e}")
+
+            if attempt < max_attempts - 1 and _is_transient_network_error(e):
+                wait = min(5 * (attempt + 1), 30)
+                log(
+                    f" 一時的な通信エラーのため{wait}秒待って再試行します "
+                    f"({attempt + 1}/{max_attempts - 1}回目): {e}"
+                )
                 time.sleep(wait)
-            else:
-                raise
-    raise last_err
+                continue
+
+            raise
+
+    if last_response is not None:
+        return last_response
+
+    if last_err is not None:
+        raise last_err
+
+    raise RuntimeError(f"POST failed without response: {url}")
 
 
 def step1_import(payload):
