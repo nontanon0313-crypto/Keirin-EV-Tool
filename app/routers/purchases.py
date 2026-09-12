@@ -4720,6 +4720,7 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         "グレード別": bucket_stats(grade_bucket),
         "買い目内平均競走得点別": bucket_stats(race_score_bucket),
         "買い目内脚質構成別": bucket_stats(leg_style_bucket),
+        "人気集中度パターン別": bucket_stats(popularity_pattern_bucket),
     }
 
     # 単一条件(例:「グレード別」だけ)の集計は、他の要因との交絡(本当の原因が別にある)
