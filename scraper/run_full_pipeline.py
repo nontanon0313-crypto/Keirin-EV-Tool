@@ -26,6 +26,7 @@ from threading import Lock, Event
 
 API_BASE = os.environ.get("KEIRIN_API_BASE", "https://keirin-ev-tool.onrender.com")
 _log_lock = Lock()
+_post_lock = Lock()  # Render/CloudflareへのPOSTを全体で直列化
 
 
 def log(msg):
@@ -67,41 +68,53 @@ def _is_transient_network_error(e):
 
 def _post_with_retry(url, **kwargs):
     """
-    POSTの一時障害・HTTP 429を吸収する共通リトライ。
-    特にCloudflare/Render側の429はレスポンスとして返るため、
-    requests.post()の例外だけを見ていた旧実装では再試行されなかった。
-    Retry-Afterがあればそれを優先し、無ければ指数バックオフする。
+    Render/Cloudflare側の一時的な429/503/502/504と
+    ネットワーク一時障害を吸収する共通POST。
+    並列実行時でもPOST自体は直列化し、連続アクセスを抑制する。
     """
     last_response = None
     last_err = None
-
-    max_attempts = 6
+    max_attempts = 7
 
     for attempt in range(max_attempts):
         try:
-            r = requests.post(url, **kwargs)
+            # Cloudflare/RenderへのPOSTを全体で直列化する。
+            # 直前POSTから最低3秒空ける。
+            with _post_lock:
+                now = time.monotonic()
+                last = getattr(_post_with_retry, "_last_post_time", 0.0)
+                wait_for_interval = 3.0 - (now - last)
+                if wait_for_interval > 0:
+                    time.sleep(wait_for_interval)
+
+                r = requests.post(url, **kwargs)
+                _post_with_retry._last_post_time = time.monotonic()
+
             last_response = r
 
-            if r.status_code != 429:
+            if r.status_code not in (429, 502, 503, 504):
                 return r
 
-            # HTTP 429:
-            # Retry-Afterが数値ならそれを優先。
-            # Cloudflare等でRetry-Afterが無い場合は指数バックオフ。
             retry_after = r.headers.get("Retry-After")
-            try:
-                wait = float(retry_after) if retry_after else min(15 * (2 ** attempt), 120)
-            except (TypeError, ValueError):
-                wait = min(15 * (2 ** attempt), 120)
 
-            wait = max(1.0, min(wait, 120.0))
+            try:
+                if retry_after:
+                    wait = float(retry_after)
+                else:
+                    wait = min(15 * (2 ** attempt), 180)
+            except (TypeError, ValueError):
+                wait = min(15 * (2 ** attempt), 180)
+
+            wait = max(3.0, min(wait, 180.0))
 
             body = r.text[:120].replace("\n", " ")
+
             log(
-                f" HTTP 429 のため{wait:g}秒待って再試行します "
+                f" HTTP {r.status_code} のため{wait:g}秒待って再試行します "
                 f"({attempt + 1}/{max_attempts}): {url} "
                 f"response={body}"
             )
+
             time.sleep(wait)
 
         except Exception as e:
@@ -344,7 +357,11 @@ def run_predict_and_confirm(race_id, bankroll, actual_result=None):
         return {"race_id": race_id, "stage": "predicted_no_result"}
 
     log("5. 結果記録...")
-    r = requests.post(f"{API_BASE}/races/{race_id}/confirm-result", params={"actual_result": actual_result}, timeout=90)
+    r = _post_with_retry(
+        f"{API_BASE}/races/{race_id}/confirm-result",
+        params={"actual_result": actual_result},
+        timeout=90,
+    )
     r.raise_for_status()
     conf = r.json()
     log(f"   確定: {conf.get('actual_result', conf)}")
@@ -371,7 +388,7 @@ def save_progress(path, progress):
         json.dump(progress, f, ensure_ascii=False, indent=2)
 
 
-def _lightweight_confirm_sweep(files):
+def _lightweight_confirm_sweep(files, progress=None):
     """
     再予想(Gemini呼び出し)は一切行わず、結果確定だけを毎回試みる。
     進捗ファイルによってスキップされた「以前処理済みだが当時は結果が
@@ -381,8 +398,26 @@ def _lightweight_confirm_sweep(files):
     再登録(scraper-import)・結果確定(confirm-result)はどちらも何度呼んでも
     安全な作り(冪等)になっているので、既に確定済みのレースに対して呼んでも害はない。
     """
-    confirmed, still_pending, error = 0, 0, 0
+    confirmed, still_pending, error, skipped_done = 0, 0, 0, 0
+
+    # 完了済みファイルは結果確定スイープでも再importしない。
+    # これにより、完了済みレースへの不要なPOSTを排除する。
+    if progress is not None:
+        original_total = len(files)
+        files = [
+            fp for fp in files
+            if progress.get(f"file:{fp}") != "done"
+        ]
+        skipped_done = original_total - len(files)
+
     total = len(files)
+
+    if skipped_done:
+        log(f" 結果確定スイープ: 完了済み{skipped_done}件をスキップ")
+
+    if total == 0:
+        log(" 結果確定スイープ: 未完了ファイルなし")
+        return
     for i, fp in enumerate(files, 1):
         if i == 1 or i % 20 == 0 or i == total:
             log(f"   結果確定スイープ進捗: {i}/{total}件目")
@@ -572,7 +607,7 @@ def main():
 
     if not args.dry_run:
         log("--- 結果確定スイープ(再予想なしで、結果が出ているレースだけ確定) ---")
-        _lightweight_confirm_sweep(files)
+        _lightweight_confirm_sweep(files, progress=progress)
 
     log("=== サマリ ===")
     for s in summary:

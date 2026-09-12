@@ -44,7 +44,7 @@ $PY -u auto_fetch.py
 echo ""
 echo "--- 3/4 DB登録→予想→投票記録→結果確定 (${DATE} のJSONのみ) ---"
 set +e
-$PY run_full_pipeline.py --dir "$KEIRIN_DATA_DIR" --date "${DATE}" --concurrency 3
+$PY run_full_pipeline.py --dir "$KEIRIN_DATA_DIR" --date "${DATE}" --concurrency 1
 PIPELINE_EXIT=$?
 set -e
 
