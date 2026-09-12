@@ -1,6 +1,7 @@
 import os
 import threading
 import logging
+import time
 from typing import Optional
 
 from sqlalchemy import create_engine, text
@@ -195,6 +196,31 @@ def _switch_to(name: str) -> bool:
         return True
 
 
+# 2026-09-12追加: primary/fallback両方が同時に制限(データ転送量超過等)になった状態が
+# 続くと、毎回のリクエストで「確実に失敗する系統」への接続試行を律儀に繰り返してから
+# 生きている系統に辿り着くことになり、レイテンシが積み重なってブラウザ側の
+# fetchがタイムアウトする(Failed to Fetch)原因になっていた。
+# 失敗した系統は一定時間(既定60秒)スキップし、生きている系統に即座に飛ぶようにする。
+_COOLDOWN_SECONDS = 60
+_tier_cooldown_until = {}
+
+
+def _mark_cooldown(name: str) -> None:
+    with _lock:
+        _tier_cooldown_until[name] = time.time() + _COOLDOWN_SECONDS
+
+
+def _is_in_cooldown(name: str) -> bool:
+    with _lock:
+        until = _tier_cooldown_until.get(name)
+    return until is not None and time.time() < until
+
+
+def _clear_cooldown(name: str) -> None:
+    with _lock:
+        _tier_cooldown_until.pop(name, None)
+
+
 def _other_names(name: str):
     """設定済みの系統のうち、name以外の全てを返す(スキーマ同期用)。"""
     return [n for n in _TIER_ORDER if n in _engines and n != name]
@@ -210,11 +236,19 @@ def _ping(session_factory) -> None:
 
 
 def _preferred_order():
-    """DATABASE_PREFER に従った接続試行順(primary/fallback/fallback2の中で設定済みのもの)。"""
+    """
+    DATABASE_PREFER に従った接続試行順(primary/fallback/fallback2の中で設定済みのもの)。
+    直近でクールダウン中(60秒以内に失敗が確定済み)の系統は後回しにする
+    (全滅を避けるため除外はせず、順序の末尾に回すだけ)。
+    """
     available = [n for n in _TIER_ORDER if n in _engines]
     if PREFER in available:
-        return [PREFER] + [n for n in available if n != PREFER]
-    return available
+        ordered = [PREFER] + [n for n in available if n != PREFER]
+    else:
+        ordered = available
+    healthy = [n for n in ordered if not _is_in_cooldown(n)]
+    cooling = [n for n in ordered if _is_in_cooldown(n)]
+    return healthy + cooling
 
 
 def ensure_active_connection() -> None:
@@ -229,10 +263,12 @@ def ensure_active_connection() -> None:
         try:
             _ping(_sessions[name])
             _switch_to(name)
+            _clear_cooldown(name)
             logger.info("database active: %s", name)
             return
         except Exception as e:
             last_err = e
+            _mark_cooldown(name)
             logger.warning("database probe failed (%s): %s", name, e)
     if last_err:
         logger.error("all database endpoints failed; last error: %s", last_err)
@@ -263,6 +299,7 @@ def get_db():
             candidate = factory()
             candidate.execute(text("SELECT 1"))
             _switch_to(name)
+            _clear_cooldown(name)
             db = candidate
             break
         except Exception as e:
@@ -273,6 +310,7 @@ def get_db():
                 except Exception:
                     pass
                 db = None
+            _mark_cooldown(name)
             # prefer 先頭が失敗した場合のみ次へ。ログは警告に留める
             logger.warning("database probe failed (%s): %s", name, e)
             continue
