@@ -97,37 +97,46 @@ def recommend_race_pct(req: schemas.RecommendRacePctRequest, db: Session = Depen
     outcomes = _get_outcome_multipliers(db, bet_type=req.bet_type)
     use_bootstrap = len(outcomes) >= 20
 
-    lo, hi = 0.0, 100.0
-    best = None  # (1レース上限%, そのときのシミュレーション結果)
-    for _ in range(18):  # 100 / 2^18 ≈ 0.0004pt まで絞り込める
-        mid = (lo + hi) / 2
-        stake_fraction = (mid / 100) / req.bets_per_race
+    # 2026-09-12修正(のん指摘): 二分探索18回 × 指定試行数(既定2000)を毎回フルで
+    # 回すと合計の試行数が膨大になり(既定設定で約576万ベット)、Render無料枠の
+    # 遅いCPUではタイムアウトするほど時間がかかっていた。
+    # 探索中は少ない試行数(粗い精度)で高速に絞り込み、見つかった上限%について
+    # 最後の1回だけ指定試行数(本来の精度)で再計算する2段階方式にする。
+    search_trials = min(req.num_trials, 500)
+
+    def _run_sim(stake_fraction: float, num_trials: int):
         if use_bootstrap:
-            sim = calc.monte_carlo_bankruptcy_bootstrap(
+            return calc.monte_carlo_bankruptcy_bootstrap(
                 initial_bankroll=req.initial_bankroll,
                 outcome_multipliers=outcomes,
                 stake_fraction=stake_fraction,
                 num_bets_per_trial=req.bets_per_race * req.num_races,
-                num_trials=req.num_trials,
+                num_trials=num_trials,
                 ruin_threshold_pct=req.ruin_threshold_pct,
             )
-        else:
-            sim = calc.monte_carlo_bankruptcy(
-                initial_bankroll=req.initial_bankroll,
-                win_prob=req.win_prob,
-                odds_value=req.odds_value,
-                stake_fraction=stake_fraction,
-                num_bets_per_trial=req.bets_per_race * req.num_races,
-                num_trials=req.num_trials,
-                ruin_threshold_pct=req.ruin_threshold_pct,
-            )
+        return calc.monte_carlo_bankruptcy(
+            initial_bankroll=req.initial_bankroll,
+            win_prob=req.win_prob,
+            odds_value=req.odds_value,
+            stake_fraction=stake_fraction,
+            num_bets_per_trial=req.bets_per_race * req.num_races,
+            num_trials=num_trials,
+            ruin_threshold_pct=req.ruin_threshold_pct,
+        )
+
+    lo, hi = 0.0, 100.0
+    best_pct = None
+    for _ in range(12):  # 100 / 2^12 ≈ 0.024pt まで絞り込める(粗い探索には十分)
+        mid = (lo + hi) / 2
+        stake_fraction = (mid / 100) / req.bets_per_race
+        sim = _run_sim(stake_fraction, search_trials)
         if sim["ruin_probability_pct"] <= req.max_ruin_probability_pct:
-            best = (mid, sim)
+            best_pct = mid
             lo = mid
         else:
             hi = mid
 
-    if best is None:
+    if best_pct is None:
         return {
             "見つかった": False,
             "メッセージ": (
@@ -137,7 +146,10 @@ def recommend_race_pct(req: schemas.RecommendRacePctRequest, db: Session = Depen
             ),
         }
 
-    pct, sim = best
+    # 見つかった上限%について、指定された本来の試行数で精密に再計算する
+    pct = best_pct
+    stake_fraction = (pct / 100) / req.bets_per_race
+    sim = _run_sim(stake_fraction, req.num_trials)
     return {
         "見つかった": True,
         "メッセージ": (
