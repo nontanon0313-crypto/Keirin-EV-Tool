@@ -9,6 +9,7 @@ from .. import models, schemas
 from .. import ev_calculator as calc
 from . import purchases as purchases_router
 from . import bankroll as bankroll_router
+from .scraper_import import refresh_odds_now
 
 router = APIRouter(prefix="/ev", tags=["ev"])
 
@@ -649,6 +650,19 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     bankroll = req.bankroll if req.bankroll is not None else bankroll_router.get_current_balance(db)
     max_race_pct = req.max_race_pct if req.max_race_pct is not None else bankroll_router.get_race_cap_pct(db)
+
+    # 未確定レースだけ投票プラン作成時に直前オッズを再取得する。
+    # 確定済み過去レースは保存済みオッズを使用し、再投票の再現性を維持する。
+    if race.actual_result is None:
+        try:
+            refresh_odds_now(race_id, db)
+            db.refresh(race)
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"投票直前オッズの再取得に失敗したため、古いオッズでは投票プランを作成しません: {e}",
+            )
+
     odds_rows = db.query(models.Odds).filter(models.Odds.race_id == race_id).all()
     _t1 = _time.time()  # ここまで: レース・出走表・オッズ取得
     if not odds_rows:
