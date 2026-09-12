@@ -1894,7 +1894,6 @@ document.getElementById("saveRaceCapBtn").addEventListener("click", async () => 
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     if (statusEl) statusEl.textContent = `保存しました: 1レース上限${pct}%(画面・日次パイプライン共通で使われます)`;
-    refreshRaceCapDisplay();
     alert(`1レース上限を${pct}%として保存しました。今後の投票プラン作成(画面・日次パイプライン共通)はこの値を使います。`);
   } catch (e) {
     alert("保存に失敗しました: " + e.message);
