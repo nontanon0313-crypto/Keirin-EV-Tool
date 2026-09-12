@@ -1037,6 +1037,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             wp = float(e.get("win_prob") or 0)
             if wp < float(req.min_win_prob):
                 continue
+            # 本命一覧は事前予想なので的中確率だけで判断する。
+            # 投票プランでは直前オッズを使ってEVを再計算し、
+            # 下限EV未満の買い目は本命1着でも購入候補にしない。
+            effective_min_ev = float(req.min_ev_pct)
+            ev_pct = float(e.get("ev_pct") or 0)
+            if ev_pct < effective_min_ev:
+                continue
             min_odds = float(getattr(req, "min_odds", 0) or 0)
             if min_odds > 0 and float(e.get("odds_value") or 0) < min_odds:
                 continue
@@ -1080,6 +1087,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 continue
             if float(c.get("win_prob") or 0) < float(req.min_win_prob):
                 skipped_for_verification.append((c, "的中率重視:最低的中確率未満"))
+                continue
+            effective_min_ev = float(req.min_ev_pct)
+            actual_ev = float(c.get("ev_pct") or 0)
+            if actual_ev < effective_min_ev:
+                skipped_for_verification.append(
+                    (c, f"的中率重視:下限EV未満(<{effective_min_ev}%/実際{actual_ev}%)")
+                )
                 continue
             min_odds = float(getattr(req, "min_odds", 0) or 0)
             if min_odds > 0 and float(c.get("odds_value") or 0) < min_odds:

@@ -1614,7 +1614,7 @@ TARGET_BET_TYPES = ["3連単"]
 #
 # Purchase.purchased_at はUTCのnaive datetimeとして扱われるため、
 # 内部比較値はUTCに統一する。
-VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 11, 16, 0, 0)
+VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 13, 0, 0, 0)
 # この値は「最後に投票判断そのものを変更した時刻」。
 # UI/診断/ログだけの変更では更新しない。
 # 再投票済み判定・現行基準集計・calibration_switchはこの値を共通利用する。
@@ -1931,6 +1931,255 @@ def retroactive_capture_diagnostics(db: Session = Depends(get_db)):
         ),
     }
 
+
+
+@router.get("/diagnostics/ev-threshold-sweep")
+def diagnostics_ev_threshold_sweep(
+    thresholds: str = "0,20,50,75,100,125,150,200,300",
+    min_win_prob: float = 0.02,
+    since: Optional[str] = "calibration_switch",
+    max_races: int = 500,
+    db: Session = Depends(get_db),
+):
+    """
+    的中率優先の投票プランで使う下限EVを事後検証する読み取り専用診断。
+
+    各レースについて現在の確率モデルで3連単を再計算し、
+    1着=本命・最低的中確率以上の買い目だけを対象に、
+    EV閾値ごとの買い目単位/レース単位の的中率と
+    保存済みオッズによる固定100円仮想回収率を比較する。
+
+    実際の投票プランのKelly配分・ガラミ制約・レース予算は再現しない。
+    「下限EVそのものをどこに置くか」の比較専用。
+    """
+    try:
+        threshold_values = sorted({
+            float(x.strip())
+            for x in thresholds.split(",")
+            if x.strip()
+        })
+    except ValueError:
+        raise HTTPException(400, "thresholdsはカンマ区切りの数値で指定してください")
+
+    if not threshold_values:
+        raise HTTPException(400, "thresholdsが空です")
+    if min_win_prob < 0 or min_win_prob > 1:
+        raise HTTPException(400, "min_win_probは0〜1で指定してください")
+    if max_races <= 0:
+        raise HTTPException(400, "max_racesは1以上で指定してください")
+
+    since_dt = _parse_since_param(since)
+
+    races_q = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .order_by(models.Race.id.asc())
+    )
+
+    if since_dt is not None:
+        all_races = races_q.all()
+        all_races = [
+            r for r in all_races
+            if _race_is_before_as_of(r, datetime.max)
+            and _race_event_dt(r) is not None
+            and _race_event_dt(r) >= since_dt
+        ]
+        races = all_races[:max_races]
+    else:
+        races = races_q.limit(max_races).all()
+
+    stats = {
+        t: {
+            "threshold_ev_pct": t,
+            "bet_count": 0,
+            "hit_count": 0,
+            "stake_total": 0.0,
+            "payout_total": 0.0,
+            "race_count": 0,
+            "hit_race_count": 0,
+            "_race_ids": set(),
+            "_hit_race_ids": set(),
+        }
+        for t in threshold_values
+    }
+
+    races_evaluated = 0
+    candidate_count_before_threshold = 0
+    skipped_no_win_probs = 0
+    skipped_no_odds = 0
+    skipped_invalid_result = 0
+
+    # Oddsを一括取得してN+1を避ける。
+    race_ids = [r.id for r in races]
+    odds_by_race = {}
+    if race_ids:
+        for i in range(0, len(race_ids), 500):
+            chunk = race_ids[i:i + 500]
+            for o in (
+                db.query(models.Odds)
+                .filter(models.Odds.race_id.in_(chunk))
+                .filter(models.Odds.bet_type == "3連単")
+                .all()
+            ):
+                odds_by_race.setdefault(o.race_id, []).append(o)
+
+    for race in races:
+        entries = race.entries
+        win_probs = calc.build_win_probs_from_entries(entries)
+        if not win_probs:
+            skipped_no_win_probs += 1
+            continue
+
+        odds_rows = odds_by_race.get(race.id) or []
+        if not odds_rows:
+            skipped_no_odds += 1
+            continue
+
+        try:
+            parsed_result = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            skipped_invalid_result += 1
+            continue
+
+        line_map, line_boost = calc.line_map_from_race(race)
+        car_numbers = sorted(win_probs.keys())
+        if len(car_numbers) < 3:
+            continue
+
+        # race-planと同じ正規化。
+        mass = calc.total_ordered_mass(
+            win_probs,
+            car_numbers,
+            3,
+            line_map=line_map,
+            line_boost=line_boost,
+        )
+        norm_mass = mass if mass > 1e-9 else 1.0
+
+        honmei_car = max(win_probs, key=win_probs.get)
+        race_candidates = []
+
+        for o in odds_rows:
+            if not o.combination or o.odds_value is None or float(o.odds_value) <= 0:
+                continue
+
+            try:
+                cars = tuple(int(x) for x in o.combination.split("-"))
+            except (ValueError, TypeError):
+                continue
+
+            if len(cars) != 3 or cars[0] != int(honmei_car):
+                continue
+
+            prob = calc.estimate_prob_for_bet(
+                win_probs,
+                "3連単",
+                cars,
+                line_map=line_map,
+                line_boost=line_boost,
+            )
+            prob = prob / norm_mass
+            if prob < min_win_prob:
+                continue
+
+            ev_pct = calc.calc_ev_pct(prob, float(o.odds_value), 0.0)
+            won = calc.judge_purchase_result(
+                "3連単",
+                o.combination,
+                parsed_result,
+            )
+            race_candidates.append((ev_pct, float(o.odds_value), won))
+
+        if not race_candidates:
+            continue
+
+        races_evaluated += 1
+        candidate_count_before_threshold += len(race_candidates)
+
+        for t, bucket in stats.items():
+            selected = [x for x in race_candidates if x[0] >= t]
+            if not selected:
+                continue
+
+            bucket["_race_ids"].add(race.id)
+
+            for ev_pct, odds_value, won in selected:
+                bucket["bet_count"] += 1
+                bucket["stake_total"] += 100.0
+                if won:
+                    bucket["hit_count"] += 1
+                    bucket["payout_total"] += 100.0 * odds_value
+                    bucket["_hit_race_ids"].add(race.id)
+
+    results = []
+    for t in threshold_values:
+        b = stats[t]
+        n = b["bet_count"]
+        races_n = len(b["_race_ids"])
+        hits = b["hit_count"]
+        hit_races = len(b["_hit_race_ids"])
+        stake = b["stake_total"]
+        payout = b["payout_total"]
+
+        results.append({
+            "threshold_ev_pct": t,
+            "bet_count": n,
+            "hit_count": hits,
+            "bet_hit_rate_pct": round(hits / n * 100, 4) if n else None,
+            "race_count": races_n,
+            "hit_race_count": hit_races,
+            "race_hit_rate_pct": round(hit_races / races_n * 100, 4) if races_n else None,
+            "hypothetical_stake_total": round(stake, 0),
+            "hypothetical_payout_total": round(payout, 0),
+            "hypothetical_roi_pct": round(payout / stake * 100, 4) if stake else None,
+            "hypothetical_profit": round(payout - stake, 0),
+        })
+
+    # 「利益を維持しながら的中率重視」を機械的に判定。
+    # 極端な小標本を採用しないため最低30買い目・20レースを要求。
+    eligible = [
+        r for r in results
+        if r["bet_count"] >= 30
+        and r["race_count"] >= 20
+        and r["hypothetical_roi_pct"] is not None
+        and r["hypothetical_roi_pct"] >= 100.0
+    ]
+
+    recommended = None
+    if eligible:
+        recommended = sorted(
+            eligible,
+            key=lambda r: (
+                -(r["bet_hit_rate_pct"] or 0),
+                -(r["race_hit_rate_pct"] or 0),
+                -(r["hypothetical_roi_pct"] or 0),
+                r["threshold_ev_pct"],
+            ),
+        )[0]
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "min_win_prob_pct": round(min_win_prob * 100, 4),
+        "max_races_requested": max_races,
+        "races_evaluated": races_evaluated,
+        "skipped_no_win_probs": skipped_no_win_probs,
+        "skipped_no_odds": skipped_no_odds,
+        "skipped_invalid_result": skipped_invalid_result,
+        "candidate_count_before_threshold": candidate_count_before_threshold,
+        "thresholds": results,
+        "recommended_threshold": recommended,
+        "selection_rule": (
+            "hypothetical ROI >= 100%, bet_count >= 30, race_count >= 20を満たす閾値の中で、"
+            "買い目単位的中率→レース単位的中率→回収率の順に最大化。同率なら低いEV閾値を優先。"
+        ),
+        "important_note": (
+            "保存済みOddsを使った100円固定の反実仮想比較。"
+            "実際の直前オッズ変動、Kelly配分、ガラミ制約、レース予算、max_itemsは再現しない。"
+            "下限EVそのものの比較に限定して使用する。"
+        ),
+    }
 
 def _summarize_bucket(bucket: dict) -> dict:
     if not bucket:
