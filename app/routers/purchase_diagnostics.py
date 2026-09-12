@@ -4549,3 +4549,75 @@ def diagnostics_leg_style_first_place(db: Session = Depends(get_db)):
         "評価レース数": evaluated, "スキップ": skipped,
         "脚質別_実際1着": field_rows, "本命脚質別_的中": pick_rows,
     }
+
+
+@router.get("/bets-per-race")
+def diagnostics_bets_per_race(
+    since: Optional[str] = Query("all"),
+    db: Session = Depends(get_db),
+):
+    """1レースあたり購入点数と的中・回収（読み取り専用）。"""
+    import statistics
+
+    q = db.query(models.Purchase).filter(models.Purchase.bet_type == "3連単")
+    if since and since != "all":
+        if since == "calibration_switch":
+            since_dt = getattr(purchases_router, "CALIBRATION_SWITCH_AT", None) or getattr(
+                purchases_router, "VOTING_CRITERIA_UPDATED_AT", None
+            )
+            if since_dt is not None:
+                q = q.filter(models.Purchase.purchased_at >= since_dt)
+        else:
+            try:
+                since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+                q = q.filter(models.Purchase.purchased_at >= since_dt)
+            except Exception:
+                pass
+
+    purchases = q.all()
+    by_race = defaultdict(list)
+    for p in purchases:
+        by_race[p.race_id].append(p)
+
+    bands = [(1, 1), (2, 3), (4, 6), (7, 10), (11, 20), (21, 999)]
+    band_stats = {
+        f"{a}-{b if b < 999 else '21+'}": {"レース数": 0, "的中レース数": 0, "投票額": 0.0, "払戻": 0.0}
+        for a, b in bands
+    }
+    per_race_n = []
+    for rid, plist in by_race.items():
+        n = len(plist)
+        stake = sum(float(p.stake_amount or 0) for p in plist)
+        payout = sum(float(p.payout_amount or 0) for p in plist)
+        hit = any((p.result == "win") or (float(p.payout_amount or 0) > 0) for p in plist)
+        for a, b in bands:
+            if a <= n <= b:
+                key = f"{a}-{b if b < 999 else '21+'}"
+                band_stats[key]["レース数"] += 1
+                if hit:
+                    band_stats[key]["的中レース数"] += 1
+                band_stats[key]["投票額"] += stake
+                band_stats[key]["払戻"] += payout
+                break
+        per_race_n.append(n)
+
+    out_bands = []
+    for k, v in band_stats.items():
+        rn = v["レース数"]
+        out_bands.append({
+            "点数帯": k,
+            "レース数": rn,
+            "レース的中率%": round(v["的中レース数"] / rn * 100, 2) if rn else None,
+            "投票額合計": round(v["投票額"], 0),
+            "払戻合計": round(v["払戻"], 0),
+            "回収率%": round(v["払戻"] / v["投票額"] * 100, 2) if v["投票額"] else None,
+        })
+
+    return {
+        "note": "三連単の1レース点数とレース的中・回収。検証用。",
+        "購入件数": len(purchases),
+        "レース数": len(by_race),
+        "平均点数": round(statistics.mean(per_race_n), 2) if per_race_n else None,
+        "中央値点数": float(statistics.median(per_race_n)) if per_race_n else None,
+        "点数帯別": out_bands,
+    }

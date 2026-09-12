@@ -180,6 +180,7 @@ def _select_portfolio(
     odds_safety_margins,
     max_single_bet_pct_of_race_cap=1.0,
     prefer_hit_rate: bool = False,
+    max_race_fill_pct=1.0,
 ):
     """固定ケリー額でポートフォリオ構成。prefer_hit_rate時は的中確率寄与を優先。"""
     prepared = []
@@ -192,6 +193,10 @@ def _select_portfolio(
     # しまう(のんの「1票でも投票可能であれば上限最大まで賭けてしまう」指摘)。
     # 1点あたりの投票額をレース予算の一定割合までに制限し、極端な集中を防ぐ。
     single_ticket_cap = calc.round_to_bet_unit(race_cap * max_single_bet_pct_of_race_cap)
+    fill = max(0.0, min(1.0, float(max_race_fill_pct if max_race_fill_pct is not None else 1.0)))
+    budget_cap = calc.round_to_bet_unit(race_cap * fill) if fill < 1.0 else race_cap
+    if budget_cap <= 0:
+        budget_cap = race_cap
 
     # 候補ごとの払戻対象結果を事前計算する。
     # 選択ループ内で judge_purchase_result を繰り返さない。
@@ -235,7 +240,7 @@ def _select_portfolio(
     # 予算内・件数上限内で期待利益合計を最大化する。
     if not avoid_garami:
         unit = 100
-        cap_units = int(race_cap // unit)
+        cap_units = int(budget_cap // unit)
 
         # 同一投票額では期待利益が最大の候補だけ残す。
         best_by_weight = {}
@@ -350,7 +355,7 @@ def _select_portfolio(
         best_value = float("-inf")
 
         for c in remaining:
-            if total_stake + c["_stake"] > race_cap:
+            if total_stake + c["_stake"] > budget_cap:
                 continue
             if not can_add(c):
                 continue
@@ -389,7 +394,7 @@ def _select_portfolio(
         for c in prepared:
             if (c["bet_type"], c["combination"]) in selected_keys:
                 continue
-            if total_stake + c["_stake"] > race_cap:
+            if total_stake + c["_stake"] > budget_cap:
                 continue
             if not can_add(c):
                 rejected_garami += 1
@@ -1114,9 +1119,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 continue
             f = calc.kelly_fraction(wp, e["odds_value"], req.fractional_coefficient, req.rebate_pct)
             f_capped = min(max(f, 0.0), req.max_bet_pct_per_bet)
-            raw_stake = bankroll * f_capped
-            if raw_stake < 100:
-                raw_stake = 100.0
+            if bool(getattr(req, "prefer_hit_rate", True)):
+                raw_stake = 100.0  # 的中率重視: ケリーで上限まで膨らませない
+            else:
+                raw_stake = bankroll * f_capped
+                if raw_stake < 100:
+                    raw_stake = 100.0
             by_key[key] = {
                 "bet_type": e["bet_type"],
                 "combination": e["combination"],
