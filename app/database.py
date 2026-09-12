@@ -53,7 +53,14 @@ def _make_engine(url: str):
         url,
         pool_pre_ping=True,
         pool_recycle=300,
-        connect_args={"connect_timeout": 10},
+        connect_args={
+            "connect_timeout": 10,
+            # 2026-09-12: connect_timeoutはTCP接続確立までしかカバーせず、
+            # Aivenが休止から復帰する途中など「接続は通るがクエリ応答が遅れる」
+            # ケースでSELECT 1自体がハングし続ける可能性があった。
+            # statement_timeoutでクエリ単位でも確実にタイムアウトさせる。
+            "options": "-c statement_timeout=8000",
+        },
     )
 
 
@@ -234,75 +241,56 @@ def ensure_active_connection() -> None:
 
 def get_db():
     """
-    リクエストごとにDATABASE_PREFERの優先順でDBへ接続する。
-    primaryがquota超過・接続障害の場合はfallback/fallback2へ切り替える。
+    リクエストごとに prefer 順で接続を試す。
+    以前は一度 fallback に落ちるとプロセス終了まで primary に戻らなかった。
+    Neon が一時停止→復帰したあとも prefer=primary なら primary を再試行する。
     """
     if not _sessions:
         raise RuntimeError(
-            "利用可能なDATABASE_URLがありません。"
-            "Renderの環境変数 DATABASE_URL / DATABASE_URL_FALLBACK / DATABASE_URL_FALLBACK2 を確認してください。"
+            "DATABASE_URL が未設定です。Render に DATABASE_URL "
+            "(と必要なら DATABASE_URL_FALLBACK) を設定してください。"
         )
 
     order = _preferred_order()
     if not order:
-        raise RuntimeError("利用可能なDATABASE_URLがありません")
+        raise RuntimeError("利用可能な DATABASE_URL がありません")
 
+    db = None
     last_err = None
-
     for name in order:
-        candidate = None
         try:
             factory = _sessions[name]
             candidate = factory()
-
-            # 接続確認
             candidate.execute(text("SELECT 1"))
-
             _switch_to(name)
-            logger.info("database connection established: %s", name)
-
-            try:
-                yield candidate
-            except Exception as request_error:
-                # DB障害系ならログを明示する。
-                # 既に開始済みのリクエストを途中で別DBへ移すことはしない。
-                if _is_failover_worthy(request_error):
-                    logger.error(
-                        "database error during request on %s: %s",
-                        name,
-                        request_error,
-                    )
-                raise
-            finally:
-                try:
-                    candidate.close()
-                except Exception:
-                    pass
-
-            return
-
+            db = candidate
+            break
         except Exception as e:
             last_err = e
-
-            if candidate is not None:
+            if db is not None:
                 try:
-                    candidate.close()
+                    db.close()
                 except Exception:
                     pass
-
-            logger.warning(
-                "database probe failed (%s): %s",
-                name,
-                e,
-            )
-
-            # 次のDBへ接続を試す
+                db = None
+            # prefer 先頭が失敗した場合のみ次へ。ログは警告に留める
+            logger.warning("database probe failed (%s): %s", name, e)
             continue
 
-    if last_err is not None:
-        raise last_err
+    if db is None:
+        if last_err is not None:
+            raise last_err
+        raise RuntimeError("database connection failed")
 
-    raise RuntimeError("database connection failed")
+    try:
+        yield db
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
 
 def init_db():
     """起動時: 生きている方のDBでテーブル作成。主系が死んでいれば副系へ。"""
