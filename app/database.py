@@ -200,14 +200,41 @@ def _switch_to(name: str) -> bool:
 # 続くと、毎回のリクエストで「確実に失敗する系統」への接続試行を律儀に繰り返してから
 # 生きている系統に辿り着くことになり、レイテンシが積み重なってブラウザ側の
 # fetchがタイムアウトする(Failed to Fetch)原因になっていた。
-# 失敗した系統は一定時間(既定60秒)スキップし、生きている系統に即座に飛ぶようにする。
-_COOLDOWN_SECONDS = 60
+# 失敗した系統は一定時間スキップし、生きている系統に即座に飛ぶようにする。
+#
+# 2026-09-12追記(のんの指摘): 「データ転送量上限」のようなquota系エラーは
+# 月単位のリセットまで直らないため、60秒のクールダウンでは短すぎて
+# すぐ再試行してしまい、意味が無かった(実際に63秒後に再試行→再失敗のログを確認)。
+# quota系エラーは長時間(既定6時間)、それ以外の一時的なエラー(接続リセット等、
+# 復旧が見込める種類)は短時間(既定60秒)、と区別する。
+_COOLDOWN_SECONDS_TRANSIENT = 60
+_COOLDOWN_SECONDS_QUOTA = 6 * 60 * 60  # 6時間
+_QUOTA_KEYWORDS = (
+    "data transfer quota",
+    "compute time quota",
+    "compute quota",
+    "quota exceeded",
+    "exceeded the compute",
+    "exceeded the data transfer",
+    "remaining compute",
+    "free tier limit",
+    "limit exceeded",
+    "upgrade your plan",
+)
 _tier_cooldown_until = {}
 
 
-def _mark_cooldown(name: str) -> None:
+def _is_quota_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in _QUOTA_KEYWORDS)
+
+
+def _mark_cooldown(name: str, exc: BaseException = None) -> None:
+    seconds = _COOLDOWN_SECONDS_QUOTA if (exc is not None and _is_quota_error(exc)) else _COOLDOWN_SECONDS_TRANSIENT
     with _lock:
-        _tier_cooldown_until[name] = time.time() + _COOLDOWN_SECONDS
+        _tier_cooldown_until[name] = time.time() + seconds
+    if exc is not None and _is_quota_error(exc):
+        logger.warning("database %s marked quota-exceeded, cooldown %ds", name, seconds)
 
 
 def _is_in_cooldown(name: str) -> bool:
@@ -268,7 +295,7 @@ def ensure_active_connection() -> None:
             return
         except Exception as e:
             last_err = e
-            _mark_cooldown(name)
+            _mark_cooldown(name, e)
             logger.warning("database probe failed (%s): %s", name, e)
     if last_err:
         logger.error("all database endpoints failed; last error: %s", last_err)
@@ -310,7 +337,7 @@ def get_db():
                 except Exception:
                     pass
                 db = None
-            _mark_cooldown(name)
+            _mark_cooldown(name, e)
             # prefer 先頭が失敗した場合のみ次へ。ログは警告に留める
             logger.warning("database probe failed (%s): %s", name, e)
             continue
