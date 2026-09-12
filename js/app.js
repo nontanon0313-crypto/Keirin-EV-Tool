@@ -395,16 +395,18 @@ async function loadFavoritesList(force) {
       return;
     }
     let html = `<p><strong>本命候補</strong>（タップでレース選択） 最低勝率${minProbPct}%</p>`;
-    html += `<table><tr><th>会場</th><th>R</th><th>発走</th><th>車番</th><th>選手</th><th>勝率</th><th>投票プラン</th></tr>`;
+    html += `<table><tr><th>会場</th><th>R</th><th>発走</th><th>車番</th><th>選手</th><th>勝率</th><th>想定期待値</th><th>投票プラン</th></tr>`;
     for (const row of data) {
       const rid = row.race_id;
       const planLabel = row.has_plan ? `🟢あり(${row.num_bets}点)` : "なし";
       const planColor = row.has_plan ? "#4ade80" : "#facc15";
       const rowBg = row.has_plan ? "background-color:#052e1b;" : "";
+      const evLabel = row.best_ev_pct != null ? row.best_ev_pct + "%" : "-";
       html += `<tr data-favorite-race-id="${rid}" title="タップしてこのレースを選択" style="${rowBg}">` +
         `<td>${row.venue_name}</td><td>${row.race_number}R</td>` +
         `<td>${row.post_time || "-"}</td><td>${row.car_number}</td>` +
         `<td>${row.player_name || "-"}</td><td>${row.win_prob_pct != null ? row.win_prob_pct + "%" : "-"}</td>` +
+        `<td>${evLabel}</td>` +
         `<td style="color:${planColor};font-weight:${row.has_plan ? "bold" : "normal"};">${planLabel}</td></tr>`;
     }
     html += `</table>`;

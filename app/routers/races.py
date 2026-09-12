@@ -405,6 +405,25 @@ def _plan_bet_counts_by_race(db: Session, race_ids: list):
     return {race_id: count for race_id, count in rows}
 
 
+def _plan_best_ev_by_race(db: Session, race_ids: list):
+    """
+    指定レースIDごとに、実際に投票プランに入っている買い目(stake_amount>0)の
+    うち最も高いev_pct_at_purchase(想定期待値%)を返す。
+    本命候補一覧に「その本命の勝率」だけでなく「そのレースで一番おいしい
+    買い目の期待値」も一緒に出せるようにするため(のんの提案により追加)。
+    """
+    if not race_ids:
+        return {}
+    rows = (
+        db.query(models.Purchase.race_id, func.max(models.Purchase.ev_pct_at_purchase))
+        .filter(models.Purchase.race_id.in_(race_ids))
+        .filter(models.Purchase.stake_amount > 0)
+        .group_by(models.Purchase.race_id)
+        .all()
+    )
+    return {race_id: best_ev for race_id, best_ev in rows if best_ev is not None}
+
+
 @router.get("/today-all")
 def list_races_today_all(db: Session = Depends(get_db)):
     """
@@ -548,6 +567,7 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
         ).all()
     } if race_ids else {}
     plan_counts = _plan_bet_counts_by_race(db, list(races_by_id.keys()))
+    plan_best_ev = _plan_best_ev_by_race(db, list(races_by_id.keys()))
 
     # レースごとに最も勝率の高い選手1名だけを「本命」として残す
     # (以前はしきい値を超えた選手を全員リストに入れており、1レースに
@@ -566,6 +586,7 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
         if race is None:
             continue  # 結果確定済み、または存在しないレースは除外
         num_bets = plan_counts.get(race.id, 0)
+        best_ev = plan_best_ev.get(race.id)
         result.append({
             "race_id": race.id,
             "venue_name": race.venue_name,
@@ -576,6 +597,7 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
             "win_prob_pct": round(e.blended_win_prob * 100, 1),
             "has_plan": num_bets > 0,
             "num_bets": num_bets,
+            "best_ev_pct": round(best_ev, 1) if best_ev is not None else None,
         })
     result.sort(key=lambda x: -x["win_prob_pct"])
     return result
