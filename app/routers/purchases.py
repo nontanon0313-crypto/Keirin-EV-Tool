@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from ..database import get_db
 from .. import models, schemas
@@ -1614,13 +1614,16 @@ TARGET_BET_TYPES = ["3連単"]
 #
 # Purchase.purchased_at はUTCのnaive datetimeとして扱われるため、
 # 内部比較値はUTCに統一する。
-VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 13, 0, 0, 0)
+VOTING_CRITERIA_UPDATED_AT = datetime(2026, 9, 12, 15, 21, 47)
 # この値は「最後に投票判断そのものを変更した時刻」。
 # UI/診断/ログだけの変更では更新しない。
 # 再投票済み判定・現行基準集計・calibration_switchはこの値を共通利用する。
 
 # 既存の集計・診断・再投票判定コードとの互換用。
 # 今後は VOTING_CRITERIA_UPDATED_AT を「最後の投票基準変更時刻」として扱う。
+# since時刻運用ルール: 必ず秒単位のUTC絶対時刻を使用し、暦日00:00を推測で設定しない。
+# 投票判断を変更したコミットのコミット時刻を記録し、再投票結果の購入時刻と混同しない。
+# タイムゾーン付きISO日時は_parse_since_paramでUTCへ正規化する。
 CALIBRATION_SWITCH_AT = VOTING_CRITERIA_UPDATED_AT
 def _parse_since_param(since: Optional[str]) -> Optional[datetime]:
     """
@@ -1632,7 +1635,10 @@ def _parse_since_param(since: Optional[str]) -> Optional[datetime]:
     if since == "calibration_switch":
         return CALIBRATION_SWITCH_AT
     try:
-        return datetime.fromisoformat(since)
+        dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
     except ValueError:
         return None
 
