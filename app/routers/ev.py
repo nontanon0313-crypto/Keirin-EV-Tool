@@ -627,6 +627,44 @@ def threshold_table(
 
 
 @router.post("/race-plan/{race_id}")
+
+def _combo_has_same_line(combination: str, line_map) -> bool:
+    if not line_map:
+        return True
+    try:
+        cars = [int(x) for x in str(combination).split("-")]
+    except (ValueError, IndexError):
+        return False
+    lids = [line_map.get(c) for c in cars]
+    for i in range(len(lids)):
+        for j in range(i + 1, len(lids)):
+            if lids[i] is not None and lids[i] == lids[j]:
+                return True
+    return False
+
+
+def _norm_leg_style(raw) -> str:
+    if not raw:
+        return ""
+    t = str(raw)
+    for a, b in (("逃", "逃げ"), ("追", "追込"), ("両", "両方")):
+        if a in t and b not in t:
+            t = t.replace(a, b)
+    return t
+
+
+def _front_style_score(combination: str, style_by_car: dict) -> int:
+    try:
+        first = int(str(combination).split("-")[0])
+    except (ValueError, IndexError):
+        return 0
+    st = _norm_leg_style(style_by_car.get(first, ""))
+    if "逃げ" in st:
+        return 2
+    if "両方" in st:
+        return 1
+    return 0
+
 def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(get_db)):
     """
     1レース全体で、期待値プラス(安全マージン込み)の買い目をまとめて拾い、
@@ -1037,6 +1075,10 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
 
     prefer_hit_rate = bool(getattr(req, "prefer_hit_rate", True))
     honmei_car = max(win_probs, key=win_probs.get) if win_probs else None
+    style_by_car = {}
+    for e in (race.entries or []):
+        if getattr(e, "car_number", None) is not None:
+            style_by_car[int(e.car_number)] = getattr(e, "leg_style", None)
     if prefer_hit_rate and honmei_car is not None:
         by_key = {(c["bet_type"], c["combination"]): c for c in candidates}
         for e in all_evaluated:
@@ -1047,6 +1089,10 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             except (ValueError, IndexError):
                 continue
             if first != int(honmei_car):
+                continue
+            if bool(getattr(req, "prefer_same_line", True)) and not _combo_has_same_line(
+                e.get("combination"), line_map
+            ):
                 continue
             wp = float(e.get("win_prob") or 0)
             if wp < float(req.min_win_prob):
@@ -1099,6 +1145,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             if first != int(honmei_car):
                 skipped_for_verification.append((c, f"的中率重視:1着が本命{honmei_car}以外"))
                 continue
+            if bool(getattr(req, "prefer_same_line", True)) and not _combo_has_same_line(
+                c.get("combination"), line_map
+            ):
+                skipped_for_verification.append((c, "的中率重視:同ライン絡みなし"))
+                continue
             if float(c.get("win_prob") or 0) < float(req.min_win_prob):
                 skipped_for_verification.append((c, "的中率重視:最低的中確率未満"))
                 continue
@@ -1118,6 +1169,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             kept,
             key=lambda x: (
                 -float(x.get("win_prob") or 0),
+                -_front_style_score(x.get("combination"), style_by_car),
                 -float(x.get("odds_value") or 0),
             ),
         )
