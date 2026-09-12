@@ -798,7 +798,10 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
-        effective_min_ev = max(req.min_ev_pct, 50.0)
+        if getattr(req, "prefer_hit_rate", None) is True:
+            effective_min_ev = float(req.min_ev_pct)
+        else:
+            effective_min_ev = max(float(getattr(req, "min_ev_pct", 50.0)), 50.0)
         gate_reason = None
         if apply_gates:
             # 現行仕様:
@@ -1034,16 +1037,17 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             wp = float(e.get("win_prob") or 0)
             if wp < float(req.min_win_prob):
                 continue
-            if float(e.get("ev_pct") or 0) < float(req.min_ev_pct):
-                continue
+            # 的中率重視では EV 下限で本命1着を落とさない
             if e.get("gate_reason"):
                 continue
             key = (e["bet_type"], e["combination"])
             if key in by_key:
                 continue
             f = calc.kelly_fraction(wp, e["odds_value"], req.fractional_coefficient, req.rebate_pct)
-            f_capped = min(f, req.max_bet_pct_per_bet)
+            f_capped = min(max(f, 0.0), req.max_bet_pct_per_bet)
             raw_stake = bankroll * f_capped
+            if raw_stake < 100:
+                raw_stake = 100.0
             by_key[key] = {
                 "bet_type": e["bet_type"],
                 "combination": e["combination"],
