@@ -68,9 +68,8 @@ def _is_transient_network_error(e):
 
 def _post_with_retry(url, **kwargs):
     """
-    Render/Cloudflare側の一時的な429/503/502/504と
+    Render/Cloudflare側の一時的な429/502/503/504と
     ネットワーク一時障害を吸収する共通POST。
-    並列実行時でもPOST自体は直列化し、連続アクセスを抑制する。
     """
     last_response = None
     last_err = None
@@ -78,12 +77,10 @@ def _post_with_retry(url, **kwargs):
 
     for attempt in range(max_attempts):
         try:
-            # Cloudflare/RenderへのPOSTを全体で直列化する。
-            # 直前POSTから最低3秒空ける。
             with _post_lock:
                 now = time.monotonic()
                 last = getattr(_post_with_retry, "_last_post_time", 0.0)
-                wait_for_interval = 3.0 - (now - last)
+                wait_for_interval = 5.0 - (now - last)
                 if wait_for_interval > 0:
                     time.sleep(wait_for_interval)
 
@@ -96,25 +93,18 @@ def _post_with_retry(url, **kwargs):
                 return r
 
             retry_after = r.headers.get("Retry-After")
-
             try:
-                if retry_after:
-                    wait = float(retry_after)
-                else:
-                    wait = min(15 * (2 ** attempt), 180)
+                wait = float(retry_after) if retry_after else min(20 * (2 ** attempt), 180)
             except (TypeError, ValueError):
-                wait = min(15 * (2 ** attempt), 180)
+                wait = min(20 * (2 ** attempt), 180)
 
-            wait = max(3.0, min(wait, 180.0))
-
+            wait = max(5.0, min(wait, 180.0))
             body = r.text[:120].replace("\n", " ")
 
             log(
                 f" HTTP {r.status_code} のため{wait:g}秒待って再試行します "
-                f"({attempt + 1}/{max_attempts}): {url} "
-                f"response={body}"
+                f"({attempt + 1}/{max_attempts}): {url} response={body}"
             )
-
             time.sleep(wait)
 
         except Exception as e:
@@ -133,10 +123,8 @@ def _post_with_retry(url, **kwargs):
 
     if last_response is not None:
         return last_response
-
     if last_err is not None:
         raise last_err
-
     raise RuntimeError(f"POST failed without response: {url}")
 
 
