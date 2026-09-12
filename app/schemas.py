@@ -94,9 +94,10 @@ class RacePlanRequest(BaseModel):
     fractional_coefficient: float = 0.25  # 固定値として運用(通常は変更不要)
     max_bet_pct_per_bet: float = 0.05  # 1点あたりの上限比率
     max_race_pct: Optional[float] = None  # 未指定なら資金管理シミュレーションで確認した値(bankroll_state.race_cap_pct)を自動使用
-    min_win_prob: float = 0.02  # 的中率重視: 低確率穴を既定で薄くする
-    min_ev_pct: float = 30.0  # 的中率優先時はEVの壁を下げ、本命寄りを通す
-    prefer_hit_rate: bool = True  # True=1着本命の三連単を優先（的中率重視）
+    min_win_prob: float = 0.02  # 安定的中の土台: 低確率すぎる穴は既定で薄くする
+    min_ev_pct: float = 0.0  # モデルEVは主目標にしない（的中率モードでは実質使わない）
+    min_odds: float = 5.0  # オッズ下限のみ（上限なし）
+    prefer_hit_rate: bool = True  # True=安定制約つき。1着本命三連単・的中確率優先
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
     max_items: int = 20  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
     exclude_low_prob_warning: bool = False  # 大穴帯(0-5%・実績未検証)も候補として評価し、警告は表示する

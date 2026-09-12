@@ -1037,7 +1037,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             wp = float(e.get("win_prob") or 0)
             if wp < float(req.min_win_prob):
                 continue
-            # 的中率重視では EV 下限で本命1着を落とさない
+            min_odds = float(getattr(req, "min_odds", 0) or 0)
+            if min_odds > 0 and float(e.get("odds_value") or 0) < min_odds:
+                continue
             if e.get("gate_reason"):
                 continue
             key = (e["bet_type"], e["combination"])
@@ -1079,10 +1081,17 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             if float(c.get("win_prob") or 0) < float(req.min_win_prob):
                 skipped_for_verification.append((c, "的中率重視:最低的中確率未満"))
                 continue
+            min_odds = float(getattr(req, "min_odds", 0) or 0)
+            if min_odds > 0 and float(c.get("odds_value") or 0) < min_odds:
+                skipped_for_verification.append((c, f"的中率重視:オッズ下限未満(<{min_odds})"))
+                continue
             kept.append(c)
         candidates = sorted(
             kept,
-            key=lambda x: (-float(x.get("win_prob") or 0), -float(x.get("ev_pct") or 0)),
+            key=lambda x: (
+                -float(x.get("win_prob") or 0),
+                -float(x.get("odds_value") or 0),
+            ),
         )
 
     selected, payout_by_outcome, excluded_by_garami_count, prepared_count = _select_portfolio(
@@ -1174,7 +1183,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # (のんの指摘「投票プランありが分からない」への対応の一環。Grok案を統合)
     preview_candidates = []
     _preview_key = (
-        (lambda x: (-float(x.get("win_prob") or 0), -float(x.get("ev_pct") or 0)))
+        (lambda x: (-float(x.get("win_prob") or 0), -float(x.get("odds_value") or 0)))
         if bool(getattr(req, "prefer_hit_rate", True))
         else (lambda x: (-float(x.get("ev_pct") or 0),))
     )
