@@ -549,9 +549,20 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
     } if race_ids else {}
     plan_counts = _plan_bet_counts_by_race(db, list(races_by_id.keys()))
 
-    result = []
+    # レースごとに最も勝率の高い選手1名だけを「本命」として残す
+    # (以前はしきい値を超えた選手を全員リストに入れており、1レースに
+    # 複数の候補がいると同じレースが重複して表示されるバグがあった。のん指摘)
+    best_entry_by_race = {}
     for e in entries:
-        race = races_by_id.get(e.race_id)
+        if e.race_id not in races_by_id:
+            continue
+        current_best = best_entry_by_race.get(e.race_id)
+        if current_best is None or (e.blended_win_prob or 0) > (current_best.blended_win_prob or 0):
+            best_entry_by_race[e.race_id] = e
+
+    result = []
+    for race_id, e in best_entry_by_race.items():
+        race = races_by_id.get(race_id)
         if race is None:
             continue  # 結果確定済み、または存在しないレースは除外
         num_bets = plan_counts.get(race.id, 0)
