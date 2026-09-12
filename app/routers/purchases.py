@@ -4360,6 +4360,32 @@ def list_purchases(race_id: Optional[int] = None, db: Session = Depends(get_db))
     return q.order_by(models.Purchase.purchased_at.desc()).all()
 
 
+@router.get("/skipped")
+def list_skipped_bets(race_id: int, db: Session = Depends(get_db)):
+    """
+    指定レースの見送り記録(SkippedBet)を一覧で返す。
+    本命車番が1着位置の買い目がなぜ見送られたか(EV不足・ゲート等)を
+    確認するために追加(のんの指摘により2026-09-12追加)。
+    """
+    rows = (
+        db.query(models.SkippedBet)
+        .filter(models.SkippedBet.race_id == race_id)
+        .order_by(models.SkippedBet.ev_pct_estimated.desc())
+        .all()
+    )
+    return [
+        {
+            "bet_type": r.bet_type,
+            "combination": r.combination,
+            "win_prob_estimated_pct": round(r.win_prob_estimated * 100, 2) if r.win_prob_estimated is not None else None,
+            "win_prob_raw_pct": round(r.win_prob_raw * 100, 2) if r.win_prob_raw is not None else None,
+            "ev_pct_estimated": r.ev_pct_estimated,
+            "reason": r.reason,
+        }
+        for r in rows
+    ]
+
+
 _purchase_stats_cache = {"computed_at": 0.0, "value": None}
 PURCHASE_STATS_CACHE_TTL_SECONDS = 60 * 10  # 10分。全件スキャンで数十秒かかるため、連打で毎回再計算しない
 
