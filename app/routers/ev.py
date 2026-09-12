@@ -15,7 +15,13 @@ router = APIRouter(prefix="/ev", tags=["ev"])
 
 def _build_win_probs(entries: List[models.Entry]) -> dict:
     """blended → ai → tipstar の順で勝率を拾う（replay/再プラン用）。
-    その後、競走得点帯の経験的補正を掛けて再正規化する。
+    その後、競走得点ランクを重み0.55で合成して再正規化する。
+
+    2026-09-12修正: 以前は得点帯factor補正(apply_race_score_band_factors)と
+    得点ランク合成(blend_race_score_rank_into_probs)の両方を続けて適用しており、
+    確定事項(PROGRESS.md「1着: blended + 競走得点ランク合成」)に無い
+    band_factor補正が二重に紛れ込んでいた。band_factor補正は削除し、
+    確定事項通りランク合成のみを適用する(のん承認2026-09-12)。
     """
     probs = {}
     for e in entries:
@@ -32,7 +38,6 @@ def _build_win_probs(entries: List[models.Entry]) -> dict:
     total = sum(probs.values())
     if total > 0:
         probs = {k: v / total for k, v in probs.items()}
-    probs = calc.apply_race_score_band_factors(probs, entries)
     probs = calc.blend_race_score_rank_into_probs(probs, entries)
     return probs
 

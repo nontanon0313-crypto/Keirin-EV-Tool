@@ -677,7 +677,9 @@ def build_win_probs_from_entries(entries: list) -> dict:
 
     のんの要望により追加: 過去の確定済みレースを、記録済みのPurchase/SkippedBet
     に頼らず、現在の確率モデルでその場で再計算して検証できるようにするため。
-    本番の投票ロジック(ev.py)と補正内容を揃える(得点帯補正を含む)。
+    本番の投票ロジック(ev.py)と補正内容を揃える(得点ランク合成のみ)。
+
+    2026-09-12修正: band_factor補正は確定事項に無い二重適用だったため削除。
     """
     probs = {}
     for e in entries:
@@ -686,7 +688,6 @@ def build_win_probs_from_entries(entries: list) -> dict:
     total = sum(probs.values())
     if total > 0:
         probs = {k: v / total for k, v in probs.items()}
-    probs = apply_race_score_band_factors(probs, entries)
     probs = blend_race_score_rank_into_probs(probs, entries)
     return probs
 
