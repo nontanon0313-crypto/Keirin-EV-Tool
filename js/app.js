@@ -2307,6 +2307,47 @@ document.getElementById("loadPositionMatrixBtn").addEventListener("click", async
   }
 });
 
+document.getElementById("loadRaceScoreMethodBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "得点補正方式の比較を計算中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/diagnostics/race-score-method-compare"));
+    if (res.status === 404) {
+      resultBox.innerHTML = "<p>エンドポイント未デプロイです</p>";
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+
+    const num = (v) => (v == null || v === undefined) ? "-" : v;
+
+    let html = `<p><strong>得点補正方式の比較（band_factor vs rank_blend・読み取り専用）</strong></p>`;
+    html += `<p class="note">${data.note || ""}</p>`;
+    html += `<p class="note">評価対象レース数: ${num(data["評価対象レース数"])}</p>`;
+
+    const best = data["最良方式"];
+    if (best) {
+      html += `<p><strong>最良方式: ${best["方式"]}（1着的中率 ${best["1着的中率%"]}%）</strong></p>`;
+    }
+
+    html += `<table><tr><th>方式</th><th>評価件数</th><th>1着的中数</th><th>1着的中率</th></tr>`;
+    for (const r of data["方式別1着的中率"] || []) {
+      html += `<tr>
+        <td><strong>${r["方式"]}</strong></td>
+        <td>${num(r["評価件数"])}</td>
+        <td>${num(r["1着的中数"])}</td>
+        <td><strong>${r["1着的中率%"] != null ? r["1着的中率%"] + "%" : "-"}</strong></td>
+      </tr>`;
+    }
+    html += `</table>`;
+    html += `<p class="note" style="margin-top:10px;">${data["読み方"] || ""}</p>`;
+
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 document.getElementById("loadCalibStructBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "補正前後の比較を取得中...";

@@ -4364,3 +4364,117 @@ def diagnostics_same_line_remain_3rd(db: Session = Depends(get_db)):
         "最良ルールとの差pt": delta,
     }
 
+
+@router.get("/race-score-method-compare")
+def diagnostics_race_score_method_compare(db: Session = Depends(get_db)):
+    """
+    1着確率への競走得点の反映方法として、band_factor(得点帯ごとの経験的倍率)と
+    rank_blend(得点順位を重み付けして直接合成)のどちらを採用すべきかを、
+    現在の全確定レースデータで直接比較する読み取り専用診断。
+
+    比較対象:
+    - blendedのみ(補正無し)
+    - band_factorのみ
+    - rank_blendのみ(現行の重み0.55、および参考として他の重みも)
+    - band_factor→rank_blendの順で両方適用(旧・二重適用状態)
+
+    本番ロジック(ev.py)は一切呼び出さない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    def _raw_blended(entries):
+        probs = {}
+        for e in entries:
+            v = e.blended_win_prob
+            if v is None:
+                v = getattr(e, "ai_win_prob", None)
+            if v is None:
+                v = getattr(e, "tipstar_win_prob", None)
+            if v is not None:
+                try:
+                    probs[e.car_number] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        total = sum(probs.values())
+        if total > 0:
+            probs = {k: v / total for k, v in probs.items()}
+        return probs
+
+    variants = {
+        "blendedのみ": lambda p, ent: p,
+        "band_factorのみ": lambda p, ent: calc.apply_race_score_band_factors(dict(p), ent),
+        "rank_blend(重み0.55)のみ": lambda p, ent: calc.blend_race_score_rank_into_probs(dict(p), ent, weight=0.55),
+        "rank_blend(重み0.3)のみ": lambda p, ent: calc.blend_race_score_rank_into_probs(dict(p), ent, weight=0.3),
+        "rank_blend(重み0.7)のみ": lambda p, ent: calc.blend_race_score_rank_into_probs(dict(p), ent, weight=0.7),
+        "rank_blend(重み1.0=得点順位のみ)": lambda p, ent: calc.blend_race_score_rank_into_probs(dict(p), ent, weight=1.0),
+        "band_factor→rank_blend(旧・二重適用)": lambda p, ent: calc.blend_race_score_rank_into_probs(
+            calc.apply_race_score_band_factors(dict(p), ent), ent, weight=0.55
+        ),
+    }
+
+    counts = {name: {"n": 0, "correct": 0} for name in variants}
+    evaluated = 0
+
+    for race in races:
+        entries = race.entries
+        if not entries:
+            continue
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            continue
+        actual_1st = canonical[0][0]
+
+        base_probs = _raw_blended(entries)
+        if not base_probs or actual_1st not in base_probs:
+            continue
+
+        evaluated += 1
+        for name, fn in variants.items():
+            try:
+                p = fn(base_probs, entries)
+            except Exception:
+                continue
+            if not p:
+                continue
+            pick = max(p, key=p.get)
+            counts[name]["n"] += 1
+            if pick == actual_1st:
+                counts[name]["correct"] += 1
+
+    results = []
+    for name, c in counts.items():
+        n = c["n"]
+        results.append({
+            "方式": name,
+            "評価件数": n,
+            "1着的中数": c["correct"],
+            "1着的中率%": round(c["correct"] / n * 100, 2) if n else None,
+        })
+    results.sort(key=lambda r: (r["1着的中率%"] is None, -(r["1着的中率%"] or 0)))
+
+    best = results[0] if results else None
+
+    return {
+        "note": (
+            "現在の全確定レースデータで、競走得点の反映方法を直接比較する読み取り専用診断。"
+            "本番ロジック(ev.py)は一切呼び出していない。"
+        ),
+        "評価対象レース数": evaluated,
+        "方式別1着的中率": results,
+        "最良方式": best,
+        "読み方": (
+            "band_factorのみとrank_blendのみを同条件で比較できる。"
+            "band_factor→rank_blend(旧・二重適用)が単独方式より明確に劣っていれば、"
+            "二重適用が悪影響を与えていたことの直接的な証拠になる。"
+        ),
+    }
+
