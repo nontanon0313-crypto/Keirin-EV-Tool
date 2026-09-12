@@ -4621,3 +4621,149 @@ def diagnostics_bets_per_race(
         "中央値点数": float(statistics.median(per_race_n)) if per_race_n else None,
         "点数帯別": out_bands,
     }
+
+
+@router.get("/single-bet-strategy-compare")
+def diagnostics_single_bet_strategy_compare(
+    db: Session = Depends(get_db),
+    stake_per_race: float = Query(1000.0, description="1レースあたりの想定投資額(円)"),
+):
+    """
+    1レース1点だけ買う場合、「最も的中率(予測確率)が高い組み合わせ」と
+    「最も期待値(EV)が高い組み合わせ」のどちらを選ぶべきかを、
+    全確定レースの実績で直接比較する読み取り専用診断。
+
+    各レースについて、3連単の全組み合わせを現行の確率モデル(Harville式)で
+    評価し、実際に記録されているオッズと突き合わせてEVを計算する。
+    候補A = 予測確率が最も高い組み合わせ(勝率重視)
+    候補B = EV(確率×オッズ-1)が最も高い組み合わせ(期待値重視)
+    それぞれを毎回stake_per_race円で賭けたと仮定し、実際の的中率・回収率を集計する。
+
+    本番の投票ロジック(ev.py)は一切呼び出さない。
+    """
+    races = (
+        db.query(models.Race)
+        .filter(models.Race.actual_result.isnot(None))
+        .options(joinedload(models.Race.entries))
+        .all()
+    )
+
+    def _new_stat():
+        return {"n": 0, "hits": 0, "stake": 0.0, "payout": 0.0, "odds_sum": 0.0}
+
+    stat_a = _new_stat()  # 最高勝率
+    stat_b = _new_stat()  # 最高EV
+    stat_same = _new_stat()  # AとBが同じ組み合わせだった場合(参考)
+    both_same_count = 0
+    evaluated = 0
+    skipped_no_odds = 0
+
+    for race in races:
+        win_probs = calc.build_win_probs_from_entries(race.entries)
+        if not win_probs or len(win_probs) < 3:
+            continue
+
+        odds_rows = (
+            db.query(models.Odds)
+            .filter(models.Odds.race_id == race.id, models.Odds.bet_type == "3連単")
+            .all()
+        )
+        if not odds_rows:
+            skipped_no_odds += 1
+            continue
+
+        try:
+            parsed = calc.parse_actual_result(race.actual_result)
+        except Exception:
+            continue
+        canonical = parsed.get("canonical_orderings") or []
+        if not canonical:
+            continue
+        actual_order = tuple(canonical[0][:3])
+        if len(actual_order) < 3:
+            continue
+
+        line_map, line_boost = calc.line_map_from_race(race)
+        car_numbers = sorted(win_probs.keys())
+        norm_mass = calc.total_ordered_mass(win_probs, car_numbers, 3, line_map, line_boost)
+        if norm_mass <= 1e-9:
+            norm_mass = 1.0
+
+        best_prob_combo = None
+        best_prob_value = -1.0
+        best_ev_combo = None
+        best_ev_value = float("-inf")
+
+        for o in odds_rows:
+            try:
+                cars = tuple(int(x) for x in o.combination.split("-"))
+            except (ValueError, AttributeError):
+                continue
+            if len(cars) != 3 or any(c not in win_probs for c in cars):
+                continue
+            if o.odds_value is None or o.odds_value <= 0:
+                continue
+
+            prob = calc.harville_prob(win_probs, cars, line_map, line_boost) / norm_mass
+            ev = prob * o.odds_value - 1.0
+
+            if prob > best_prob_value:
+                best_prob_value = prob
+                best_prob_combo = (cars, o.odds_value)
+            if ev > best_ev_value:
+                best_ev_value = ev
+                best_ev_combo = (cars, o.odds_value)
+
+        if best_prob_combo is None or best_ev_combo is None:
+            continue
+
+        evaluated += 1
+        same_pick = best_prob_combo[0] == best_ev_combo[0]
+        if same_pick:
+            both_same_count += 1
+
+        def _apply(stat, combo_tuple):
+            cars, odds_value = combo_tuple
+            stat["n"] += 1
+            stat["stake"] += stake_per_race
+            stat["odds_sum"] += odds_value
+            if cars == actual_order:
+                stat["hits"] += 1
+                stat["payout"] += stake_per_race * odds_value
+
+        _apply(stat_a, best_prob_combo)
+        _apply(stat_b, best_ev_combo)
+        if same_pick:
+            _apply(stat_same, best_prob_combo)
+
+    def _summarize(stat):
+        n = stat["n"]
+        return {
+            "件数": n,
+            "的中数": stat["hits"],
+            "的中率%": round(stat["hits"] / n * 100, 2) if n else None,
+            "平均オッズ": round(stat["odds_sum"] / n, 1) if n else None,
+            "総投資額": stat["stake"],
+            "総払戻額": stat["payout"],
+            "損益": round(stat["payout"] - stat["stake"], 0),
+            "ROI%": round(stat["payout"] / stat["stake"] * 100, 2) if stat["stake"] else None,
+        }
+
+    return {
+        "note": (
+            "1レース1点だけ賭ける場合、最高勝率の1点と最高EVの1点のどちらが"
+            "実績で優れるかを比較する読み取り専用診断。本番ロジックは呼び出していない。"
+        ),
+        "評価対象レース数": evaluated,
+        "除外(オッズなし)": skipped_no_odds,
+        "戦略A_最高勝率1点": _summarize(stat_a),
+        "戦略B_最高EV1点": _summarize(stat_b),
+        "AとBが同じ組み合わせだった割合%": round(both_same_count / evaluated * 100, 2) if evaluated else None,
+        "AB一致時の参考成績": _summarize(stat_same),
+        "読み方": (
+            "『ROI%』が100%を超えていれば黒字。AとBのROI%を比較し、"
+            "高い方が1点賭け戦略として優れていることを示す。"
+            "的中率は戦略Aの方が高くなりやすく、ROIは戦略Bの方が高くなりやすい"
+            "傾向が一般的だが、実際にどちらが上回るかはデータで確認する。"
+        ),
+    }
