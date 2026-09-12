@@ -478,7 +478,10 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             is_skip = True
             skip_reason = "理論上の賭け金が最低単位(100円)に満たないため見送り"
         # 100円ベット換算で、安全マージン(オッズ変動対策)を考慮した閾値以上を「買い示唆」とする
-        effective_min_ev = max(req.min_ev_pct, 50.0)
+        if getattr(req, "prefer_hit_rate", None) is True:
+            effective_min_ev = float(req.min_ev_pct)
+        else:
+            effective_min_ev = max(float(getattr(req, "min_ev_pct", 50.0)), 50.0)
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev)
 
         ev_result = models.EvResult(
@@ -1018,8 +1021,46 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     prefer_hit_rate = bool(getattr(req, "prefer_hit_rate", True))
     honmei_car = max(win_probs, key=win_probs.get) if win_probs else None
     if prefer_hit_rate and honmei_car is not None:
+        by_key = {(c["bet_type"], c["combination"]): c for c in candidates}
+        for e in all_evaluated:
+            if e.get("bet_type") != "3連単":
+                continue
+            try:
+                first = int(str(e["combination"]).split("-")[0])
+            except (ValueError, IndexError):
+                continue
+            if first != int(honmei_car):
+                continue
+            wp = float(e.get("win_prob") or 0)
+            if wp < float(req.min_win_prob):
+                continue
+            if float(e.get("ev_pct") or 0) < float(req.min_ev_pct):
+                continue
+            if e.get("gate_reason"):
+                continue
+            key = (e["bet_type"], e["combination"])
+            if key in by_key:
+                continue
+            f = calc.kelly_fraction(wp, e["odds_value"], req.fractional_coefficient, req.rebate_pct)
+            f_capped = min(f, req.max_bet_pct_per_bet)
+            raw_stake = bankroll * f_capped
+            by_key[key] = {
+                "bet_type": e["bet_type"],
+                "combination": e["combination"],
+                "estimated_win_prob_pct": round(wp * 100, 2),
+                "odds_value": e["odds_value"],
+                "ev_pct": e.get("ev_pct"),
+                "raw_stake": raw_stake,
+                "win_prob": wp,
+                "win_prob_raw": e.get("win_prob_raw"),
+                "total_vote_amount": None,
+                "low_prob_warning": wp < 0.05,
+                "data_sufficiency_pct": 0.0,
+                "prediction_accuracy_pct": None,
+                "effective_min_ev": float(req.min_ev_pct),
+            }
         kept = []
-        for c in candidates:
+        for c in by_key.values():
             if c.get("bet_type") != "3連単":
                 skipped_for_verification.append((c, "的中率重視のため三連単以外を見送り"))
                 continue
