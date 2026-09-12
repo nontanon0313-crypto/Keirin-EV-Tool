@@ -250,7 +250,7 @@ async function fetchTodayRaces(force) {
   if (!force && _cacheValid(c)) return c.races;
   const res = await fetch(apiUrl("/races/today"));
   const data = await res.json();
-  const races = (data || []).map(r => ({
+  let races = (data || []).map(r => ({
     id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
     entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
     label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}${r.actual_result ? " ・結果確定済み" : ""}`,
