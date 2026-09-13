@@ -5062,8 +5062,13 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     win_prob_values = [p.win_prob_at_purchase for p in purchases if p.win_prob_at_purchase is not None]
     ev_purchases = [p for p in purchases if p.ev_pct_at_purchase is not None]
     predicted_win_rate_pct = round(sum(win_prob_values) / len(win_prob_values) * 100, 1) if win_prob_values else None
-    predicted_stake_sum = sum(p.stake_amount for p in ev_purchases)
-    predicted_profit_sum = sum(p.stake_amount * p.ev_pct_at_purchase / 100 for p in ev_purchases)
+    # 予想回収率: 見送り(stake=0)を金額加重から落とすと想定と一致してしまうため、
+    # stake<=0 は重み1で含める。
+    def _eval_weight(p):
+        s = float(p.stake_amount or 0)
+        return s if s > 0 else 1.0
+    predicted_stake_sum = sum(_eval_weight(p) for p in ev_purchases)
+    predicted_profit_sum = sum(_eval_weight(p) * p.ev_pct_at_purchase / 100 for p in ev_purchases)
     predicted_roi_pct = (
         round((predicted_profit_sum / predicted_stake_sum + 1) * 100, 2) if predicted_stake_sum else None
     )
@@ -5200,6 +5205,26 @@ def _compute_purchase_stats(db: Session, since_dt=None):
             judgement = "実績的中率が予想平均以上(過大評価の証拠なし。ただしこの検定は実績が予想を上回りすぎていないかは判定しない片側検定)"
         else:
             judgement = "現時点のサンプル数では、偶然のブレの範囲内"
+        purchased_prob_vals = [
+            p.win_prob_at_purchase
+            for p in purchases
+            if (float(getattr(p, "stake_amount", 0) or 0) > 0)
+            and p.win_prob_at_purchase is not None
+            and not getattr(p, "is_skipped_record", False)
+        ]
+        avg_expected_prob = (
+            sum(purchased_prob_vals) / len(purchased_prob_vals) if purchased_prob_vals else None
+        )
+        wins_purchased = sum(
+            1
+            for p in purchases
+            if (float(getattr(p, "stake_amount", 0) or 0) > 0)
+            and not getattr(p, "is_skipped_record", False)
+            and p.result == "win"
+            and p.win_prob_at_purchase is not None
+        )
+        n_purchased_with_prob = len(purchased_prob_vals)
+
         calibration_significance = {
             "p_value_pct": round(p_value * 100, 4),
             "judgement": judgement,
@@ -5208,7 +5233,10 @@ def _compute_purchase_stats(db: Session, since_dt=None):
             "n_used": n_with_prob,
             "wins_used": wins_with_prob,
             "predicted_prob_used_pct": round(avg_predicted_prob * 100, 4),
-            "note": "総ベット数と一致しない場合、win_prob_at_purchase未記録の購入(手動記録分等)が混ざっています",
+            "expected_prob_used_pct": round(avg_expected_prob * 100, 4) if avg_expected_prob is not None else None,
+            "n_purchased_used": n_purchased_with_prob,
+            "wins_purchased_used": wins_purchased,
+            "note": "predicted=見送り含む平均勝率(予想)。expected=実投票のみ平均勝率(想定)。",
             "race_level": {
                 "n_races": n_races,
                 "profit_races": profit_races,

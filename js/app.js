@@ -1929,7 +1929,7 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     if (data.calibration_significance) {
       const cs = data.calibration_significance;
       const cls = cs.p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (cs.p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
-      html += `<p${cls}>📊 [買い目単位] このズレが偶然起きる確率: ${cs.p_value_pct}%(${cs.judgement})<br><span class="note">計算に使った件数: ${cs.n_used}件中${cs.wins_used}的中(想定的中率${cs.predicted_prob_used_pct}%)。${cs.n_used !== data.total_bets ? `⚠️総ベット数${data.total_bets}件と一致していません。${cs.note}` : ""}</span></p>`;
+      html += `<p${cls}>📊 [買い目単位] このズレが偶然起きる確率: ${cs.p_value_pct}%(${cs.judgement})<br><span class="note">計算に使った件数: ${cs.n_used}件中${cs.wins_used}的中(予想的中率${cs.predicted_prob_used_pct}%＝見送り含む平均勝率)。${cs.n_used !== data.total_bets ? `⚠️総ベット数${data.total_bets}件と一致していません。${cs.note}` : ""}</span></p>`;
       if (cs.race_level && cs.race_level.n_races) {
         html += `<p class="note">📊 [レース単位・参考] ${cs.race_level.n_races}レース中${cs.race_level.profit_races}レースが黒字(${cs.race_level.profit_race_rate_pct}%)。${cs.race_level.note}</p>`;
       }
