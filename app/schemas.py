@@ -100,7 +100,7 @@ class RacePlanRequest(BaseModel):
     prefer_hit_rate: bool = True
     prefer_same_line: bool = False  # 同ライン絡み優先  # True=安定制約つき。1着本命三連単・的中確率優先
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
-    max_items: int = 8  # 点数抑制
+    max_items: int = 1  # 2026-09-13: 戦略A(最高勝率1点のみ)を採用。全期間検証で複数点分散より優れていた
     max_race_fill_pct: float = 0.5  # race_capの使用上限比率  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
     exclude_low_prob_warning: bool = False  # 大穴帯(0-5%・実績未検証)も候補として評価し、警告は表示する
     apply_calibration: bool = False  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
@@ -108,7 +108,7 @@ class RacePlanRequest(BaseModel):
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
     apply_performance_gates: bool = True  # 不調ステージ見送りのみ(券種・帯の除外はしない。設計厳守)
     apply_odds_safety_margin: bool = True  # 過去のPurchase実績から算出したオッズ安全マージンを適用するか
-    max_single_bet_pct_of_race_cap: float = 0.4  # 1点の投票額がレース予算(race_cap)に占める上限比率。
+    max_single_bet_pct_of_race_cap: float = 1.0  # 2026-09-13: 戦略A(1点のみ)が標準のため100%に変更。以前の0.4は複数点分散時の過集中防止用だった
     # 候補が1〜2点しかない時に予算全額を1点に集中させないための歯止め(既定40%)。
 
 

@@ -4654,6 +4654,7 @@ def diagnostics_single_bet_strategy_compare(
     stat_a = _new_stat()  # 最高勝率
     stat_b = _new_stat()  # 最高EV
     stat_same = _new_stat()  # AとBが同じ組み合わせだった場合(参考)
+    stat_b_hit_profits = []  # 戦略Bの的中ごとの純利益(感度分析用)
     both_same_count = 0
     evaluated = 0
     skipped_no_odds = 0
@@ -4730,9 +4731,13 @@ def diagnostics_single_bet_strategy_compare(
             if cars == actual_order:
                 stat["hits"] += 1
                 stat["payout"] += stake_per_race * odds_value
+                return stake_per_race * odds_value - stake_per_race  # この的中の純利益
+            return None
 
         _apply(stat_a, best_prob_combo)
-        _apply(stat_b, best_ev_combo)
+        b_profit = _apply(stat_b, best_ev_combo)
+        if b_profit is not None:
+            stat_b_hit_profits.append(b_profit)
         if same_pick:
             _apply(stat_same, best_prob_combo)
 
@@ -4749,6 +4754,25 @@ def diagnostics_single_bet_strategy_compare(
             "ROI%": round(stat["payout"] / stat["stake"] * 100, 2) if stat["stake"] else None,
         }
 
+    # 戦略Bの感度分析: 純利益の大きい的中を上位から除外していっても
+    # 黒字を維持できるか(=一部の大穴的中に依存しすぎていないか)を確認する
+    b_total_stake = stat_b["stake"]
+    b_total_profit = stat_b["payout"] - stat_b["stake"]
+    sorted_profits = sorted(stat_b_hit_profits, reverse=True)
+    strategy_b_sensitivity = []
+    for top_n in (1, 2, 3, 5):
+        if top_n > len(sorted_profits):
+            continue
+        excluded_profit_sum = sum(sorted_profits[:top_n])
+        remaining_profit = b_total_profit - excluded_profit_sum
+        strategy_b_sensitivity.append({
+            "上位除外件数": top_n,
+            "除外した的中の純利益合計": round(excluded_profit_sum, 0),
+            "残り損益": round(remaining_profit, 0),
+            "残りROI%": round((b_total_stake + remaining_profit) / b_total_stake * 100, 2) if b_total_stake else None,
+            "除外後も黒字か": remaining_profit > 0,
+        })
+
     return {
         "note": (
             "1レース1点だけ賭ける場合、最高勝率の1点と最高EVの1点のどちらが"
@@ -4758,12 +4782,14 @@ def diagnostics_single_bet_strategy_compare(
         "除外(オッズなし)": skipped_no_odds,
         "戦略A_最高勝率1点": _summarize(stat_a),
         "戦略B_最高EV1点": _summarize(stat_b),
+        "戦略B_上位的中除外感度分析": strategy_b_sensitivity,
         "AとBが同じ組み合わせだった割合%": round(both_same_count / evaluated * 100, 2) if evaluated else None,
         "AB一致時の参考成績": _summarize(stat_same),
         "読み方": (
             "『ROI%』が100%を超えていれば黒字。AとBのROI%を比較し、"
             "高い方が1点賭け戦略として優れていることを示す。"
-            "的中率は戦略Aの方が高くなりやすく、ROIは戦略Bの方が高くなりやすい"
-            "傾向が一般的だが、実際にどちらが上回るかはデータで確認する。"
+            "『戦略B_上位的中除外感度分析』で除外後も黒字(true)であれば、"
+            "戦略Bは少数の大穴的中だけに依存しているわけではないと言える。"
+            "除外1件で赤字(false)になるなら、戦略Bの黒字はごく一部の的中頼みであることを意味する。"
         ),
     }

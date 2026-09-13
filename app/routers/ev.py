@@ -1120,7 +1120,14 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             f = calc.kelly_fraction(wp, e["odds_value"], req.fractional_coefficient, req.rebate_pct)
             f_capped = min(max(f, 0.0), req.max_bet_pct_per_bet)
             if bool(getattr(req, "prefer_hit_rate", True)):
-                raw_stake = 100.0  # 的中率重視: ケリーで上限まで膨らませない
+                if int(getattr(req, "max_items", 8) or 8) == 1:
+                    # 2026-09-13(のん承認): 1点のみ賭ける「戦略A」運用。
+                    # 全期間データで検証した結果、最高勝率1点を選び、
+                    # レース予算をその1点に全額投じる方が、複数点に100円ずつ
+                    # 分散するより実績で優れていた(single-bet-strategy-compare診断)。
+                    raw_stake = race_cap
+                else:
+                    raw_stake = 100.0  # 的中率重視: ケリーで上限まで膨らませない
             else:
                 raw_stake = bankroll * f_capped
                 if raw_stake < 100:
