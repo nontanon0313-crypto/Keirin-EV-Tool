@@ -577,16 +577,13 @@ def _parse_raw_grid(soup, debug=False, exclude_car=None):
         # この行で有効な列(=本来データがあるはずの車番)を、ヘッダー順に求める
         expected_cols = [h for h in header if h != row_car and h != exclude_car]
 
-        # 空白の幅に依存せず、実データ(オッズ値)を見つかった順に抽出する
-        found_values = []
-        i = 0
-        while i < len(data_cells):
-            t = data_cells[i]
-            if ODDS_RE.match(t):
-                found_values.append(t)
-                i += 2  # (オッズ値, 人気順位)のペア。人気順位は読み飛ばす
-            else:
-                i += 1  # 空白は1セルずつ進める(幅を仮定しない)
+        # 実データのオッズ値だけを出現順に抽出する。
+        # OddsParkのHTMLでは人気順位セルの有無・空白幅が一定ではないため、
+        # 「オッズ値の次を人気順位として1セル飛ばす」という前提を置かない。
+        # 実際の表で、row=5 は
+        #   496.4, blank, 183.4, 6.2, blank, 187.5, 790.0
+        # のようにオッズ値が連続するケースがある。
+        found_values = [t for t in data_cells if ODDS_RE.match(t)]
 
         row_grid_entries = []
         for col_car, odds_val in zip(expected_cols, found_values):
