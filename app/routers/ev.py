@@ -631,8 +631,6 @@ def threshold_table(
     }
 
 
-@router.post("/race-plan/{race_id}")
-
 def _combo_has_same_line(combination: str, line_map) -> bool:
     if not line_map:
         return True
@@ -670,6 +668,7 @@ def _front_style_score(combination: str, style_by_car: dict) -> int:
         return 1
     return 0
 
+@router.post("/race-plan/{race_id}")
 def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(get_db)):
     """
     1レース全体で、期待値プラス(安全マージン込み)の買い目をまとめて拾い、
