@@ -250,7 +250,7 @@ def get_current_bankroll():
     return data.get("current_balance")
 
 
-def run_one_race(race_json, bankroll, dry_run=False):
+def run_one_race(race_json, bankroll, dry_run=False, skip_plan=False):
     label = f"{race_json.get('kaisai_bi')}_{race_json.get('jo_code')}_{race_json.get('race_no')}"
     log(f"=== {label} ===")
 
@@ -283,6 +283,22 @@ def run_one_race(race_json, bankroll, dry_run=False):
     # 新規データの通常経路(--dir/--file)では結果が取れていても常に
     # 「未確定」のままになっていた(のんの指摘により修正)。
     actual_result = _extract_actual_result(race_json)
+
+    if skip_plan:
+        # 2026-09-13(のん指示): 投票プラン作成・投票記録は時間がかかるため、
+        # 日次の自動パイプラインでは行わない。予想(AI勝率算出)までで止める。
+        # プランはアプリの「このレースの自動投票プランを作成」ボタンから
+        # 必要な時だけ手動で作成する運用に変更。
+        log("2. 予想(Gemini 2段階分析)...")
+        try:
+            est = step2_estimate(race_id)
+            log(f"   完了: {est.get('updated_entries', 0)}名分の勝率を推定")
+        except Exception as e:
+            log(f"   予想に失敗しました: {e}")
+            return {"race_id": race_id, "stage": "estimate_failed", "error": str(e)}
+        log("   --skip-plan のためここで終了(投票プラン作成・投票記録は行いません)")
+        return {"race_id": race_id, "stage": "estimated_only"}
+
     return run_predict_and_confirm(race_id, bankroll, actual_result=actual_result)
 
 
@@ -462,6 +478,7 @@ def main():
     ap.add_argument("--no-reset", action="store_true", help="--race-ids使用時、リセットせずに(=既存の購入記録に追加する形で)再予想する。通常は指定しない")
     ap.add_argument("--bankroll", type=float, default=None, help="証拠金(円)。未指定なら固定100万円を使用(検証・集計目的のため)")
     ap.add_argument("--dry-run", action="store_true", help="データ取得(登録)までで止める")
+    ap.add_argument("--skip-plan", action="store_true", help="予想(AI勝率算出)までで止め、投票プラン作成・投票記録は行わない(2026-09-13追加。日次パイプラインの高速化用。プランはアプリから手動作成する)")
     ap.add_argument("--concurrency", type=int, default=1, help="同時に処理するレース数(既定1=逐次)。Geminiの利用枠に応じて調整してください")
     ap.add_argument("--progress-file", default=PROGRESS_DEFAULT_PATH, help=f"進捗記録ファイル(既定: {PROGRESS_DEFAULT_PATH})。既に成功済みのタスクは自動でスキップし、Gemini利用枠切れで停止した後の再実行では続きから再開する")
     args = ap.parse_args()
@@ -486,7 +503,7 @@ def main():
     # 再実行すると、登録済みだった分が「もう完了済み」と誤認され、
     # 一度も予想が実行されないまま進捗ファイル上だけ完了扱いになっていた
     # (のんの実機運用で判明した不具合を受けて修正)。
-    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "skipped_no_odds", "skipped_empty"}
+    SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "skipped_no_odds", "skipped_empty", "estimated_only"}
 
     def run_with_summary(task_key, task_label, fn):
         nonlocal stopped_for_rate_limit
@@ -569,13 +586,13 @@ def main():
                 break
             with open(fp, encoding="utf-8") as f:
                 race_json = json.load(f)
-            run_with_summary(f"file:{fp}", fp, lambda race_json=race_json: run_one_race(race_json, bankroll, dry_run=args.dry_run))
+            run_with_summary(f"file:{fp}", fp, lambda race_json=race_json: run_one_race(race_json, bankroll, dry_run=args.dry_run, skip_plan=args.skip_plan))
             time.sleep(0.3)
     else:
         def load_and_run(fp):
             with open(fp, encoding="utf-8") as f:
                 race_json = json.load(f)
-            return run_one_race(race_json, bankroll, dry_run=args.dry_run)
+            return run_one_race(race_json, bankroll, dry_run=args.dry_run, skip_plan=args.skip_plan)
 
         with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
             futs = {}

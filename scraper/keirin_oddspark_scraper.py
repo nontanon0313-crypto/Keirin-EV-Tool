@@ -877,15 +877,18 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
 
     n_riders = len(data["entry"].get("riders", [])) if data.get("entry") else None
 
-    for code in [5, 6, 7]:  # 2車複, 2車単, ワイド(1ページ完結)
+    # 2026-09-13(のん指示): 投票対象が3連単のみになったため、それ以外の券種の
+    # オッズ取得は行わない(処理時間短縮のため)。取得自体をスキップし、
+    # 空データとして記録しておく(下流の処理でキー自体は参照される可能性があるため)。
+    for code in [5, 6, 7]:  # 2車複, 2車単, ワイド(取得スキップ)
         name = BET_TYPES[code]
-        try:
-            data["odds"][name] = parse_odds_simple(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
-            time.sleep(1.0)
-        except Exception as e:
-            data["odds"][name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
+        data["odds"][name] = {"skipped": True, "matrix_count": 0, "matrix": [], "is_complete": False}
 
-    for code in [8, 9]:  # 3連複, 3連単(軸車番ごとに分割取得)
+    for code in [8]:  # 3連複(取得スキップ。3連単のみ取得する)
+        name = BET_TYPES[code]
+        data["odds"][name] = {"skipped": True, "matrix_count": 0, "matrix": [], "is_complete": False}
+
+    for code in [9]:  # 3連単(軸車番ごとに分割取得。唯一の投票対象なのでこれだけ取得する)
         name = BET_TYPES[code]
         try:
             data["odds"][name] = parse_odds_axis_based(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
