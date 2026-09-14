@@ -552,6 +552,10 @@ def _parse_raw_grid(soup, debug=False, exclude_car=None):
                 break
 
     ODDS_RE = re.compile(r"^\d+(\.\d+)?(-\d+(\.\d+)?)?$")
+    # 2026-09-14追加: 実オッズ値だけを識別するための厳密な正規表現(小数点必須)。
+    # OddsParkのオッズは必ず小数点付き(5.6, 132.3等)で表示されるため、
+    # これで人気順位セル(素の整数)を確実に除外できる。
+    REAL_ODDS_RE = re.compile(r"^\d+\.\d+$")
     header_set = set(header)
 
     for row in rows:
@@ -583,7 +587,14 @@ def _parse_raw_grid(soup, debug=False, exclude_car=None):
         # 実際の表で、row=5 は
         #   496.4, blank, 183.4, 6.2, blank, 187.5, 790.0
         # のようにオッズ値が連続するケースがある。
-        found_values = [t for t in data_cells if ODDS_RE.match(t)]
+        #
+        # 2026-09-14修正(重要バグ): 上のODDS_RE(小数点なしの整数にもマッチする)を
+        # そのまま使うと、人気順位セル(例: "1", "6", "15"といった素の整数)まで
+        # 「オッズ値」として拾ってしまい、found_valuesに紛れ込んで以降の
+        # オッズ値が1つずつズレてしまっていた(のんが実機で確認した「再取得したら
+        # 5.8倍が150倍になった」の直接原因)。オッズは必ず小数点付き(例:5.6, 132.3)
+        # で表示されるため、REAL_ODDS_RE(小数点必須)で厳密に絞り込む。
+        found_values = [t for t in data_cells if REAL_ODDS_RE.match(t)]
 
         row_grid_entries = []
         for col_car, odds_val in zip(expected_cols, found_values):
