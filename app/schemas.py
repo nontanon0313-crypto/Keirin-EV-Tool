@@ -108,7 +108,9 @@ class RacePlanRequest(BaseModel):
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
     apply_performance_gates: bool = True  # 不調ステージ見送りのみ(券種・帯の除外はしない。設計厳守)
     apply_odds_safety_margin: bool = True  # 過去のPurchase実績から算出したオッズ安全マージンを適用するか
-    max_single_bet_pct_of_race_cap: float = 1.0  # 2026-09-13: 戦略A(1点のみ)が標準のため100%に変更。以前の0.4は複数点分散時の過集中防止用だった
+    max_single_bet_pct_of_race_cap: float = 1.0
+    max_payout_soft: float = 5_000_000  # 想定払戻がこの額超なら投票額を下げる
+    max_payout_hard: float = 10_000_000  # 払戻の絶対上限  # 2026-09-13: 戦略A(1点のみ)が標準のため100%に変更。以前の0.4は複数点分散時の過集中防止用だった
     # 候補が1〜2点しかない時に予算全額を1点に集中させないための歯止め(既定40%)。
 
 

@@ -494,6 +494,32 @@ def round_to_bet_unit(amount: float, unit: int = 100) -> int:
     return int(amount // unit) * unit
 
 
+
+def cap_stake_by_max_payout(
+    stake: float,
+    odds_value: float,
+    max_payout_soft: float = 5_000_000,
+    max_payout_hard: float = 10_000_000,
+) -> float:
+    """想定払戻(stake×odds)が上限を超えないよう投票額を下げる。"""
+    if stake is None or stake <= 0:
+        return 0.0
+    try:
+        odds = float(odds_value or 0)
+    except (TypeError, ValueError):
+        return float(stake)
+    if odds <= 0:
+        return float(stake)
+    soft = float(max_payout_soft or 0) or 5_000_000
+    hard = float(max_payout_hard or 0) or 10_000_000
+    cap_payout = min(soft, hard) if soft > 0 else hard
+    if cap_payout <= 0:
+        return float(stake)
+    max_stake = round_to_bet_unit(cap_payout / odds)
+    if max_stake < 100:
+        max_stake = 0.0 if (100 * odds) > hard else 100.0
+    return float(min(float(stake), max_stake))
+
 def recommend_stake(
     bankroll: float,
     win_prob: float,

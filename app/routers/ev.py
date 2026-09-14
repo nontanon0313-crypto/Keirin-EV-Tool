@@ -181,6 +181,8 @@ def _select_portfolio(
     max_single_bet_pct_of_race_cap=1.0,
     prefer_hit_rate: bool = False,
     max_race_fill_pct=1.0,
+    max_payout_soft=5_000_000,
+    max_payout_hard=10_000_000,
 ):
     """固定ケリー額でポートフォリオ構成。prefer_hit_rate時は的中確率寄与を優先。"""
     prepared = []
@@ -204,6 +206,12 @@ def _select_portfolio(
 
     for c in candidates:
         stake = calc.round_to_bet_unit(min(c["raw_stake"], single_ticket_cap))
+        stake = calc.cap_stake_by_max_payout(
+            stake,
+            c.get("odds_value"),
+            max_payout_soft=max_payout_soft,
+            max_payout_hard=max_payout_hard,
+        )
         if stake <= 0:
             continue
 
@@ -1127,6 +1135,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                     raw_stake = race_cap
                 else:
                     raw_stake = 100.0  # 的中率重視: ケリーで上限まで膨らませない
+                raw_stake = calc.cap_stake_by_max_payout(
+                    raw_stake,
+                    e.get("odds_value"),
+                    max_payout_soft=float(getattr(req, "max_payout_soft", 5_000_000) or 5_000_000),
+                    max_payout_hard=float(getattr(req, "max_payout_hard", 10_000_000) or 10_000_000),
+                )
             else:
                 raw_stake = bankroll * f_capped
                 if raw_stake < 100:
@@ -1196,6 +1210,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         odds_safety_margins=odds_safety_margins,
         max_single_bet_pct_of_race_cap=getattr(req, "max_single_bet_pct_of_race_cap", 1.0),
         prefer_hit_rate=prefer_hit_rate,
+        max_race_fill_pct=float(getattr(req, "max_race_fill_pct", 1.0) or 1.0),
+        max_payout_soft=float(getattr(req, "max_payout_soft", 5_000_000) or 5_000_000),
+        max_payout_hard=float(getattr(req, "max_payout_hard", 10_000_000) or 10_000_000),
     )
 
     items = []
