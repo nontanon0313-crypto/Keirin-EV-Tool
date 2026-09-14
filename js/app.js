@@ -1912,7 +1912,8 @@ function renderBucketTable(title, bucketObj) {
   }
   html += "</table>";
   return html;
-}
+
+  _restoreUiState();}
 
 document.getElementById("loadStatsBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
@@ -2658,7 +2659,7 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
         axis.includes("オッズ")
       ) continue;
       const on = enabled[axis] !== false;
-      html += `<h3>${axis} <label style="font-weight:normal;font-size:13px;"><input type="checkbox" class="calAxisToggle" data-axis="${axis}" ${on ? "checked" : ""}> この軸を表示</label></h3>`;
+      html += `<h3>${axis} <label style="font-weight:normal;font-size:13px;"><input type="checkbox" id="calAxisToggle-${axis}" class="calAxisToggle" data-axis="${axis}" ${on ? "checked" : ""}> この軸を表示</label></h3>`;
       if (!on) {
         html += `<p class="note">(非表示)</p>`;
         continue;
