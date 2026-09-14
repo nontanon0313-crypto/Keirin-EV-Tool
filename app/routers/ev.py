@@ -677,6 +677,48 @@ def _front_style_score(combination: str, style_by_car: dict) -> int:
     return 0
 
 @router.post("/race-plan/{race_id}")
+
+def _persist_live_race_plan(db: Session, race_id: int, items: list) -> int:
+    """
+    未確定レースの投票プランを Purchase(pending) として保存する。
+    本命一覧の has_plan は Purchase(stake>0) 有無で判定しているため、
+    プラン作成だけでは一覧に「あり」が出ないバグを解消する。
+    確定済みレースは再投票経路に任せ、ここでは触らない。
+    """
+    race = db.query(models.Race).filter(models.Race.id == race_id).first()
+    if not race or race.actual_result:
+        return 0
+    db.query(models.Purchase).filter(
+        models.Purchase.race_id == race_id,
+        models.Purchase.result == "pending",
+    ).delete(synchronize_session=False)
+    saved = 0
+    for it in items or []:
+        stake = float(it.get("stake") or it.get("stake_amount") or 0)
+        if stake <= 0:
+            continue
+        win_prob = it.get("win_prob")
+        if win_prob is None and it.get("estimated_win_prob_pct") is not None:
+            win_prob = float(it["estimated_win_prob_pct"]) / 100.0
+        db.add(
+            models.Purchase(
+                race_id=race_id,
+                bet_type=it["bet_type"],
+                combination=it["combination"],
+                stake_amount=stake,
+                odds_at_purchase=it.get("odds_value"),
+                win_prob_at_purchase=win_prob,
+                win_prob_raw=it.get("win_prob_raw"),
+                ev_pct_at_purchase=it.get("ev_pct"),
+                result="pending",
+                payout_amount=0,
+            )
+        )
+        saved += 1
+    db.commit()
+    return saved
+
+
 def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(get_db)):
     """
     1レース全体で、期待値プラス(安全マージン込み)の買い目をまとめて拾い、
@@ -1036,10 +1078,12 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 "ev_pct": e.get("ev_pct"),
                 "reason": reason,
             })
+        _persist_live_race_plan(db, race_id, [])
         return {
             "race_id": race_id,
             "message": "閾値(勝率・EV)を満たす買い示唆がありませんでした(見送り推奨)",
             "items": [],
+            "plan_saved_count": 0,
             "total_stake": 0,
             "race_budget_cap": round(bankroll * max_race_pct, 0),
             "exclude_low_prob_warning_requested": req.exclude_low_prob_warning,
@@ -1318,10 +1362,13 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     else:
         msg_extra = None
 
+    plan_saved = _persist_live_race_plan(db, race_id, items)
+
     return {
         "race_id": race_id,
         "message": msg_extra,
         "num_bets": len(items),
+        "plan_saved_count": plan_saved,
         "total_stake": round(total_stake, 0),
         "skipped_saved_count": n_skip,
         "skipped_candidate_count": len(skipped_for_verification),

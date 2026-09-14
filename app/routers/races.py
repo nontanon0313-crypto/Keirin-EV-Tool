@@ -387,11 +387,10 @@ def backfill_post_time(items: list[dict], db: Session = Depends(get_db)):
 
 def _plan_bet_counts_by_race(db: Session, race_ids: list):
     """
-    指定レースIDごとに、実際にお金を賭ける対象として記録されたPurchase
-    (stake_amount>0)の件数を返す。「予想済み(AI勝率算出済み)」と
-    「投票プランあり(買い目が実際にある)」は別物であるため、
-    ドロップダウン・本命一覧の両方で後者を明示するために使う
-    (のんの指摘「投票プランありが分からない」により追加)。
+    指定レースIDごとに、投票プランとして保存された買い目
+    (Purchase / stake_amount>0)の件数を返す。
+    race-plan 実行時に未確定レースへ pending で保存される。
+    「予想済み(AI勝率算出済み)」と「投票プランあり」は別物。
     """
     if not race_ids:
         return {}
