@@ -3042,9 +3042,186 @@ SETTINGS_INPUT_IDS.forEach((id) => {
 });
 loadSettingsFromStorage();
 
+
+// ---------- UI状態の共通永続化 ----------
+// 画面更新・ブラウザ再読み込み後も、全画面の入力値・チェック状態・選択値を維持する。
+// file inputだけはブラウザ仕様上復元できないため対象外。
+// 動的に生成される入力欄も、idがあればイベント委譲で保存する。
+const UI_STATE_STORAGE_KEY = "keirinEvToolUiStateV1";
+
+function _getUiState() {
+  try {
+    return JSON.parse(localStorage.getItem(UI_STATE_STORAGE_KEY) || "{}");
+  } catch (_) {
+    return {};
+  }
+}
+
+function _saveUiState() {
+  try {
+    const state = {};
+    document.querySelectorAll("input, select, textarea").forEach((el) => {
+      if (!el.id) return;
+
+      const type = (el.type || "").toLowerCase();
+      if (type === "file" || type === "button" || type === "submit" ||
+          type === "reset" || type === "image") {
+        return;
+      }
+
+      if (type === "checkbox" || type === "radio") {
+        state[el.id] = {
+          kind: type,
+          checked: !!el.checked,
+        };
+      } else if (el.tagName === "SELECT" && el.multiple) {
+        state[el.id] = {
+          kind: "select-multiple",
+          value: Array.from(el.selectedOptions).map((o) => o.value),
+        };
+      } else {
+        state[el.id] = {
+          kind: "value",
+          value: el.value,
+        };
+      }
+    });
+
+    state.__activeTab =
+      document.querySelector(".tab-btn.active")?.dataset?.tab || "tab-vote";
+
+    if (typeof raceListScope !== "undefined") {
+      state.__raceListScope = raceListScope;
+    }
+
+    localStorage.setItem(UI_STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    console.warn("UI状態の保存に失敗:", e);
+  }
+}
+
+function _restoreUiState() {
+  const state = _getUiState();
+
+  Object.entries(state).forEach(([id, saved]) => {
+    if (id.startsWith("__")) return;
+
+    const el = document.getElementById(id);
+    if (!el || !saved) return;
+
+    const type = (el.type || "").toLowerCase();
+    if (type === "file" || type === "button" || type === "submit" ||
+        type === "reset" || type === "image") {
+      return;
+    }
+
+    try {
+      if (saved.kind === "checkbox" || saved.kind === "radio") {
+        el.checked = !!saved.checked;
+      } else if (saved.kind === "select-multiple" && el.multiple) {
+        const values = new Set(saved.value || []);
+        Array.from(el.options).forEach((o) => {
+          o.selected = values.has(o.value);
+        });
+      } else if (saved.kind === "value" && saved.value !== undefined) {
+        el.value = saved.value;
+      }
+    } catch (_) {}
+  });
+
+  // 還元率欄だけはチェック状態に応じた表示も復元する。
+  const rebate = document.getElementById("rebateCheckbox");
+  const rebateWrapper = document.getElementById("rebatePctWrapper");
+  if (rebate && rebateWrapper) {
+    rebateWrapper.style.display = rebate.checked ? "block" : "none";
+  }
+
+  // 保存していたタブを復元する。
+  const activeTab = state.__activeTab;
+  if (activeTab && document.getElementById(activeTab)) {
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.tab === activeTab);
+    });
+    document.querySelectorAll(".tab-content").forEach((content) => {
+      content.classList.toggle("active", content.id === activeTab);
+    });
+  }
+
+  // 本日/直前30分/本命一覧の選択状態も復元する。
+  if (state.__raceListScope &&
+      ["today", "upcoming", "favorites"].includes(state.__raceListScope) &&
+      typeof raceListScope !== "undefined") {
+    raceListScope = state.__raceListScope;
+    setRaceFilterButtons(raceListScope);
+  }
+}
+
+function _restoreSavedRaceSelection() {
+  const state = _getUiState();
+  const saved = state.raceSelect;
+  const select = document.getElementById("raceSelect");
+
+  if (!select || !saved || saved.value === undefined) return;
+
+  const exists = Array.from(select.options).some(
+    (o) => String(o.value) === String(saved.value)
+  );
+
+  if (exists) {
+    select.value = String(saved.value);
+    checkRace();
+  }
+}
+
+// 入力中にも保存する。ページを閉じる直前だけでなく、入力途中の値も保持する。
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!el || !el.id) return;
+  if (!["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName)) return;
+  if ((el.type || "").toLowerCase() === "file") return;
+  _saveUiState();
+});
+
+document.addEventListener("change", (e) => {
+  const el = e.target;
+  if (!el || !el.id) return;
+  if (!["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName)) return;
+  if ((el.type || "").toLowerCase() === "file") return;
+  _saveUiState();
+});
+
+// タブ・レースフィルターのクリック後にも保存する。
+// app.js内の既存ハンドラが先に状態を変更するため、ここでは現在値を保存する。
+document.addEventListener("click", (e) => {
+  const tabBtn = e.target.closest(".tab-btn");
+  if (tabBtn) {
+    setTimeout(_saveUiState, 0);
+    return;
+  }
+
+  const filterBtn = e.target.closest(
+    "#raceFilterTodayBtn, #raceFilterUpcomingBtn, #loadFavoritesBtn"
+  );
+  if (filterBtn) {
+    setTimeout(_saveUiState, 0);
+  }
+});
+
+window.addEventListener("beforeunload", _saveUiState);
+
+// 初期表示時に復元。
+_restoreUiState();
+
 // 初回ロード
-setRaceFilterButtons("today");
-loadRaces();
+setRaceFilterButtons(
+  typeof raceListScope !== "undefined" ? raceListScope : "today"
+);
+loadRaces().then(() => {
+  _restoreSavedRaceSelection();
+  _saveUiState();
+}).catch((e) => {
+  console.error("初期レース一覧の復元に失敗:", e);
+});
 refreshBankrollDisplay();
 
 
