@@ -2,6 +2,8 @@ import os
 import threading
 import logging
 import time
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 from sqlalchemy import create_engine, text
@@ -88,6 +90,9 @@ for _name in _TIER_ORDER:
         _engines[_name] = _make_engine(_url)
         _sessions[_name] = sessionmaker(autocommit=False, autoflush=False, bind=_engines[_name])
 
+# Primaryへのprobeより前に、永続化されたquota停止状態を復元する。
+_load_persistent_quota_blocks()
+
 _default_order = [n for n in _TIER_ORDER if n in _engines]
 if PREFER in _default_order:
     _default_order = [PREFER] + [n for n in _default_order if n != PREFER]
@@ -115,6 +120,13 @@ def get_active_db_info() -> dict:
     ok = {}
     for name in _TIER_ORDER:
         if name in _sessions:
+            if _is_in_cooldown(name):
+                ok[name] = False
+                if _is_quota_blocked(name):
+                    errors[name] = "quota-exceeded: blocked until next day"
+                else:
+                    errors[name] = "temporarily in cooldown"
+                continue
             try:
                 _ping(_sessions[name])
                 ok[name] = True
@@ -208,7 +220,16 @@ def _switch_to(name: str) -> bool:
 # quota系エラーは長時間(既定6時間)、それ以外の一時的なエラー(接続リセット等、
 # 復旧が見込める種類)は短時間(既定60秒)、と区別する。
 _COOLDOWN_SECONDS_TRANSIENT = 60
-_COOLDOWN_SECONDS_QUOTA = 6 * 60 * 60  # 6時間
+
+# quota超過は月初の復旧まで再接続不要。
+# ただし月初でも復旧に時間が掛かる場合があるため、
+# quota超過を検出した日はPrimaryを使用禁止とし、翌日に1回だけ復旧確認する。
+# Render再起動でプロセス内メモリが消えても再試行しないよう、
+# 禁止状態はFallback/Fallback2側の永続DBに保存する。
+_QUOTA_RETRY_INTERVAL_DAYS = 1
+_QUOTA_STATE_TABLE = "db_tier_quota_block"
+_JST = ZoneInfo("Asia/Tokyo")
+
 _QUOTA_KEYWORDS = (
     "data transfer quota",
     "compute time quota",
@@ -222,6 +243,7 @@ _QUOTA_KEYWORDS = (
     "upgrade your plan",
 )
 _tier_cooldown_until = {}
+_persistent_quota_block_date = {}
 
 
 def _is_quota_error(exc: BaseException) -> bool:
@@ -229,21 +251,146 @@ def _is_quota_error(exc: BaseException) -> bool:
     return any(k in msg for k in _QUOTA_KEYWORDS)
 
 
+def _today_jst() -> str:
+    return datetime.now(_JST).date().isoformat()
+
+
+def _ensure_quota_state_table() -> None:
+    """
+    Primaryがquota超過でも状態を読めるよう、Primary以外の永続DBに
+    quota停止状態を保存する。存在するFallback/Fallback2を順に使用する。
+    """
+    for name in ("fallback", "fallback2"):
+        factory = _sessions.get(name)
+        if factory is None:
+            continue
+        try:
+            db = factory()
+            try:
+                db.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {_QUOTA_STATE_TABLE} (
+                        tier_name VARCHAR(30) PRIMARY KEY,
+                        blocked_on DATE NOT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                db.commit()
+                return
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("could not prepare quota state on %s: %s", name, e)
+
+
+def _load_persistent_quota_blocks() -> None:
+    """
+    起動時にPrimaryへ接続する前に、Fallback/Fallback2からPrimaryの
+    quota停止日を復元する。
+    """
+    today = _today_jst()
+    for name in ("fallback", "fallback2"):
+        factory = _sessions.get(name)
+        if factory is None:
+            continue
+        try:
+            db = factory()
+            try:
+                db.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {_QUOTA_STATE_TABLE} (
+                        tier_name VARCHAR(30) PRIMARY KEY,
+                        blocked_on DATE NOT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                db.commit()
+                row = db.execute(
+                    text(f"SELECT blocked_on FROM {_QUOTA_STATE_TABLE} WHERE tier_name = 'primary'")
+                ).fetchone()
+                if row and row[0]:
+                    blocked_on = row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0])[:10]
+                    if blocked_on >= today:
+                        _persistent_quota_block_date["primary"] = blocked_on
+                        logger.warning(
+                            "database primary quota-block restored, retry after %s",
+                            blocked_on,
+                        )
+                return
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("could not load quota state from %s: %s", name, e)
+
+
+def _persist_quota_block(name: str) -> None:
+    if name == "primary":
+        blocked_on = _today_jst()
+    else:
+        blocked_on = _today_jst()
+
+    _persistent_quota_block_date[name] = blocked_on
+
+    for store_name in ("fallback", "fallback2"):
+        factory = _sessions.get(store_name)
+        if factory is None:
+            continue
+        try:
+            db = factory()
+            try:
+                db.execute(text(f"""
+                    CREATE TABLE IF NOT EXISTS {_QUOTA_STATE_TABLE} (
+                        tier_name VARCHAR(30) PRIMARY KEY,
+                        blocked_on DATE NOT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """))
+                db.execute(
+                    text(f"""
+                        INSERT INTO {_QUOTA_STATE_TABLE}(tier_name, blocked_on, updated_at)
+                        VALUES (:tier, :blocked_on, CURRENT_TIMESTAMP)
+                        ON CONFLICT (tier_name)
+                        DO UPDATE SET blocked_on = EXCLUDED.blocked_on,
+                                      updated_at = CURRENT_TIMESTAMP
+                    """),
+                    {"tier": name, "blocked_on": blocked_on},
+                )
+                db.commit()
+                return
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("could not persist quota block on %s: %s", store_name, e)
+
+
+def _is_quota_blocked(name: str) -> bool:
+    if name not in _persistent_quota_block_date:
+        return False
+    return _persistent_quota_block_date[name] >= _today_jst()
+
+
 def _mark_cooldown(name: str, exc: BaseException = None) -> None:
-    seconds = _COOLDOWN_SECONDS_QUOTA if (exc is not None and _is_quota_error(exc)) else _COOLDOWN_SECONDS_TRANSIENT
-    with _lock:
-        _tier_cooldown_until[name] = time.time() + seconds
     if exc is not None and _is_quota_error(exc):
-        logger.warning("database %s marked quota-exceeded, cooldown %ds", name, seconds)
+        _persist_quota_block(name)
+        logger.warning(
+            "database %s marked quota-exceeded, blocked for today; retry next day",
+            name,
+        )
+        return
+
+    with _lock:
+        _tier_cooldown_until[name] = time.time() + _COOLDOWN_SECONDS_TRANSIENT
 
 
 def _is_in_cooldown(name: str) -> bool:
+    if _is_quota_blocked(name):
+        return True
     with _lock:
         until = _tier_cooldown_until.get(name)
     return until is not None and time.time() < until
 
 
 def _clear_cooldown(name: str) -> None:
+    if _is_quota_blocked(name):
+        return
     with _lock:
         _tier_cooldown_until.pop(name, None)
 
@@ -402,6 +549,10 @@ def init_db():
     _seed_bank_master()
 
     for _other in _other_names(_active_name):
+        # quota超過中のPrimaryへschema準備で接続しない。
+        if _is_in_cooldown(_other):
+            logger.info("skip schema preparation on %s because it is in cooldown", _other)
+            continue
         try:
             Base.metadata.create_all(bind=_engines[_other])
             with _engines[_other].connect() as conn:
