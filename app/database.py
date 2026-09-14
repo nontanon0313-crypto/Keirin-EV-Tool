@@ -91,7 +91,6 @@ for _name in _TIER_ORDER:
         _sessions[_name] = sessionmaker(autocommit=False, autoflush=False, bind=_engines[_name])
 
 # Primaryへのprobeより前に、永続化されたquota停止状態を復元する。
-_load_persistent_quota_blocks()
 
 _default_order = [n for n in _TIER_ORDER if n in _engines]
 if PREFER in _default_order:
@@ -243,6 +242,8 @@ _QUOTA_KEYWORDS = (
     "upgrade your plan",
 )
 _tier_cooldown_until = {}
+
+_load_persistent_quota_blocks()
 _persistent_quota_block_date = {}
 
 
