@@ -1129,25 +1129,14 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         return [o for o in outcomes if calc.judge_purchase_result(bet_type, combination_str, list(o))]
 
     prefer_hit_rate = bool(getattr(req, "prefer_hit_rate", True))
-    honmei_car = max(win_probs, key=win_probs.get) if win_probs else None
     style_by_car = {}
     for e in (race.entries or []):
         if getattr(e, "car_number", None) is not None:
             style_by_car[int(e.car_number)] = getattr(e, "leg_style", None)
-    if prefer_hit_rate and honmei_car is not None:
+    if prefer_hit_rate:
         by_key = {(c["bet_type"], c["combination"]): c for c in candidates}
         for e in all_evaluated:
             if e.get("bet_type") != "3連単":
-                continue
-            try:
-                first = int(str(e["combination"]).split("-")[0])
-            except (ValueError, IndexError):
-                continue
-            if first != int(honmei_car):
-                continue
-            if bool(getattr(req, "prefer_same_line", True)) and not _combo_has_same_line(
-                e.get("combination"), line_map
-            ):
                 continue
             wp = float(e.get("win_prob") or 0)
             if wp < float(req.min_win_prob):
@@ -1207,19 +1196,6 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         for c in by_key.values():
             if c.get("bet_type") != "3連単":
                 skipped_for_verification.append((c, "的中率重視のため三連単以外を見送り"))
-                continue
-            try:
-                first = int(str(c["combination"]).split("-")[0])
-            except (ValueError, IndexError):
-                skipped_for_verification.append((c, "組み合わせ解析不能"))
-                continue
-            if first != int(honmei_car):
-                skipped_for_verification.append((c, f"的中率重視:1着が本命{honmei_car}以外"))
-                continue
-            if bool(getattr(req, "prefer_same_line", True)) and not _combo_has_same_line(
-                c.get("combination"), line_map
-            ):
-                skipped_for_verification.append((c, "的中率重視:同ライン絡みなし"))
                 continue
             if float(c.get("win_prob") or 0) < float(req.min_win_prob):
                 skipped_for_verification.append((c, "的中率重視:最低的中確率未満"))
