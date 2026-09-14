@@ -3,7 +3,6 @@ import threading
 import logging
 import time
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
 from typing import Optional
 
 from sqlalchemy import create_engine, text
@@ -227,7 +226,7 @@ _COOLDOWN_SECONDS_TRANSIENT = 60
 # 禁止状態はFallback/Fallback2側の永続DBに保存する。
 _QUOTA_RETRY_INTERVAL_DAYS = 1
 _QUOTA_STATE_TABLE = "db_tier_quota_block"
-_JST = ZoneInfo("Asia/Tokyo")
+_JST = timezone(timedelta(hours=9))
 
 _QUOTA_KEYWORDS = (
     "data transfer quota",
@@ -243,7 +242,6 @@ _QUOTA_KEYWORDS = (
 )
 _tier_cooldown_until = {}
 
-_load_persistent_quota_blocks()
 _persistent_quota_block_date = {}
 
 
@@ -320,6 +318,8 @@ def _load_persistent_quota_blocks() -> None:
                 db.close()
         except Exception as e:
             logger.warning("could not load quota state from %s: %s", name, e)
+
+_load_persistent_quota_blocks()
 
 
 def _persist_quota_block(name: str) -> None:
