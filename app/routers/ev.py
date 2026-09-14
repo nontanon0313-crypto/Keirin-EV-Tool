@@ -718,7 +718,7 @@ def _persist_live_race_plan(db: Session, race_id: int, items: list) -> int:
 
 
 @router.post("/race-plan/{race_id}")
-def race_plan(def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(get_db)):
+def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(get_db)):
     """
     1レース全体で、期待値プラス(安全マージン込み)の買い目をまとめて拾い、
     証拠金・1レース上限比率の範囲内に収まるよう自動で配分する「投票プラン」を返す。
