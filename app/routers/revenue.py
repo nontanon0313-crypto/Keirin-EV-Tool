@@ -254,6 +254,17 @@ def update_live_bet(live_bet_id: int, payload: schemas.LiveBetUpdate, db: Sessio
 
     if payload.actual_stake is not None:
         row.actual_stake = payload.actual_stake
+
+    # 想定利益は実投資額(actual_stake)を基準にDBへ永続化する。
+    if (
+        row.actual_stake is not None
+        and row.actual_stake > 0
+        and row.planned_win_prob is not None
+        and row.planned_odds is not None
+    ):
+        row.planned_expected_profit = row.actual_stake * (
+            row.planned_win_prob * row.planned_odds - 1.0
+        )
     if (
         row.actual_stake is not None
         and row.actual_stake > 0

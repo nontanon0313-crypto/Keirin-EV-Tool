@@ -236,3 +236,22 @@
 - 現状確認→原因特定→最小修正→構文検証→回帰検証→commit→push→push後確認を一連の作業として扱う。
 - 長大な多段shellコマンドや複数heredocの連結による貼り付け時の改行・空白混入を避ける。今後は原則として1つの実行ブロックにまとめ、対象文字列の完全一致だけに依存しない。
 - 修正前に取得元・計算元・送信元・受信側・保存先を確認し、修正対象外の未コミット変更を巻き込まない。
+
+
+## Termux実行前提
+- Keirin-EV-Toolの実作業はユーザーがTermuxでコマンドを実行する前提とする。
+- ChatGPT側でリポジトリやDBを直接操作した前提で進めず、Termuxで実行可能なコマンドを提示する。
+- 既存データを修正する作業では、コード修正だけで完了扱いにせず、既存DBデータの補正とAPI/DBによる実データ確認まで完了させる。
+
+## Termux依存環境の確認ルール
+- Keirin-EV-Toolの実作業はユーザーがTermuxで実行する。
+- TermuxのシステムPythonに本番依存ライブラリが導入済みとは仮定しない。
+- アプリ内部モジュールをimportしてDB/APIを直接操作する前に、必ず`requirements.txt`と実行環境の依存関係を確認する。
+- FastAPI等の依存ライブラリがTermuxに存在しない場合、勝手にシステムPythonへインストールせず、Render APIまたはプロジェクトが実際に使用している実行経路を優先する。
+- 「確認→実行→検証」では、実行環境の前提条件を確認してから実行する。
+
+## 収益記録 planned_expected_profit 永続化整合性
+- `planned_expected_profit` は予定投資額(`planned_stake`)ではなく、実投資額(`actual_stake`)を基準にする。
+- `PUT /revenue/{live_bet_id}` の `update_live_bet()` で `actual_stake` が変更された場合、DB上の`planned_expected_profit`も同時に再計算して永続化する。
+- `_row_to_dict()`だけで表示値を補正しても既存DB値・stats/equityの集計値は古いままになるため、DB値自体を補正する。
+- 既存データの補正は、修正後API経由で対象行を更新し、更新前後のAPI値を確認して完了とする。
