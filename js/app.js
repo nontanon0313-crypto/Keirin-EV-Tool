@@ -1061,10 +1061,15 @@ function renderRevenueList(data) {
         <p>
           <strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong>
           ${r.bet_type} ${r.combination}<br>
-          投資予定: ${yen(r.planned_stake)} /
-          実投資: ${yen(r.actual_stake)} /
+          想定投資: ${yen(r.planned_stake)} /
+          実投資: ${yen(r.actual_stake)}<br>
+          想定的中率: ${r.planned_win_prob != null ? pct(Number(r.planned_win_prob) * 100) : "-"} /
+          想定オッズ: ${r.planned_odds != null ? Number(r.planned_odds).toFixed(1) + "倍" : "-"}<br>
+          想定EV: ${r.planned_ev_pct != null ? pct(r.planned_ev_pct) : "-"} /
+          想定利益: ${yen(r.planned_expected_profit)}<br>
           結果: ${r.actual_result || "-"} /
-          払戻: ${yen(r.actual_payout)}
+          払戻: ${yen(r.actual_payout)} /
+          実績損益: ${yen(r.actual_pnl)}
         </p>
         ${
           pending && r.vote_status === "voted"
@@ -1313,6 +1318,7 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
   const combination = document.getElementById("purchaseCombination").value;
   const stake = parseFloat(document.getElementById("purchaseStake").value);
   const resultBox = document.getElementById("purchaseResult");
+
   if (!raceId || !betType || !combination || !stake) {
     alert("すべての項目を入力してください");
     return;
@@ -1320,63 +1326,53 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
 
   const planRaceId = parseInt(raceId);
 
-  // 現在表示中の投票プランから、券種＋買い目が一致する1件を取得。
-  // 実際の購入金額を変更しても、想定値は投票プラン側の値を保持する。
-  const planItems = Array.isArray(lastRacePlan)
-    ? lastRacePlan
-    : (Array.isArray(lastRacePlan?.items) ? lastRacePlan.items : []);
+  // 投票プランで画面に表示した値を、そのまま想定値として使用する。
+  // win_prob等の内部値を別ルートから拾わない。
+  const planItems = Array.isArray(lastRacePlan?.items)
+    ? lastRacePlan.items
+    : [];
 
   const planItem = planItems.find(it =>
-    String(it.bet_type ?? it.betType ?? "") === String(betType) &&
+    String(it.bet_type ?? "") === String(betType) &&
     String(it.combination ?? "") === String(combination)
-  ) || null;
+  );
 
-  const plannedWinProbRaw =
-    planItem?.win_prob ??
-    planItem?.blended_win_prob ??
-    planItem?.estimated_win_prob ??
-    null;
+  if (!planItem) {
+    resultBox.textContent =
+      "エラー: 現在の投票プランに一致する買い目がありません。投票プランを再作成してから購入記録してください。";
+    return;
+  }
 
-  const plannedWinProb = plannedWinProbRaw != null
-    ? (Number(plannedWinProbRaw) > 1
-        ? Number(plannedWinProbRaw) / 100
-        : Number(plannedWinProbRaw))
+  // 投票プラン画面で表示している値を唯一の基準にする。
+  const plannedWinProbPct = Number(planItem.estimated_win_prob_pct);
+  const plannedWinProb =
+    Number.isFinite(plannedWinProbPct)
+      ? plannedWinProbPct / 100
+      : null;
+
+  const plannedOdds = Number(planItem.odds_value);
+  const plannedEvPct = Number(planItem.ev_pct);
+  const plannedStake = Number(planItem.stake);
+
+  if (
+    !Number.isFinite(plannedWinProbPct) ||
+    !Number.isFinite(plannedOdds) ||
+    !Number.isFinite(plannedEvPct) ||
+    !Number.isFinite(plannedStake)
+  ) {
+    resultBox.textContent =
+      "エラー: 投票プランの想定的中率・オッズ・EV・投票額を取得できません。投票プランを再作成してください。";
+    return;
+  }
+
+  // 想定利益は「投票プランの想定投資額」に対する値。
+  // 実際の投資額を変更しても、プランの想定値は変えない。
+  const plannedExpectedProfit =
+    plannedStake * (plannedWinProb * plannedOdds - 1);
+
+  const winProbRaw = planItem.win_prob_raw != null
+    ? Number(planItem.win_prob_raw)
     : null;
-
-  const plannedOddsRaw =
-    planItem?.odds_value ??
-    planItem?.odds ??
-    planItem?.final_odds ??
-    null;
-
-  const plannedOdds = plannedOddsRaw != null ? Number(plannedOddsRaw) : null;
-
-  const plannedEvPctRaw =
-    planItem?.ev_pct ??
-    planItem?.expected_value_pct ??
-    planItem?.ev ??
-    null;
-
-  const plannedEvPct = plannedEvPctRaw != null
-    ? Number(plannedEvPctRaw)
-    : (
-        plannedWinProb != null && plannedOdds != null
-          ? (plannedWinProb * plannedOdds - 1) * 100
-          : null
-      );
-
-  const plannedStakeRaw =
-    planItem?.stake ??
-    planItem?.bet_amount ??
-    planItem?.amount ??
-    null;
-
-  const plannedStake = plannedStakeRaw != null ? Number(plannedStakeRaw) : null;
-
-  const winProbRaw =
-    planItem?.win_prob_raw ??
-    planItem?.raw_win_prob ??
-    null;
 
   try {
     const res = await fetch(apiUrl("/purchases/"), {
@@ -1389,7 +1385,7 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
         stake_amount: stake,
         odds_at_purchase: plannedOdds,
         win_prob_at_purchase: plannedWinProb,
-        win_prob_raw: winProbRaw != null ? Number(winProbRaw) : null,
+        win_prob_raw: winProbRaw,
         ev_pct_at_purchase: plannedEvPct,
       }),
     });
@@ -1404,10 +1400,15 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
         race_id: planRaceId,
         bet_type: betType,
         combination,
+
+        // 想定値は投票プランそのもの。
         planned_stake: plannedStake,
         planned_win_prob: plannedWinProb,
         planned_odds: plannedOdds,
         planned_ev_pct: plannedEvPct,
+        planned_expected_profit: plannedExpectedProfit,
+
+        // 実際に投票した金額は別管理。
         actual_stake: stake,
         actual_result: "pending",
         actual_payout: 0,
@@ -1423,12 +1424,12 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
       );
     }
 
-    const planInfo = planItem
-      ? ` 想定的中率:${plannedWinProb != null ? (plannedWinProb * 100).toFixed(2) : "-"}% / 想定EV:${plannedEvPct != null ? plannedEvPct.toFixed(2) : "-"}%`
-      : "（投票プランの一致項目なし）";
-
     resultBox.textContent =
-      `記録しました(ID:${data.id})。収益タブにも結果確定待ちで登録しました。${planInfo}`;
+      `記録しました(ID:${data.id})。` +
+      `収益タブにも結果確定待ちで登録しました。` +
+      `想定的中率:${plannedWinProbPct.toFixed(2)}% / ` +
+      `想定EV:${plannedEvPct.toFixed(2)}% / ` +
+      `想定利益:${Math.round(plannedExpectedProfit).toLocaleString()}円`;
 
     await refreshBankrollDisplay();
   } catch (e) {
