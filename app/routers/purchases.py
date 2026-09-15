@@ -4611,6 +4611,143 @@ def list_races_awaiting_result(db: Session = Depends(get_db), limit: int = 30):
 
 
 
+
+@router.get("/diagnostics/threshold-fine-scan")
+def threshold_fine_scan(
+    since: Optional[str] = "calibration_switch",
+    unit_stake: float = 100.0,
+    db: Session = Depends(get_db),
+):
+    """的中率1%刻み・オッズ細分。hits と n*的中率を返す。ROIは参考。"""
+    since_dt = _parse_since_param(since) if since and since != "all" else None
+    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+    purchases = pq.all()
+    sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
+    if since_dt is not None:
+        sq = sq.filter(models.SkippedBet.created_at >= since_dt)
+    skipped = sq.all()
+    race_ids = {p.race_id for p in purchases} | {s.race_id for s in skipped}
+    odds_map = {}
+    if race_ids:
+        for o in db.query(models.Odds).filter(
+            models.Odds.race_id.in_(race_ids), models.Odds.bet_type == "3連単"
+        ).all():
+            odds_map[(o.race_id, o.bet_type, o.combination)] = float(o.odds_value) if o.odds_value else None
+    rows = []
+    for p in purchases:
+        if float(p.stake_amount or 0) <= 0:
+            continue
+        odds = p.odds_at_purchase or odds_map.get((p.race_id, p.bet_type, p.combination))
+        wp, ev = p.win_prob_at_purchase, p.ev_pct_at_purchase
+        rows.append({
+            "wp_pct": float(wp) * 100.0 if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+            "ev": float(ev) if ev is not None else None,
+            "won": p.result == "win",
+            "stake": float(p.stake_amount or 0),
+            "payout": float(p.payout_amount or 0),
+        })
+    for s in skipped:
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        wp = s.win_prob_estimated
+        ev = s.ev_pct_estimated
+        if ev is None and wp is not None and odds:
+            ev = (float(wp) * float(odds) - 1.0) * 100.0
+        won = s.actual_result == "win"
+        stake = float(unit_stake)
+        payout = (stake * float(odds)) if (won and odds) else 0.0
+        rows.append({
+            "wp_pct": float(wp) * 100.0 if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+            "ev": float(ev) if ev is not None else None,
+            "won": won, "stake": stake, "payout": payout,
+        })
+
+    def pack(subset):
+        n = len(subset)
+        hits = sum(1 for r in subset if r["won"])
+        hit_pct = round(100.0 * hits / n, 3) if n else None
+        stake = sum(r["stake"] for r in subset)
+        payout = sum(r["payout"] for r in subset)
+        return {
+            "n": n,
+            "hits": hits,
+            "hit_pct": hit_pct,
+            "n_x_hit_rate": round(n * (hit_pct / 100.0), 2) if hit_pct is not None else None,
+            "roi_pct": round(100.0 * payout / stake, 2) if stake > 0 else None,
+        }
+
+    wp_bins = []
+    for lo in range(5, 16):
+        hi = lo + 1
+        sub = [r for r in rows if r["wp_pct"] is not None and lo <= r["wp_pct"] < hi]
+        wp_bins.append({"band": "%d-%d%%" % (lo, hi), **pack(sub)})
+
+    wp_cum = []
+    for thr in range(5, 16):
+        sub = [r for r in rows if r["wp_pct"] is not None and r["wp_pct"] >= thr]
+        wp_cum.append({"min_pct": thr, **pack(sub)})
+
+    odds_bins = []
+    for lo in range(20, 50):
+        hi = lo + 1
+        sub = [r for r in rows if r["odds"] is not None and lo < r["odds"] <= hi]
+        odds_bins.append({"band": "%d-%d" % (lo, hi), **pack(sub)})
+
+    odds_cum = []
+    for thr in [10, 15, 20, 25, 30, 35, 40, 45, 50]:
+        sub = [r for r in rows if r["odds"] is not None and r["odds"] > thr]
+        odds_cum.append({"min_odds_exclusive": thr, **pack(sub)})
+
+    ev_bins = []
+    sub = [r for r in rows if r["ev"] is not None and r["ev"] < 0]
+    ev_bins.append({"band": "<0", **pack(sub)})
+    for lo in range(0, 500, 50):
+        hi = lo + 50
+        sub = [r for r in rows if r["ev"] is not None and lo <= r["ev"] < hi]
+        ev_bins.append({"band": "%d-%d" % (lo, hi), **pack(sub)})
+
+    ev_cum = []
+    for thr in [0, 50, 100, 150, 200, 250, 300, 350, 400, 500]:
+        sub = [r for r in rows if r["ev"] is not None and r["ev"] >= thr]
+        ev_cum.append({"min_ev": thr, **pack(sub)})
+
+    def jumps(bins):
+        out = []
+        for i in range(1, len(bins)):
+            a, b = bins[i - 1], bins[i]
+            if a.get("hit_pct") is None or b.get("hit_pct") is None:
+                continue
+            if a["n"] < 30 or b["n"] < 30:
+                continue
+            out.append({
+                "from_band": a.get("band"),
+                "to_band": b.get("band"),
+                "hit_pct_delta": round(b["hit_pct"] - a["hit_pct"], 3),
+                "left": {"n": a["n"], "hits": a["hits"], "hit_pct": a["hit_pct"]},
+                "right": {"n": b["n"], "hits": b["hits"], "hit_pct": b["hit_pct"]},
+            })
+        out.sort(key=lambda x: -abs(x["hit_pct_delta"]))
+        return out[:8]
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "total_rows": len(rows),
+        "note": "hits=的中数。n_x_hit_rate=n*hit%/100。ROIは参考。",
+        "win_prob_1pct_bins": wp_bins,
+        "win_prob_cumulative_ge": wp_cum,
+        "odds_1x_bins_20_50": odds_bins,
+        "odds_cumulative_gt": odds_cum,
+        "ev_50pct_bins": ev_bins,
+        "ev_cumulative_ge": ev_cum,
+        "jumps_win_prob_bins": jumps(wp_bins),
+        "jumps_odds_bins": jumps(odds_bins),
+    }
+
+
 @router.get("/diagnostics/threshold-band-scan")
 def threshold_band_scan(
     since: Optional[str] = "calibration_switch",
