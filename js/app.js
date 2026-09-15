@@ -609,8 +609,8 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         race_id: parseInt(raceId),
         bankroll,
         fractional_coefficient: kellyCoef,
-        min_win_prob: minProb,
-        min_ev_pct: minEvPct,
+        min_win_prob: 0.0,
+        min_ev_pct: 0.0,
         // max_race_pctは送らない。サーバー側が証拠金タブに保存された
         // race_cap_pct(資金管理シミュレーションで確認した値)を自動で使う。
         // 画面の手入力欄(既定100%=証拠金全額)と日次パイプラインの固定値(10%)が
