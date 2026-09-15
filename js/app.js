@@ -1227,9 +1227,22 @@ document.getElementById("revManualAddBtn")?.addEventListener(
 
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
-    if (btn.dataset.tab === "tab-revenue") {
+    const tab = btn.dataset.tab;
+    if (!tab) return;
+
+    document.querySelectorAll(".tab-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.tab === tab);
+    });
+
+    document.querySelectorAll(".tab-content").forEach(content => {
+      content.classList.toggle("active", content.id === tab);
+    });
+
+    if (tab === "tab-revenue") {
       loadRevenue();
     }
+
+    _saveUiState();
   });
 });
 
@@ -3232,6 +3245,12 @@ window.addEventListener("beforeunload", _saveUiState);
 
 // 初期表示時に復元。
 _restoreUiState();
+
+// 保存されていたタブが収益の場合も、復元直後にデータをロードする。
+const _restoredActiveTab = document.querySelector(".tab-btn.active")?.dataset?.tab;
+if (_restoredActiveTab === "tab-revenue") {
+  loadRevenue();
+}
 
 // 初回ロード
 setRaceFilterButtons(
