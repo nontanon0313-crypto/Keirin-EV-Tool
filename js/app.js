@@ -218,7 +218,7 @@ function _planLabel(r) {
   // 「予想済み」(AI勝率算出済み)と「投票プランあり」(買い目が実際にある)は別物なので
   // 両方をラベルに出す(のんの指摘により追加)
   if (!r.predicted) return "未予想";
-  return r.has_plan ? `投票プランあり(${r.num_bets}点)` : "予想済み・プランなし";
+  return r.has_plan ? (r.num_bets > 0 ? `投票プランあり(${r.num_bets}点)` : "投票プランあり") : "予想済み・プランなし";
 }
 
 function hideFavoritesPanel() {
@@ -398,7 +398,7 @@ async function loadFavoritesList(force) {
     html += `<table><tr><th>会場</th><th>R</th><th>発走</th><th>車番</th><th>選手</th><th>勝率</th><th>想定期待値</th><th>投票プラン</th></tr>`;
     for (const row of data) {
       const rid = row.race_id;
-      const planLabel = row.has_plan ? `🟢あり(${row.num_bets}点)` : "なし";
+      const planLabel = row.has_plan ? (row.num_bets > 0 ? `🟢あり(${row.num_bets}点)` : "🟢あり") : "なし";
       const planColor = row.has_plan ? "#4ade80" : "#facc15";
       const rowBg = row.has_plan ? "background-color:#052e1b;" : "";
       const evLabel = row.best_ev_pct != null ? row.best_ev_pct + "%" : "-";

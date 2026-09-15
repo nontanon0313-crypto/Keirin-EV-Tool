@@ -9,6 +9,19 @@ from .. import models
 
 router = APIRouter(prefix="/races", tags=["races"])
 
+# 投票プラン表示の判定だけに使用する最低的中率。
+# 実際の購入条件(オッズ・EV等)は変更しない。
+PLAN_DISPLAY_MIN_WIN_PROB = 0.10
+
+def _has_plan_probability(entries):
+    """的中率10%以上の候補が1点以上あれば、投票プランありと表示する。"""
+    return any(
+        e.blended_win_prob is not None
+        and e.blended_win_prob >= PLAN_DISPLAY_MIN_WIN_PROB
+        for e in entries
+    )
+
+
 
 @router.post("/{race_id}/confirm-result")
 def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(get_db)):
@@ -478,6 +491,7 @@ def list_races_today(db: Session = Depends(get_db)):
     for r in races:
         entries = r.entries
         predicted = any(e.blended_win_prob is not None for e in entries)
+        plan_available = _has_plan_probability(entries)
         num_bets = plan_counts.get(r.id, 0)
         result.append({
             "race_id": r.id,
@@ -487,7 +501,7 @@ def list_races_today(db: Session = Depends(get_db)):
             "post_time": r.post_time.strftime("%H:%M") if r.post_time else None,
             "riders_count": len(entries),
             "predicted": predicted,
-            "has_plan": num_bets > 0,
+            "has_plan": plan_available,
             "num_bets": num_bets,
             "actual_result": r.actual_result,
         })
@@ -527,6 +541,7 @@ def list_races_upcoming(within_min: int = 30, overdue_min: int = 5, db: Session 
     for r in races:
         entries = r.entries
         predicted = any(e.blended_win_prob is not None for e in entries)
+        plan_available = _has_plan_probability(entries)
         mins_to_post = int((r.post_time - now).total_seconds() // 60)
         num_bets = plan_counts.get(r.id, 0)
         result.append({
@@ -537,7 +552,7 @@ def list_races_upcoming(within_min: int = 30, overdue_min: int = 5, db: Session 
             "mins_to_post": mins_to_post,
             "riders_count": len(entries),
             "predicted": predicted,
-            "has_plan": num_bets > 0,
+            "has_plan": plan_available,
             "num_bets": num_bets,
         })
     return result
@@ -585,6 +600,7 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
         if race is None:
             continue  # 結果確定済み、または存在しないレースは除外
         num_bets = plan_counts.get(race.id, 0)
+        plan_available = _has_plan_probability(race.entries)
         best_ev = plan_best_ev.get(race.id)
         result.append({
             "race_id": race.id,
@@ -594,7 +610,7 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
             "car_number": e.car_number,
             "player_name": e.player_name,
             "win_prob_pct": round(e.blended_win_prob * 100, 1),
-            "has_plan": num_bets > 0,
+            "has_plan": plan_available,
             "num_bets": num_bets,
             "best_ev_pct": round(best_ev, 1) if best_ev is not None else None,
         })
