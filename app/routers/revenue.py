@@ -515,7 +515,10 @@ def revenue_stats(db: Session = Depends(get_db)):
 @router.get("/equity-curve")
 def equity_curve(db: Session = Depends(get_db)):
     """
-    収益タブ用の実績資産推移。
+    収益タブ用の資産推移。
+    投資額の基準は実投資額(actual_stake)のみとし、
+    想定系列も同じ実投資額を横軸にして、購入時の想定勝率・オッズから
+    想定損益を累積する。
     """
     rows = _iter_sorted(db)
 
@@ -526,9 +529,17 @@ def equity_curve(db: Session = Depends(get_db)):
             "assets": 0.0,
         }
     ]
+    points_planned = [
+        {
+            "cum_stake": 0.0,
+            "cum_pnl": 0.0,
+            "assets": 0.0,
+        }
+    ]
 
     cum_stake = 0.0
     cum_pnl = 0.0
+    cum_expected_pnl = 0.0
 
     for r in rows:
         if (
@@ -547,10 +558,33 @@ def equity_curve(db: Session = Depends(get_db)):
         cum_stake += stake
         cum_pnl += payout - stake
 
-        points_actual.append({
+        if (
+            stake > 0
+            and r.planned_win_prob is not None
+            and r.planned_odds is not None
+        ):
+            cum_expected_pnl += stake * (
+                r.planned_win_prob * r.planned_odds - 1.0
+            )
+
+        point = {
             "cum_stake": round(cum_stake, 0),
             "cum_pnl": round(cum_pnl, 0),
             "assets": round(cum_pnl, 0),
+            "id": r.id,
+            "result": r.actual_result,
+            "label": (
+                f"{r.venue_name or ''} "
+                f"{r.race_number or ''}R "
+                f"{r.bet_type} {r.combination}"
+            ),
+        }
+        points_actual.append(point)
+
+        points_planned.append({
+            "cum_stake": round(cum_stake, 0),
+            "cum_pnl": round(cum_expected_pnl, 0),
+            "assets": round(cum_expected_pnl, 0),
             "id": r.id,
             "result": r.actual_result,
             "label": (
@@ -562,8 +596,10 @@ def equity_curve(db: Session = Depends(get_db)):
 
     return {
         "actual": points_actual,
+        "planned": points_planned,
         "final_actual_pnl": round(cum_pnl, 0),
         "final_actual_stake": round(cum_stake, 0),
+        "final_expected_pnl": round(cum_expected_pnl, 0),
         "final_assets": round(cum_pnl, 0),
     }
 
