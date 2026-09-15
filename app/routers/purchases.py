@@ -4679,16 +4679,17 @@ def threshold_fine_scan(
             "roi_pct": round(100.0 * payout / stake, 2) if stake > 0 else None,
         }
 
-    # 0-3% は 0.5% 刻み、3-10% は 1% 刻み
+    # 0-2% は 0.1% 刻み、2-3% は 0.5%、3%超は 1%
     wp_bins = []
-    edges = [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+    edges = [i / 10.0 for i in range(0, 21)]  # 0 .. 2.0
+    edges += [2.5, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
     for i in range(len(edges) - 1):
         lo, hi = edges[i], edges[i + 1]
         sub = [r for r in rows if r["wp_pct"] is not None and lo <= r["wp_pct"] < hi]
         wp_bins.append({"band": "%g-%g%%" % (lo, hi), **pack(sub)})
 
     wp_cum = []
-    for thr in [0, 0.5, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15]:
+    for thr in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.2, 1.5, 2.0, 2.5, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15]:
         sub = [r for r in rows if r["wp_pct"] is not None and r["wp_pct"] >= thr]
         wp_cum.append({"min_pct": thr, **pack(sub)})
 
