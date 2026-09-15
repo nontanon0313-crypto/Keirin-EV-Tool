@@ -746,7 +746,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 確定済み過去レースは保存済みオッズを使用し、再投票の再現性を維持する。
     if race.actual_result is None:
         try:
-            refresh_odds_now(race_id, db, all_bet_types=True)
+            refresh_odds_now(race_id, db)
             db.refresh(race)
         except Exception as e:
             raise HTTPException(

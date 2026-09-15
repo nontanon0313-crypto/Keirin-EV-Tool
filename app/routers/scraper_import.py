@@ -361,7 +361,6 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
 def refresh_odds_now(
     race_id: int,
     db: Session = Depends(get_db),
-    all_bet_types: bool = False,
 ):
     """
     指定レースのオッズだけをその場でoddspark.comから取り直す(出走表・結果は触らない)。
@@ -392,14 +391,15 @@ def refresh_odds_now(
 
     odds_payload = {}
 
-    # 投票画面からの手動再取得は3連単だけ。
-    # EVプラン生成など内部処理から all_bet_types=True で呼ばれた場合だけ全券種を取得する。
-    if all_bet_types:
-        simple_codes = (5, 6, 7)  # 2車複・2車単・ワイド
-        axis_codes = (8, 9)       # 3連複・3連単
-    else:
-        simple_codes = ()
-        axis_codes = (9,)         # 3連単のみ
+    # 3連単のみ取得する。
+    # 既存DBに残っている他券種オッズも、このレースについて削除する。
+    simple_codes = ()
+    axis_codes = (9,)
+
+    db.query(models.Odds).filter(
+        models.Odds.race_id == race.id,
+        models.Odds.bet_type.in_(("2車複", "2車単", "ワイド", "3連複")),
+    ).delete(synchronize_session=False)
 
     for code in simple_codes:
         name = BET_TYPES[code]
