@@ -1277,7 +1277,27 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
     });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    resultBox.textContent = `記録しました(ID:${data.id})。結果が分かったら別途更新してください。`;
+    // 個別購入記録を収益タブにも結果確定前(pending)で登録する。
+    // PurchaseとLiveBetは別管理のため、購入記録成功後にLiveBetを作成する。
+    const revenueRes = await fetch(apiUrl("/revenue/manual"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        race_id: parseInt(raceId),
+        bet_type: betType,
+        combination,
+        actual_stake: stake,
+        actual_result: "pending",
+        actual_payout: 0,
+        vote_status: "voted",
+      }),
+    });
+    const revenueData = await revenueRes.json();
+    if (!revenueRes.ok) {
+      throw new Error("購入記録は登録されましたが、収益タブへの登録に失敗しました: " + JSON.stringify(revenueData));
+    }
+
+    resultBox.textContent = `記録しました(ID:${data.id})。収益タブにも結果確定待ちで登録しました。`;
     await refreshBankrollDisplay();
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
