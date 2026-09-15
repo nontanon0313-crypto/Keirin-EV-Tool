@@ -1313,46 +1313,123 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
   const combination = document.getElementById("purchaseCombination").value;
   const stake = parseFloat(document.getElementById("purchaseStake").value);
   const resultBox = document.getElementById("purchaseResult");
-
   if (!raceId || !betType || !combination || !stake) {
     alert("すべての項目を入力してください");
     return;
   }
+
+  const planRaceId = parseInt(raceId);
+
+  // 現在表示中の投票プランから、券種＋買い目が一致する1件を取得。
+  // 実際の購入金額を変更しても、想定値は投票プラン側の値を保持する。
+  const planItems = Array.isArray(lastRacePlan)
+    ? lastRacePlan
+    : (Array.isArray(lastRacePlan?.items) ? lastRacePlan.items : []);
+
+  const planItem = planItems.find(it =>
+    String(it.bet_type ?? it.betType ?? "") === String(betType) &&
+    String(it.combination ?? "") === String(combination)
+  ) || null;
+
+  const plannedWinProbRaw =
+    planItem?.win_prob ??
+    planItem?.blended_win_prob ??
+    planItem?.estimated_win_prob ??
+    null;
+
+  const plannedWinProb = plannedWinProbRaw != null
+    ? (Number(plannedWinProbRaw) > 1
+        ? Number(plannedWinProbRaw) / 100
+        : Number(plannedWinProbRaw))
+    : null;
+
+  const plannedOddsRaw =
+    planItem?.odds_value ??
+    planItem?.odds ??
+    planItem?.final_odds ??
+    null;
+
+  const plannedOdds = plannedOddsRaw != null ? Number(plannedOddsRaw) : null;
+
+  const plannedEvPctRaw =
+    planItem?.ev_pct ??
+    planItem?.expected_value_pct ??
+    planItem?.ev ??
+    null;
+
+  const plannedEvPct = plannedEvPctRaw != null
+    ? Number(plannedEvPctRaw)
+    : (
+        plannedWinProb != null && plannedOdds != null
+          ? (plannedWinProb * plannedOdds - 1) * 100
+          : null
+      );
+
+  const plannedStakeRaw =
+    planItem?.stake ??
+    planItem?.bet_amount ??
+    planItem?.amount ??
+    null;
+
+  const plannedStake = plannedStakeRaw != null ? Number(plannedStakeRaw) : null;
+
+  const winProbRaw =
+    planItem?.win_prob_raw ??
+    planItem?.raw_win_prob ??
+    null;
 
   try {
     const res = await fetch(apiUrl("/purchases/"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        race_id: parseInt(raceId),
+        race_id: planRaceId,
         bet_type: betType,
         combination,
         stake_amount: stake,
+        odds_at_purchase: plannedOdds,
+        win_prob_at_purchase: plannedWinProb,
+        win_prob_raw: winProbRaw != null ? Number(winProbRaw) : null,
+        ev_pct_at_purchase: plannedEvPct,
       }),
     });
+
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    // 個別購入記録を収益タブにも結果確定前(pending)で登録する。
-    // PurchaseとLiveBetは別管理のため、購入記録成功後にLiveBetを作成する。
+
     const revenueRes = await fetch(apiUrl("/revenue/manual"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        race_id: parseInt(raceId),
+        race_id: planRaceId,
         bet_type: betType,
         combination,
+        planned_stake: plannedStake,
+        planned_win_prob: plannedWinProb,
+        planned_odds: plannedOdds,
+        planned_ev_pct: plannedEvPct,
         actual_stake: stake,
         actual_result: "pending",
         actual_payout: 0,
         vote_status: "voted",
       }),
     });
+
     const revenueData = await revenueRes.json();
     if (!revenueRes.ok) {
-      throw new Error("購入記録は登録されましたが、収益タブへの登録に失敗しました: " + JSON.stringify(revenueData));
+      throw new Error(
+        "購入記録は登録されましたが、収益タブへの登録に失敗しました: " +
+        JSON.stringify(revenueData)
+      );
     }
 
-    resultBox.textContent = `記録しました(ID:${data.id})。収益タブにも結果確定待ちで登録しました。`;
+    const planInfo = planItem
+      ? ` 想定的中率:${plannedWinProb != null ? (plannedWinProb * 100).toFixed(2) : "-"}% / 想定EV:${plannedEvPct != null ? plannedEvPct.toFixed(2) : "-"}%`
+      : "（投票プランの一致項目なし）";
+
+    resultBox.textContent =
+      `記録しました(ID:${data.id})。収益タブにも結果確定待ちで登録しました。${planInfo}`;
+
     await refreshBankrollDisplay();
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
