@@ -29,14 +29,35 @@ def _race_meta(db: Session, race_id: int) -> dict:
     }
 
 
+def _calc_planned_expected_profit(row: models.LiveBet) -> Optional[float]:
+    """投票済みデータの想定利益は実投資額を基準に算出する。"""
+    actual_stake = row.actual_stake
+    if (
+        row.vote_status == "voted"
+        and actual_stake is not None
+        and actual_stake > 0
+        and row.planned_win_prob is not None
+        and row.planned_odds is not None
+    ):
+        return actual_stake * (row.planned_win_prob * row.planned_odds - 1.0)
+
+    if (
+        row.planned_stake is not None
+        and row.planned_stake > 0
+        and row.planned_win_prob is not None
+        and row.planned_odds is not None
+    ):
+        return row.planned_stake * (row.planned_win_prob * row.planned_odds - 1.0)
+
+    return None
+
+
 def _row_to_dict(row: models.LiveBet) -> dict:
     planned_stake = row.planned_stake or 0.0
     planned_prob = row.planned_win_prob
     planned_odds = row.planned_odds
     planned_ev = row.planned_ev_pct
-    planned_exp = row.planned_expected_profit
-    if planned_exp is None and planned_stake and planned_prob is not None and planned_odds is not None:
-        planned_exp = planned_stake * (planned_prob * planned_odds - 1.0)
+    planned_exp = _calc_planned_expected_profit(row)
 
     actual_stake = row.actual_stake if row.actual_stake is not None else None
     actual_payout = row.actual_payout if row.actual_payout is not None else 0.0
@@ -233,6 +254,15 @@ def update_live_bet(live_bet_id: int, payload: schemas.LiveBetUpdate, db: Sessio
 
     if payload.actual_stake is not None:
         row.actual_stake = payload.actual_stake
+    if (
+        row.actual_stake is not None
+        and row.actual_stake > 0
+        and row.planned_win_prob is not None
+        and row.planned_odds is not None
+    ):
+        row.planned_expected_profit = (
+            row.actual_stake * (row.planned_win_prob * row.planned_odds - 1.0)
+        )
     if payload.actual_result is not None:
         if payload.actual_result not in ("pending", "win", "lose", "not_voted"):
             raise HTTPException(status_code=400, detail="invalid actual_result")
@@ -304,10 +334,9 @@ def revenue_stats(db: Session = Depends(get_db)):
             planned_count += 1
             if r.planned_win_prob is not None:
                 planned_hit_weight += r.planned_win_prob
-            if r.planned_expected_profit is not None:
-                planned_exp_sum += r.planned_expected_profit
-            elif r.planned_stake and r.planned_win_prob is not None and r.planned_odds is not None:
-                planned_exp_sum += r.planned_stake * (r.planned_win_prob * r.planned_odds - 1.0)
+            planned_exp = _calc_planned_expected_profit(r)
+            if planned_exp is not None:
+                planned_exp_sum += planned_exp
 
         if r.vote_status == "not_voted":
             not_voted_count += 1
@@ -385,9 +414,7 @@ def equity_curve(db: Session = Depends(get_db)):
     for r in rows:
         # 想定
         if r.planned_stake is not None and r.planned_stake > 0:
-            exp = r.planned_expected_profit
-            if exp is None and r.planned_win_prob is not None and r.planned_odds is not None:
-                exp = r.planned_stake * (r.planned_win_prob * r.planned_odds - 1.0)
+            exp = _calc_planned_expected_profit(r)
             exp = exp or 0.0
             cum_stake_p += r.planned_stake
             cum_pnl_p += exp
