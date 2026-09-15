@@ -818,12 +818,24 @@ async function loadRevenueStats() {
 
   box.textContent = "集計中...";
   try {
-    const res = await fetch(apiUrl("/revenue/stats"), {cache: "no-store"});
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let res;
+    try {
+      res = await fetch(apiUrl("/revenue/stats"), {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     renderRevenueStats(data);
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = e.name === "AbortError"
+      ? "エラー: 収益集計の取得がタイムアウトしました"
+      : "エラー: " + e.message;
   }
 }
 
@@ -832,7 +844,17 @@ async function loadRevenueCompare() {
   if (!box) return;
 
   try {
-    const res = await fetch(apiUrl("/revenue/stats"), {cache: "no-store"});
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let res;
+    try {
+      res = await fetch(apiUrl("/revenue/stats"), {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
 
@@ -1000,7 +1022,17 @@ function drawRevenueEquity(data) {
 
 async function loadRevenueEquity() {
   try {
-    const res = await fetch(apiUrl("/revenue/equity-curve"), {cache: "no-store"});
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let res;
+    try {
+      res = await fetch(apiUrl("/revenue/equity-curve"), {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     drawRevenueEquity(data);
@@ -1091,7 +1123,17 @@ function renderRevenueList(data) {
 
 async function loadRevenueList() {
   try {
-    const res = await fetch(apiUrl("/revenue/list?limit=1000"), {cache: "no-store"});
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    let res;
+    try {
+      res = await fetch(apiUrl("/revenue/list?limit=1000"), {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     renderRevenueList(data);
@@ -1945,8 +1987,7 @@ function renderBucketTable(title, bucketObj) {
   }
   html += "</table>";
   return html;
-
-  _restoreUiState();}
+}
 
 document.getElementById("loadStatsBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
