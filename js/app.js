@@ -2076,8 +2076,11 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       resultBox.textContent = data.message;
       return;
     }
-    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(実績損益: ${data.overall_profit_total}円 / 100%が損益分岐点。想定回収率(投票した対象のみ): ${data.expected_roi_pct ?? "-"}${data.expected_roi_pct !== null ? "%" : ""}(想定損益: ${data.expected_profit_total ?? "-"}円)・予想回収率(見送り含む全件): ${data.predicted_roi_pct ?? "-"}${data.predicted_roi_pct !== null ? "%" : ""}(予想損益: ${data.predicted_profit_total ?? "-"}円)・いずれも100%が損益分岐点。総ベット数: ${data.total_bets}件)</p>`;
+    let html = `<p><strong>実績収支率: ${data.overall_roi_pct}%</strong>(実績損益: ${data.overall_profit_total}円 / 100%が損益分岐点。想定回収率(投票した対象のみ): ${data.expected_roi_pct ?? "-"}${data.expected_roi_pct !== null ? "%" : ""}(想定損益: ${data.expected_profit_total ?? "-"}円)・予想回収率(見送り含む全件): ${data.predicted_roi_pct ?? "-"}${data.predicted_roi_pct !== null ? "%" : ""}(予想損益: ${data.predicted_profit_total ?? "-"}円)・いずれも100%が損益分岐点。評価対象総数: ${data.total_bets}件)</p>`;
     html += `<p>実的中率: ${data.overall_win_rate_pct ?? "-"}${data.overall_win_rate_pct !== null ? "%" : ""}(想定的中率: ${data.expected_win_rate_pct ?? "-"}${data.expected_win_rate_pct !== null ? "%" : ""}・予想的中率: ${data.predicted_win_rate_pct ?? "-"}${data.predicted_win_rate_pct !== null ? "%" : ""}、AIが購入時点で見積もっていた平均勝率)</p>`;
+    if (data.real_purchase_count != null) {
+      html += `<p class="note">🔎 実的中率の内訳: 実際にお金を賭けた件数=${data.real_purchase_count}件(このうち${data.n_races_with_purchase}レースで購入・1レースあたり平均${data.avg_bets_per_race}買い目)、見送りだが結果だけ記録した評価件数=${data.skipped_eval_count}件(評価対象総数${data.total_bets}件はこの2つの合計です)。実的中率はお金を賭けた${data.real_purchase_count}件だけが分母で、見送り分は混ざっていません。1レースあたり平均買い目数が1から大きく離れている場合は、同一レースへの複数買い目が混ざっている可能性があるので下の「購入履歴一覧」ボタンで1件ずつ確認してください。</p>`;
+    }
     if (data.calibration_significance) {
       const cs = data.calibration_significance;
       const cls = cs.p_value_pct < 5 ? ' style="color:#ef4444;font-weight:bold;"' : (cs.p_value_pct < 20 ? ' style="color:#f59e0b;"' : "");
@@ -2135,6 +2138,33 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     applySimScopeFromStats(data);
     saveSimInputs();
     runRecommendRacePct(true);
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
+document.getElementById("loadPurchaseHistoryBtn").addEventListener("click", async () => {
+  const resultBox = document.getElementById("purchaseHistoryResult");
+  resultBox.textContent = "読み込み中...";
+  try {
+    const res = await fetch(apiUrl("/purchases/history?sort=win_prob_desc"));
+    const data = await res.json();
+    if (!data.count) {
+      resultBox.textContent = "実購入履歴がありません";
+      return;
+    }
+    let html = `<p><strong>購入履歴一覧(実購入のみ)</strong></p>`;
+    html += `<p class="note">実購入件数: ${data.count}件 / 投票したレース数: ${data.n_races}件 / 1レースあたり平均: ${data.avg_bets_per_race}買い目 / このうち的中: ${data.wins}件(${data.win_rate_pct}%)。表の並び順は購入時点の予想勝率が高い順です。</p>`;
+    if (data.multi_bet_race_count > 0) {
+      html += `<p class="note" style="color:#f59e0b;">⚠️ 同一レースに2買い目以上入っているレースが${data.multi_bet_race_count}件あります(下表で同じレースIDが複数回出てくる行を確認してください)。</p>`;
+    }
+    html += `<table><tr><th>レースID</th><th>開催場</th><th>R</th><th>日時</th><th>券種</th><th>買い目</th><th>予想勝率</th><th>オッズ</th><th>結果</th><th>払戻</th></tr>`;
+    for (const it of data.items) {
+      const cls = it.result === "win" ? "ev-positive" : "";
+      html += `<tr class="${cls}"><td>${it.race_id}</td><td>${it.venue_name ?? "-"}</td><td>${it.race_number ?? "-"}</td><td>${it.race_date ? it.race_date.slice(0, 10) : "-"}</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.win_prob_at_purchase_pct ?? "-"}${it.win_prob_at_purchase_pct !== null ? "%" : ""}</td><td>${it.odds_at_purchase ?? "-"}</td><td>${it.result}</td><td>${it.payout_amount ?? 0}円</td></tr>`;
+    }
+    html += `</table>`;
+    resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
   }

@@ -5033,6 +5033,95 @@ def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_sw
     return {**result, "cache_hit": False}
 
 
+@router.get("/history")
+def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "win_prob_desc", db: Session = Depends(get_db)):
+    """
+    実際に購入した(見送りを除く)購入履歴を1件ずつそのまま返す。
+    「集計を表示」の実的中率(買い目単位)が、本当に1票=1結果の的中率になっているか、
+    同一レースに複数買い目が入っていないかを1件ずつ目視で確認するための一覧
+    (のんの指摘により追加)。
+
+    sort: "win_prob_desc"(既定・購入時点の予想勝率が高い順) /
+          "date_desc"(購入日時が新しい順) / "date_asc"(購入日時が古い順)
+    """
+    since = since or "calibration_switch"
+    since_dt = _parse_since_param(since) if since != "all" else None
+
+    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+    purchases = pq.all()
+
+    if not purchases:
+        return {
+            "count": 0, "n_races": 0, "avg_bets_per_race": None,
+            "wins": 0, "win_rate_pct": None, "since": since, "items": [],
+        }
+
+    race_ids = {p.race_id for p in purchases}
+    races_by_id = {
+        r.id: r
+        for r in db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()
+    }
+
+    items = []
+    for p in purchases:
+        r = races_by_id.get(p.race_id)
+        items.append({
+            "race_id": p.race_id,
+            "venue_name": r.venue_name if r else None,
+            "race_number": r.race_number if r else None,
+            "race_date": r.race_date.isoformat() if r and r.race_date else None,
+            "grade": r.grade if r else None,
+            "race_stage": r.race_stage if r else None,
+            "bet_type": p.bet_type,
+            "combination": p.combination,
+            "win_prob_at_purchase_pct": (
+                round(p.win_prob_at_purchase * 100, 2) if p.win_prob_at_purchase is not None else None
+            ),
+            "ev_pct_at_purchase": round(p.ev_pct_at_purchase, 2) if p.ev_pct_at_purchase is not None else None,
+            "stake_amount": p.stake_amount,
+            "odds_at_purchase": p.odds_at_purchase,
+            "payout_amount": p.payout_amount,
+            "result": p.result,
+            "purchased_at": p.purchased_at.isoformat() if p.purchased_at else None,
+        })
+
+    if sort == "date_desc":
+        items.sort(key=lambda x: x["purchased_at"] or "", reverse=True)
+    elif sort == "date_asc":
+        items.sort(key=lambda x: x["purchased_at"] or "")
+    else:
+        items.sort(key=lambda x: (x["win_prob_at_purchase_pct"] is None, -(x["win_prob_at_purchase_pct"] or 0)))
+
+    n_races = len(race_ids)
+    n_bets = len(items)
+    wins = sum(1 for it in items if it["result"] == "win")
+
+    # 同一レースに複数買い目が入っていないかをその場で分かるよう、
+    # レースごとの購入件数も添える(2件以上のレースだけ抽出)。
+    race_bet_counts = {}
+    for it in items:
+        race_bet_counts[it["race_id"]] = race_bet_counts.get(it["race_id"], 0) + 1
+    multi_bet_races = [
+        {"race_id": rid, "bet_count": cnt} for rid, cnt in race_bet_counts.items() if cnt >= 2
+    ]
+    multi_bet_races.sort(key=lambda x: -x["bet_count"])
+
+    return {
+        "count": n_bets,
+        "n_races": n_races,
+        "avg_bets_per_race": round(n_bets / n_races, 2) if n_races else None,
+        "wins": wins,
+        "win_rate_pct": round(wins / n_bets * 100, 1) if n_bets else None,
+        "multi_bet_race_count": len(multi_bet_races),
+        "multi_bet_races": multi_bet_races[:50],
+        "since": since,
+        "sort": sort,
+        "items": items,
+    }
+
+
 def _compute_purchase_stats(db: Session, since_dt=None):
     pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
     if since_dt is not None:
@@ -5083,6 +5172,20 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     total_stake = sum(p.stake_amount for p in purchases_only)
     total_payout = sum(p.payout_amount for p in purchases_only)
     overall_expectancy_pct = ((total_payout - total_stake) / total_stake * 100) if total_stake else 0
+
+    # 2026-09-15追加(のんの指摘により追加): total_bets(=len(purchases))は
+    # 実購入(Purchase)と見送り評価(SkippedBet)を合算した件数であり、
+    # 「実際にお金を賭けた件数」ではない。この2つを混同すると
+    # 「49521件買って8.7%当たった」ように誤読されるため、内訳を分けて返す。
+    # 実的中率(overall_win_rate_pct)自体はstake_amount>0の行だけ、つまり
+    # 実購入(Purchase)のみを分母にしており、見送りは混ざっていない
+    # (見送りはstake_amount=0で登録されるため)。
+    real_purchase_count = len(purchases_only)
+    skipped_eval_count = len(skipped_eval)
+    n_races_with_purchase = len({p.race_id for p in purchases_only})
+    avg_bets_per_race = (
+        round(real_purchase_count / n_races_with_purchase, 2) if n_races_with_purchase else None
+    )
 
     race_ids = {p.race_id for p in purchases}
     races_by_id = {
@@ -5613,6 +5716,17 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         "sim_by_bet_type": sim_by_bet_type,
         "calibration_significance": calibration_significance,
         "total_bets": len(purchases),
+        # 実的中率(overall_win_rate_pct)の分母の内訳(のんの指摘により追加)。
+        # real_purchase_count = 実際にお金を賭けた件数(実的中率の分母そのもの)。
+        # skipped_eval_count = 見送りだが結果だけ後から記録した評価件数
+        # (total_bets = real_purchase_count + skipped_eval_count)。
+        # avg_bets_per_race が1に近ければ「レースごとに単一買い目」の方針通り。
+        # 1より大きく離れている場合、同一レースに複数買い目が入っている(過去の
+        # 多重買い目ポートフォリオ運用時のデータが混ざっている等)ことを示す。
+        "real_purchase_count": real_purchase_count,
+        "skipped_eval_count": skipped_eval_count,
+        "n_races_with_purchase": n_races_with_purchase,
+        "avg_bets_per_race": avg_bets_per_race,
         "best_conditions_ranking": ranking[:10],
         "worst_conditions_ranking": ranking[-10:][::-1] if len(ranking) > 10 else [],
         "by_bet_type": all_buckets["券種別"],
