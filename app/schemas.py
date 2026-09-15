@@ -94,9 +94,9 @@ class RacePlanRequest(BaseModel):
     fractional_coefficient: float = 0.25  # 固定値として運用(通常は変更不要)
     max_bet_pct_per_bet: float = 0.05  # 1点あたりの上限比率
     max_race_pct: Optional[float] = None  # 未指定なら資金管理シミュレーションで確認した値(bankroll_state.race_cap_pct)を自動使用
-    min_win_prob: float = 0.02  # 安定的中の土台: 低確率すぎる穴は既定で薄くする
+    min_win_prob: float = 0.10  # 安定的中の土台: 低確率すぎる穴は既定で薄くする
     min_ev_pct: float = 300.0  # 想定上振れ織り込みの入場下限
-    min_odds: float = 30.0  # 30倍以下は実績割れのため除外
+    min_odds: float = 35.0  # 30倍以下は実績割れのため除外
     prefer_hit_rate: bool = True
     prefer_same_line: bool = False  # 同ライン絡み優先  # True=安定制約つき。1着本命三連単・的中確率優先
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
