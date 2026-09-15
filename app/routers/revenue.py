@@ -53,15 +53,36 @@ def _calc_planned_expected_profit(row: models.LiveBet) -> Optional[float]:
 
 
 def _row_to_dict(row: models.LiveBet) -> dict:
-    planned_stake = row.planned_stake or 0.0
     planned_prob = row.planned_win_prob
     planned_odds = row.planned_odds
     planned_ev = row.planned_ev_pct
-    planned_exp = _calc_planned_expected_profit(row)
 
-    actual_stake = row.actual_stake if row.actual_stake is not None else None
-    actual_payout = row.actual_payout if row.actual_payout is not None else 0.0
+    actual_stake = (
+        row.actual_stake
+        if row.actual_stake is not None
+        else None
+    )
+    actual_payout = (
+        row.actual_payout
+        if row.actual_payout is not None
+        else 0.0
+    )
+
+    expected_profit = None
+
+    if (
+        row.vote_status == "voted"
+        and actual_stake is not None
+        and actual_stake > 0
+        and planned_prob is not None
+        and planned_odds is not None
+    ):
+        expected_profit = actual_stake * (
+            planned_prob * planned_odds - 1.0
+        )
+
     actual_pnl = None
+
     if row.vote_status == "voted" and actual_stake is not None:
         actual_pnl = actual_payout - actual_stake
     elif row.vote_status == "not_voted":
@@ -70,27 +91,50 @@ def _row_to_dict(row: models.LiveBet) -> dict:
     return {
         "id": row.id,
         "race_id": row.race_id,
-        "race_date": row.race_date.isoformat() if row.race_date else None,
+        "race_date": (
+            row.race_date.isoformat()
+            if row.race_date
+            else None
+        ),
         "venue_name": row.venue_name,
         "race_number": row.race_number,
         "bet_type": row.bet_type,
         "combination": row.combination,
-        "planned_stake": planned_stake if row.planned_stake is not None else None,
+        "planned_stake": (
+            row.planned_stake
+            if row.planned_stake is not None
+            else None
+        ),
         "planned_win_prob": planned_prob,
         "planned_odds": planned_odds,
         "planned_ev_pct": planned_ev,
-        "planned_expected_profit": round(planned_exp, 2) if planned_exp is not None else None,
+        "planned_expected_profit": (
+            round(expected_profit, 2)
+            if expected_profit is not None
+            else None
+        ),
         "vote_status": row.vote_status,
         "actual_stake": actual_stake,
         "actual_result": row.actual_result,
         "actual_payout": actual_payout,
-        "actual_pnl": round(actual_pnl, 2) if actual_pnl is not None else None,
+        "actual_pnl": (
+            round(actual_pnl, 2)
+            if actual_pnl is not None
+            else None
+        ),
         "memo": row.memo,
         "source": row.source,
-        "created_at": row.created_at.isoformat() if row.created_at else None,
-        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "created_at": (
+            row.created_at.isoformat()
+            if row.created_at
+            else None
+        ),
+        "updated_at": (
+            row.updated_at.isoformat()
+            if row.updated_at
+            else None
+        ),
     }
-
 
 @router.post("/from-plan")
 def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Depends(get_db)):
@@ -323,139 +367,203 @@ def _iter_sorted(db: Session) -> List[models.LiveBet]:
 
 @router.get("/stats")
 def revenue_stats(db: Session = Depends(get_db)):
-    """実績基準の集計 + 想定との比較。Purchaseは一切参照しない。"""
+    """
+    収益タブの集計。
+    投資額は実投資額を唯一の基準とする。
+    """
     rows = _iter_sorted(db)
 
-    planned_stake_sum = 0.0
-    planned_exp_sum = 0.0
-    planned_hit_weight = 0.0
-    planned_count = 0
+    expected_profit_sum = 0.0
+    expected_hit_prob_sum = 0.0
+    expected_count = 0
 
     actual_stake_sum = 0.0
     actual_payout_sum = 0.0
     actual_pnl_sum = 0.0
+
     voted_count = 0
     hit_count = 0
     not_voted_count = 0
     pending_count = 0
 
     for r in rows:
-        if r.planned_stake is not None:
-            planned_stake_sum += r.planned_stake
-            planned_count += 1
-            if r.planned_win_prob is not None:
-                planned_hit_weight += r.planned_win_prob
-            planned_exp = _calc_planned_expected_profit(r)
-            if planned_exp is not None:
-                planned_exp_sum += planned_exp
-
         if r.vote_status == "not_voted":
             not_voted_count += 1
             continue
+
         if r.vote_status != "voted":
             if r.actual_result == "pending":
                 pending_count += 1
             continue
 
-        stake = r.actual_stake if r.actual_stake is not None else 0.0
-        payout = r.actual_payout if r.actual_payout is not None else 0.0
+        stake = (
+            r.actual_stake
+            if r.actual_stake is not None
+            else 0.0
+        )
+
+        payout = (
+            r.actual_payout
+            if r.actual_payout is not None
+            else 0.0
+        )
+
         actual_stake_sum += stake
         actual_payout_sum += payout
         actual_pnl_sum += payout - stake
         voted_count += 1
+
         if r.actual_result == "win":
             hit_count += 1
         elif r.actual_result == "pending":
             pending_count += 1
 
-    planned_hit_rate = (planned_hit_weight / planned_count * 100) if planned_count else None
-    planned_roi = ((planned_exp_sum / planned_stake_sum) * 100 + 100) if planned_stake_sum > 0 else None
-    actual_hit_rate = (hit_count / voted_count * 100) if voted_count else None
-    actual_roi = (actual_payout_sum / actual_stake_sum * 100) if actual_stake_sum > 0 else None
+        if (
+            stake > 0
+            and r.planned_win_prob is not None
+            and r.planned_odds is not None
+        ):
+            expected_profit_sum += stake * (
+                r.planned_win_prob * r.planned_odds - 1.0
+            )
+            expected_hit_prob_sum += r.planned_win_prob
+            expected_count += 1
 
-    def _diff(a, b):
-        if a is None or b is None:
+    expected_hit_rate = (
+        expected_hit_prob_sum / expected_count * 100.0
+        if expected_count
+        else None
+    )
+
+    expected_roi = (
+        (
+            (actual_stake_sum + expected_profit_sum)
+            / actual_stake_sum
+        ) * 100.0
+        if actual_stake_sum > 0
+        else None
+    )
+
+    actual_hit_rate = (
+        hit_count / voted_count * 100.0
+        if voted_count
+        else None
+    )
+
+    actual_roi = (
+        actual_payout_sum / actual_stake_sum * 100.0
+        if actual_stake_sum > 0
+        else None
+    )
+
+    def _diff(expected, actual):
+        if expected is None or actual is None:
             return None
-        return round(b - a, 2)
+        return round(actual - expected, 2)
 
     return {
         "total_rows": len(rows),
         "planned": {
-            "stake": round(planned_stake_sum, 0),
-            "expected_profit": round(planned_exp_sum, 0),
-            "hit_rate_pct": round(planned_hit_rate, 2) if planned_hit_rate is not None else None,
-            "roi_pct": round(planned_roi, 2) if planned_roi is not None else None,
-            "count": planned_count,
+            "expected_profit": round(expected_profit_sum, 0),
+            "hit_rate_pct": (
+                round(expected_hit_rate, 2)
+                if expected_hit_rate is not None
+                else None
+            ),
+            "roi_pct": (
+                round(expected_roi, 2)
+                if expected_roi is not None
+                else None
+            ),
+            "count": expected_count,
         },
         "actual": {
             "stake": round(actual_stake_sum, 0),
             "payout": round(actual_payout_sum, 0),
             "pnl": round(actual_pnl_sum, 0),
-            "hit_rate_pct": round(actual_hit_rate, 2) if actual_hit_rate is not None else None,
-            "roi_pct": round(actual_roi, 2) if actual_roi is not None else None,
+            "hit_rate_pct": (
+                round(actual_hit_rate, 2)
+                if actual_hit_rate is not None
+                else None
+            ),
+            "roi_pct": (
+                round(actual_roi, 2)
+                if actual_roi is not None
+                else None
+            ),
             "voted_count": voted_count,
             "hit_count": hit_count,
             "not_voted_count": not_voted_count,
             "pending_count": pending_count,
         },
         "diff": {
-            "stake": _diff(planned_stake_sum, actual_stake_sum),
-            "pnl": _diff(planned_exp_sum, actual_pnl_sum),
-            "hit_rate_pct": _diff(planned_hit_rate, actual_hit_rate),
-            "roi_pct": _diff(planned_roi, actual_roi),
+            "pnl": _diff(
+                expected_profit_sum,
+                actual_pnl_sum,
+            ),
+            "hit_rate_pct": _diff(
+                expected_hit_rate,
+                actual_hit_rate,
+            ),
+            "roi_pct": _diff(
+                expected_roi,
+                actual_roi,
+            ),
         },
     }
-
 
 @router.get("/equity-curve")
 def equity_curve(db: Session = Depends(get_db)):
     """
-    横軸=累計投資額、縦軸=累積損益。
-    実績系列と、想定系列(プランの期待利益を累積)を返す。
+    収益タブ用の実績資産推移。
     """
     rows = _iter_sorted(db)
-    points_actual = [{"cum_stake": 0.0, "cum_pnl": 0.0, "assets": 0.0}]
-    points_planned = [{"cum_stake": 0.0, "cum_pnl": 0.0}]
 
-    cum_stake_a = 0.0
-    cum_pnl_a = 0.0
-    cum_stake_p = 0.0
-    cum_pnl_p = 0.0
+    points_actual = [
+        {
+            "cum_stake": 0.0,
+            "cum_pnl": 0.0,
+            "assets": 0.0,
+        }
+    ]
+
+    cum_stake = 0.0
+    cum_pnl = 0.0
 
     for r in rows:
-        # 想定
-        if r.planned_stake is not None and r.planned_stake > 0:
-            exp = _calc_planned_expected_profit(r)
-            exp = exp or 0.0
-            cum_stake_p += r.planned_stake
-            cum_pnl_p += exp
-            points_planned.append({
-                "cum_stake": round(cum_stake_p, 0),
-                "cum_pnl": round(cum_pnl_p, 0),
-                "id": r.id,
-                "label": f"{r.venue_name or ''} {r.race_number or ''}R {r.bet_type} {r.combination}",
-            })
+        if (
+            r.vote_status != "voted"
+            or r.actual_stake is None
+        ):
+            continue
 
-        # 実績(投票したもののみ)
-        if r.vote_status == "voted" and r.actual_stake is not None:
-            stake = r.actual_stake
-            payout = r.actual_payout if r.actual_payout is not None else 0.0
-            # pendingでも投資額は計上(未確定の払戻は0扱い)
-            cum_stake_a += stake
-            cum_pnl_a += payout - stake
-            points_actual.append({
-                "cum_stake": round(cum_stake_a, 0),
-                "cum_pnl": round(cum_pnl_a, 0),
-                "assets": round(cum_pnl_a, 0),
-                "id": r.id,
-                "result": r.actual_result,
-                "label": f"{r.venue_name or ''} {r.race_number or ''}R {r.bet_type} {r.combination}",
-            })
+        stake = r.actual_stake
+        payout = (
+            r.actual_payout
+            if r.actual_payout is not None
+            else 0.0
+        )
+
+        cum_stake += stake
+        cum_pnl += payout - stake
+
+        points_actual.append({
+            "cum_stake": round(cum_stake, 0),
+            "cum_pnl": round(cum_pnl, 0),
+            "assets": round(cum_pnl, 0),
+            "id": r.id,
+            "result": r.actual_result,
+            "label": (
+                f"{r.venue_name or ''} "
+                f"{r.race_number or ''}R "
+                f"{r.bet_type} {r.combination}"
+            ),
+        })
 
     return {
         "actual": points_actual,
-        "planned": points_planned,
-        "final_actual_pnl": round(cum_pnl_a, 0),
-        "final_actual_stake": round(cum_stake_a, 0),
-        "final_assets": round(cum_pnl_a, 0),
+        "final_actual_pnl": round(cum_pnl, 0),
+        "final_actual_stake": round(cum_stake, 0),
+        "final_assets": round(cum_pnl, 0),
     }
+

@@ -803,11 +803,9 @@ function renderRevenueStats(data) {
     `未投票: ${actual.not_voted_count ?? 0}件</p>` +
     `<hr>` +
     `<p><strong>想定</strong></p>` +
-    `<p>想定投資額: ${yen(planned.stake)} / ` +
     `想定利益: ${yen(planned.expected_profit)} / ` +
     `想定回収率: ${pct(planned.roi_pct)}</p>` +
     `<p>想定的中率: ${pct(planned.hit_rate_pct)}</p>` +
-    `<p class="note">実績−想定: 投資額 ${yen(diff.stake)} / ` +
     `損益 ${yen(diff.pnl)} / 的中率 ${pct(diff.hit_rate_pct)} / ` +
     `回収率 ${pct(diff.roi_pct)}</p>`;
 }
