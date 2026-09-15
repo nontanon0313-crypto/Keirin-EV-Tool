@@ -495,7 +495,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
         if getattr(req, "prefer_hit_rate", None) is True:
             effective_min_ev = float(req.min_ev_pct)
         else:
-            effective_min_ev = max(float(getattr(req, "min_ev_pct", 50.0)), 50.0)
+            effective_min_ev = max(float(getattr(req, "min_ev_pct", 0.0)), 0.0)
         is_recommended = (not is_skip) and (ev_pct >= effective_min_ev)
 
         ev_result = models.EvResult(
@@ -568,7 +568,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
 @router.post("/threshold-table/{race_id}")
 def threshold_table(
     race_id: int,
-    min_ev_pct: float = 5.0,
+    min_ev_pct: float = 0.0,
     min_win_prob: float = 0.05,
     limit: int = 15,
     rebate_pct: float = 0.0,
@@ -906,7 +906,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         if getattr(req, "prefer_hit_rate", None) is True:
             effective_min_ev = float(req.min_ev_pct)
         else:
-            effective_min_ev = max(float(getattr(req, "min_ev_pct", 50.0)), 50.0)
+            effective_min_ev = max(float(getattr(req, "min_ev_pct", 0.0)), 0.0)
         gate_reason = None
         if apply_gates:
             # 現行仕様:
