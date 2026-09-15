@@ -358,7 +358,11 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
 
 
 @router.post("/refresh-odds/{race_id}")
-def refresh_odds_now(race_id: int, db: Session = Depends(get_db)):
+def refresh_odds_now(
+    race_id: int,
+    db: Session = Depends(get_db),
+    all_bet_types: bool = False,
+):
     """
     指定レースのオッズだけをその場でoddspark.comから取り直す(出走表・結果は触らない)。
     投票直前に「このレースのオッズだけ今すぐ更新したい」というのんの要望を受けて追加。
@@ -387,18 +391,43 @@ def refresh_odds_now(race_id: int, db: Session = Depends(get_db)):
     n_riders = db.query(models.Entry).filter(models.Entry.race_id == race.id).count() or None
 
     odds_payload = {}
-    for code in (5, 6, 7):  # 2車複・2車単・ワイド(1ページ完結)
+
+    # 投票画面からの手動再取得は3連単だけ。
+    # EVプラン生成など内部処理から all_bet_types=True で呼ばれた場合だけ全券種を取得する。
+    if all_bet_types:
+        simple_codes = (5, 6, 7)  # 2車複・2車単・ワイド
+        axis_codes = (8, 9)       # 3連複・3連単
+    else:
+        simple_codes = ()
+        axis_codes = (9,)         # 3連単のみ
+
+    for code in simple_codes:
         name = BET_TYPES[code]
         try:
-            odds_payload[name] = parse_odds_simple(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
+            odds_payload[name] = parse_odds_simple(
+                jo_code, kaisai_bi, race_no, code, n_riders=n_riders
+            )
         except Exception as e:
-            odds_payload[name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
-    for code in (8, 9):  # 3連複・3連単(軸車番ごと)
+            odds_payload[name] = {
+                "error": str(e),
+                "matrix_count": 0,
+                "matrix": [],
+                "is_complete": False,
+            }
+
+    for code in axis_codes:
         name = BET_TYPES[code]
         try:
-            odds_payload[name] = parse_odds_axis_based(jo_code, kaisai_bi, race_no, code, n_riders=n_riders)
+            odds_payload[name] = parse_odds_axis_based(
+                jo_code, kaisai_bi, race_no, code, n_riders=n_riders
+            )
         except Exception as e:
-            odds_payload[name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
+            odds_payload[name] = {
+                "error": str(e),
+                "matrix_count": 0,
+                "matrix": [],
+                "is_complete": False,
+            }
 
     odds_created = 0
     odds_skipped_bet_types = []
