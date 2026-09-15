@@ -174,9 +174,20 @@ def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(ge
         venue_name = venue_name or meta["venue_name"]
         race_number = race_number if race_number is not None else meta["race_number"]
 
+    # 想定利益は「プラン上の予定投資額」ではなく、
+    # 実際に投票した金額(actual_stake)を基準に算出する。
+    # planned_expected_profit はフロントから送信されても、
+    # サーバー側で実投資額を基準に再計算して整合性を保証する。
     planned_exp = None
-    if payload.planned_stake and payload.planned_win_prob is not None and payload.planned_odds is not None:
-        planned_exp = payload.planned_stake * (payload.planned_win_prob * payload.planned_odds - 1.0)
+    if (
+        payload.actual_stake is not None
+        and payload.actual_stake > 0
+        and payload.planned_win_prob is not None
+        and payload.planned_odds is not None
+    ):
+        planned_exp = payload.actual_stake * (
+            payload.planned_win_prob * payload.planned_odds - 1.0
+        )
 
     row = models.LiveBet(
         race_id=payload.race_id,
