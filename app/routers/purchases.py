@@ -4607,6 +4607,65 @@ def list_races_awaiting_result(db: Session = Depends(get_db), limit: int = 30):
     ]
 
 
+
+
+@router.get("/diagnostics/voted-bets-table")
+def voted_bets_table(
+    since: Optional[str] = "calibration_switch",
+    stake_only: bool = True,
+    db: Session = Depends(get_db),
+):
+    """集計対象Purchaseを的中率・オッズ・期待値で全件並べる。"""
+    since_dt = _parse_since_param(since) if since and since != "all" else None
+    q = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        q = q.filter(models.Purchase.purchased_at >= since_dt)
+    if stake_only:
+        q = q.filter(models.Purchase.stake_amount > 0)
+    rows = q.order_by(models.Purchase.purchased_at.asc()).all()
+    race_ids = {p.race_id for p in rows}
+    races = {
+        r.id: r
+        for r in db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()
+    } if race_ids else {}
+    items = []
+    for p in rows:
+        race = races.get(p.race_id)
+        wp = p.win_prob_at_purchase
+        items.append({
+            "purchase_id": p.id,
+            "race_id": p.race_id,
+            "venue": race.venue_name if race else None,
+            "R": race.race_number if race else None,
+            "bet_type": p.bet_type,
+            "combination": p.combination,
+            "win_prob_pct": round(wp * 100, 2) if wp is not None else None,
+            "odds": p.odds_at_purchase,
+            "ev_pct": p.ev_pct_at_purchase,
+            "stake": p.stake_amount,
+            "result": p.result,
+            "payout": p.payout_amount,
+            "purchased_at": p.purchased_at.isoformat() if p.purchased_at else None,
+        })
+    PASS_MIN_EV, PASS_MIN_ODDS = 300.0, 30.0
+    would_pass, would_fail = [], []
+    for it in items:
+        reasons = []
+        if it["ev_pct"] is None or float(it["ev_pct"]) < PASS_MIN_EV:
+            reasons.append(f"EV<{PASS_MIN_EV}")
+        if it["odds"] is None or float(it["odds"]) <= PASS_MIN_ODDS:
+            reasons.append(f"odds<={PASS_MIN_ODDS}")
+        (would_fail if reasons else would_pass).append({**it, "fail_reasons": reasons} if reasons else it)
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "count": len(items),
+        "would_pass_current_plan": len(would_pass),
+        "would_fail_current_plan": len(would_fail),
+        "items": items,
+        "fail_summary": would_fail[:80],
+    }
+
 @router.get("/")
 def list_purchases(race_id: Optional[int] = None, db: Session = Depends(get_db)):
     q = db.query(models.Purchase)
