@@ -4609,6 +4609,159 @@ def list_races_awaiting_result(db: Session = Depends(get_db), limit: int = 30):
 
 
 
+
+
+@router.get("/diagnostics/threshold-band-scan")
+def threshold_band_scan(
+    since: Optional[str] = "calibration_switch",
+    unit_stake: float = 100.0,
+    db: Session = Depends(get_db),
+):
+    """購入+見送りを的中率・オッズ・EV帯で比較（下限探索用）。"""
+    since_dt = _parse_since_param(since) if since and since != "all" else None
+    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+    purchases = pq.all()
+    sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
+    if since_dt is not None:
+        sq = sq.filter(models.SkippedBet.created_at >= since_dt)
+    skipped = sq.all()
+    race_ids = {p.race_id for p in purchases} | {s.race_id for s in skipped}
+    odds_map = {}
+    if race_ids:
+        for o in db.query(models.Odds).filter(
+            models.Odds.race_id.in_(race_ids), models.Odds.bet_type == "3連単"
+        ).all():
+            odds_map[(o.race_id, o.bet_type, o.combination)] = float(o.odds_value) if o.odds_value else None
+    rows = []
+    for p in purchases:
+        if float(p.stake_amount or 0) <= 0:
+            continue
+        odds = p.odds_at_purchase or odds_map.get((p.race_id, p.bet_type, p.combination))
+        wp, ev = p.win_prob_at_purchase, p.ev_pct_at_purchase
+        rows.append({
+            "src": "purchase",
+            "wp": float(wp) if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+            "ev": float(ev) if ev is not None else None,
+            "won": p.result == "win",
+            "stake": float(p.stake_amount or 0),
+            "payout": float(p.payout_amount or 0),
+        })
+    for s in skipped:
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        wp = s.win_prob_estimated
+        ev = s.ev_pct_estimated
+        if ev is None and wp is not None and odds:
+            ev = (float(wp) * float(odds) - 1.0) * 100.0
+        won = s.actual_result == "win"
+        stake = float(unit_stake)
+        payout = (stake * float(odds)) if (won and odds) else 0.0
+        rows.append({
+            "src": "skipped",
+            "wp": float(wp) if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+            "ev": float(ev) if ev is not None else None,
+            "won": won, "stake": stake, "payout": payout,
+        })
+
+    def summarize(subset):
+        if not subset:
+            return {"n": 0, "wins": 0, "hit_pct": None, "roi_pct": None, "purchase_n": 0, "skipped_n": 0}
+        n = len(subset)
+        wins = sum(1 for r in subset if r["won"])
+        stake = sum(r["stake"] for r in subset)
+        payout = sum(r["payout"] for r in subset)
+        return {
+            "n": n, "wins": wins,
+            "hit_pct": round(100.0 * wins / n, 2),
+            "roi_pct": round(100.0 * payout / stake, 2) if stake > 0 else None,
+            "purchase_n": sum(1 for r in subset if r["src"] == "purchase"),
+            "skipped_n": sum(1 for r in subset if r["src"] == "skipped"),
+        }
+
+    def wp_band(wp):
+        if wp is None: return "不明"
+        pct = wp * 100.0
+        if pct < 2: return "0-2%"
+        if pct < 5: return "2-5%"
+        if pct < 8: return "5-8%"
+        if pct < 10: return "8-10%"
+        if pct < 15: return "10-15%"
+        if pct < 20: return "15-20%"
+        if pct < 30: return "20-30%"
+        return "30%+"
+
+    def odds_band(o):
+        if o is None: return "不明"
+        if o <= 10: return "<=10"
+        if o <= 30: return "10-30"
+        if o <= 50: return "30-50"
+        if o <= 100: return "50-100"
+        if o <= 300: return "100-300"
+        if o <= 1000: return "300-1000"
+        return "1000+"
+
+    def ev_band(e):
+        if e is None: return "不明"
+        if e < 0: return "<0"
+        if e < 50: return "0-50"
+        if e < 100: return "50-100"
+        if e < 200: return "100-200"
+        if e < 300: return "200-300"
+        if e < 500: return "300-500"
+        if e < 1000: return "500-1000"
+        if e < 3000: return "1000-3000"
+        return "3000+"
+
+    from collections import defaultdict
+    by_wp, by_odds, by_ev = defaultdict(list), defaultdict(list), defaultdict(list)
+    for r in rows:
+        by_wp[wp_band(r["wp"])].append(r)
+        by_odds[odds_band(r["odds"])].append(r)
+        by_ev[ev_band(r["ev"])].append(r)
+    wp_order = ["0-2%","2-5%","5-8%","8-10%","10-15%","15-20%","20-30%","30%+","不明"]
+    odds_order = ["<=10","10-30","30-50","50-100","100-300","300-1000","1000+","不明"]
+    ev_order = ["<0","0-50","50-100","100-200","200-300","300-500","500-1000","1000-3000","3000+","不明"]
+
+    def sweep_wp():
+        out = []
+        for thr in [0, 2, 5, 8, 10, 12, 15, 20]:
+            sub = [r for r in rows if r["wp"] is not None and r["wp"] * 100.0 >= thr]
+            out.append({"min_win_prob_pct": thr, **summarize(sub)})
+        return out
+
+    def sweep_odds():
+        out = []
+        for thr in [0, 10, 30, 50, 100, 200, 300]:
+            sub = [r for r in rows if r["odds"] is not None and r["odds"] > thr]
+            out.append({"min_odds_exclusive": thr, **summarize(sub)})
+        return out
+
+    def sweep_ev():
+        out = []
+        for thr in [0, 50, 100, 200, 300, 500, 1000, 2000]:
+            sub = [r for r in rows if r["ev"] is not None and r["ev"] >= thr]
+            out.append({"min_ev_pct": thr, **summarize(sub)})
+        return out
+
+    return {
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "unit_stake_for_skipped": unit_stake,
+        "total_rows": len(rows),
+        "purchase_rows": sum(1 for r in rows if r["src"] == "purchase"),
+        "skipped_rows": sum(1 for r in rows if r["src"] == "skipped"),
+        "overall": summarize(rows),
+        "by_win_prob_band": {k: summarize(by_wp[k]) for k in wp_order if k in by_wp},
+        "by_odds_band": {k: summarize(by_odds[k]) for k in odds_order if k in by_odds},
+        "by_ev_band": {k: summarize(by_ev[k]) for k in ev_order if k in by_ev},
+        "sweep_min_win_prob": sweep_wp(),
+        "sweep_min_odds": sweep_odds(),
+        "sweep_min_ev": sweep_ev(),
+    }
+
 @router.get("/diagnostics/voted-bets-table")
 def voted_bets_table(
     since: Optional[str] = "calibration_switch",
