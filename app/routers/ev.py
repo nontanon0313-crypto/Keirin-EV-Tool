@@ -1268,11 +1268,17 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "prediction_accuracy_pct": c["prediction_accuracy_pct"],
         })
 
+    max_items_lim = int(req.max_items) if req.max_items and req.max_items > 0 else None
     # ポートフォリオ選択で採用されなかった買い示唆は、検証用に見送りとして残す。
     for c in candidates:
         key = (c["bet_type"], c["combination"])
         if key not in selected_keys:
-            skipped_for_verification.append((c, "ポートフォリオ最適化で選外"))
+            reasons_s = []
+            if float(c.get("raw_stake") or 0) <= 0:
+                reasons_s.append("最低投票額未満")
+            else:
+                reasons_s.append("レース予算または優先順位で選外")
+            skipped_for_verification.append((c, " / ".join(reasons_s)))
 
     excluded_by_budget_count = max(0, prepared_count - len(selected) - excluded_by_garami_count)
     excluded_by_min_stake_count = len(candidates) - prepared_count
@@ -1320,20 +1326,41 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         key = (c["bet_type"], c["combination"])
         if key in selected_keys:
             continue
-        reason = "ポートフォリオで未採用"
-        if c.get("raw_stake") is None or c.get("raw_stake", 0) <= 0:
-            reason = "最低投票額未満の可能性"
+        wp = float(c.get("win_prob") or 0)
+        odds = float(c.get("odds_value") or 0)
+        ev = float(c.get("ev_pct") or 0)
+        min_odds = float(getattr(req, "min_odds", 0) or 0)
+        reasons = []
+        if wp < float(req.min_win_prob):
+            reasons.append("的中率下限未満(%.2f%%<%.0f%%)" % (wp*100, float(req.min_win_prob)*100))
+        if min_odds > 0 and odds <= min_odds:
+            reasons.append("オッズ下限以下(%.1f<=%.0f)" % (odds, min_odds))
+        if ev < float(req.min_ev_pct):
+            reasons.append("EV下限未満(%.1f<%.0f)" % (ev, float(req.min_ev_pct)))
+        if float(c.get("raw_stake") or 0) <= 0:
+            reasons.append("最低投票額未満(ケリー計算後0円)")
+        elif max_items_lim is not None and len(selected_keys) >= max_items_lim:
+            reasons.append("max_items上限(%s)で選外" % max_items_lim)
+        elif excluded_by_garami_count > 0 and req.avoid_garami:
+            reasons.append("ガミり回避または予算制約で選外")
+        else:
+            reasons.append("レース予算・優先順位で選外")
         preview_candidates.append({
             "bet_type": c["bet_type"],
             "combination": c["combination"],
             "estimated_win_prob_pct": c.get("estimated_win_prob_pct"),
             "odds_value": c.get("odds_value"),
             "ev_pct": c.get("ev_pct"),
-            "reason": reason,
+            "reason": " / ".join(reasons) if reasons else "選外",
         })
 
-    if not items and preview_candidates:
-        msg_extra = f"（EVプラス候補は{len(candidates)}件あるが、予算・ガミり・最低単位で0件になった）"
+    if not items and candidates:
+        msg_extra = (
+            "（候補%s件・最低単位落ち%s・ガミり除外%s・予算関連%s・採用0。reason参照）"
+            % (len(candidates), excluded_by_min_stake_count, excluded_by_garami_count, excluded_by_budget_count)
+        )
+    elif not items:
+        msg_extra = "（フィルタ後の候補0件。的中率・オッズ・EV下限を確認）"
     else:
         msg_extra = None
 

@@ -9,17 +9,31 @@ from .. import models
 
 router = APIRouter(prefix="/races", tags=["races"])
 
-# 投票プラン表示の判定だけに使用する最低的中率。
-# 実際の購入条件(オッズ・EV等)は変更しない。
-PLAN_DISPLAY_MIN_WIN_PROB = 0.10
+# 本命一覧の「プランあり」は Purchase(stake>0) の有無で判定する。
 
-def _has_plan_probability(entries):
-    """的中率10%以上の候補が1点以上あれば、投票プランありと表示する。"""
-    return any(
-        e.blended_win_prob is not None
-        and e.blended_win_prob >= PLAN_DISPLAY_MIN_WIN_PROB
-        for e in entries
-    )
+def _max_trifecta_stats(race):
+    """三連単のモデル的中率の最大値とその買い目。本命一覧ソート用。"""
+    from .ev import _build_win_probs, _line_map_from_race, _estimate_prob
+    import itertools
+    entries = list(race.entries or [])
+    if len(entries) < 3:
+        return None, None, None
+    win_probs = _build_win_probs(entries)
+    if not win_probs or sum(win_probs.values()) <= 0:
+        return None, None, None
+    line_map, line_boost = _line_map_from_race(race)
+    cars = sorted(win_probs.keys())
+    best_p, best_combo = 0.0, None
+    for o in itertools.permutations(cars, 3):
+        p = _estimate_prob(win_probs, "3連単", o, line_map=line_map, line_boost=line_boost)
+        if p is not None and p > best_p:
+            best_p = float(p)
+            best_combo = "-".join(str(c) for c in o)
+    if best_combo is None:
+        return None, None, None
+    return best_p, best_combo, int(best_combo.split("-")[0])
+
+
 
 
 
@@ -491,7 +505,7 @@ def list_races_today(db: Session = Depends(get_db)):
     for r in races:
         entries = r.entries
         predicted = any(e.blended_win_prob is not None for e in entries)
-        plan_available = _has_plan_probability(entries)
+        plan_available = plan_counts.get(r.id, 0) > 0
         num_bets = plan_counts.get(r.id, 0)
         result.append({
             "race_id": r.id,
@@ -541,7 +555,7 @@ def list_races_upcoming(within_min: int = 30, overdue_min: int = 5, db: Session 
     for r in races:
         entries = r.entries
         predicted = any(e.blended_win_prob is not None for e in entries)
-        plan_available = _has_plan_probability(entries)
+        plan_available = plan_counts.get(r.id, 0) > 0
         mins_to_post = int((r.post_time - now).total_seconds() // 60)
         num_bets = plan_counts.get(r.id, 0)
         result.append({
@@ -560,7 +574,7 @@ def list_races_upcoming(within_min: int = 30, overdue_min: int = 5, db: Session 
 
 @router.get("/favorites")
 def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db)):
-    """本日(JST)かつ未確定の予想済みレースから本命候補を勝率降順で返す。"""
+    """本日未確定レースの本命を三連単最大的中率の降順で返す。"""
     now = _jst_now_naive()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
@@ -571,9 +585,10 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
         .all()
     )
     race_ids = {e.race_id for e in entries}
+    from sqlalchemy.orm import joinedload
     races_by_id = {
         r.id: r
-        for r in db.query(models.Race).filter(
+        for r in db.query(models.Race).options(joinedload(models.Race.entries)).filter(
             models.Race.id.in_(race_ids),
             models.Race.actual_result.is_(None),
             models.Race.race_date >= today_start,
@@ -582,25 +597,22 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
     } if race_ids else {}
     plan_counts = _plan_bet_counts_by_race(db, list(races_by_id.keys()))
     plan_best_ev = _plan_best_ev_by_race(db, list(races_by_id.keys()))
-
-    # レースごとに最も勝率の高い選手1名だけを「本命」として残す
-    # (以前はしきい値を超えた選手を全員リストに入れており、1レースに
-    # 複数の候補がいると同じレースが重複して表示されるバグがあった。のん指摘)
-    best_entry_by_race = {}
-    for e in entries:
-        if e.race_id not in races_by_id:
-            continue
-        current_best = best_entry_by_race.get(e.race_id)
-        if current_best is None or (e.blended_win_prob or 0) > (current_best.blended_win_prob or 0):
-            best_entry_by_race[e.race_id] = e
-
+    entry_by_race_car = {(e.race_id, e.car_number): e for e in entries}
+    candidate_race_ids = {e.race_id for e in entries if e.race_id in races_by_id}
     result = []
-    for race_id, e in best_entry_by_race.items():
+    for race_id in candidate_race_ids:
         race = races_by_id.get(race_id)
         if race is None:
-            continue  # 結果確定済み、または存在しないレースは除外
+            continue
+        max_p, best_combo, top_car = _max_trifecta_stats(race)
+        if max_p is None or top_car is None:
+            continue
+        e = entry_by_race_car.get((race_id, top_car))
+        if e is None:
+            e = next((x for x in (race.entries or []) if x.car_number == top_car), None)
+        if e is None:
+            continue
         num_bets = plan_counts.get(race.id, 0)
-        plan_available = _has_plan_probability(race.entries)
         best_ev = plan_best_ev.get(race.id)
         result.append({
             "race_id": race.id,
@@ -609,13 +621,17 @@ def list_race_favorites(min_win_prob: float = 0.25, db: Session = Depends(get_db
             "post_time": race.post_time.strftime("%H:%M") if race.post_time else None,
             "car_number": e.car_number,
             "player_name": e.player_name,
-            "win_prob_pct": round(e.blended_win_prob * 100, 1),
-            "has_plan": plan_available,
+            "win_prob_pct": round(max_p * 100, 2),
+            "trifecta_max_prob_pct": round(max_p * 100, 2),
+            "trifecta_best_combo": best_combo,
+            "first_place_win_prob_pct": round(float(e.blended_win_prob or 0) * 100, 1),
+            "has_plan": num_bets > 0,
             "num_bets": num_bets,
             "best_ev_pct": round(best_ev, 1) if best_ev is not None else None,
         })
     result.sort(key=lambda x: -x["win_prob_pct"])
     return result
+
 
 @router.get("/skipped-bet-counts")
 def skipped_bet_counts(db: Session = Depends(get_db)):
