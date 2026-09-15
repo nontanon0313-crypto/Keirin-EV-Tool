@@ -1365,10 +1365,9 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
     return;
   }
 
-  // 想定利益は「投票プランの想定投資額」に対する値。
-  // 実際の投資額を変更しても、プランの想定値は変えない。
+  // 想定利益は購入記録で入力した実投資額を基準に計算する。
   const plannedExpectedProfit =
-    plannedStake * (plannedWinProb * plannedOdds - 1);
+    stake * (plannedWinProb * plannedOdds - 1);
 
   const winProbRaw = planItem.win_prob_raw != null
     ? Number(planItem.win_prob_raw)
