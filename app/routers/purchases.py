@@ -5079,12 +5079,11 @@ def threshold_policy_scan(
     def band_odds(o):
         if o is None: return "不明"
         if o < 0: o = 0.0
-        if o < 30:
+        if o < 30: return "<30"
+        if o < 100:
             lo = math.floor(o)
             hi = lo + 1
             return f"{lo}-{hi}"
-        if o < 50: return "30-50"
-        if o < 100: return "50-100"
         if o < 300: return "100-300"
         if o < 1000: return "300-1000"
         return "1000+"
@@ -5105,7 +5104,7 @@ def threshold_policy_scan(
         by_ev[band_ev(r["ev"])].append(r)
 
     wp_order = [f"{i/10:.1f}-{(i+1)/10:.1f}%" for i in range(20)] + ["2-3%","3-5%","5-8%","8-10%","10-15%","15%+","不明"]
-    odds_order = [f"{i}-{i+1}" for i in range(30)] + ["30-50","50-100","100-300","300-1000","1000+","不明"]
+    odds_order = ["<30"] + [f"{i}-{i+1}" for i in range(30, 100)] + ["100-300","300-1000","1000+","不明"]
     ev_order = ["<0","0-100","100-300","300-500","500-1000","1000+","不明"]
 
     # 累積スイープ（この値以上だけ買う）
@@ -5130,7 +5129,7 @@ def threshold_policy_scan(
             out.append({"下限EV%": thr, **pack(sub)})
         return out
 
-    # 4) 1レースあたり予想的中率上位K件だけ買った場合
+    # 4) 1レースあたりEV(予想的中率×オッズで期待できる回収)上位K件だけ買った場合
     by_race = defaultdict(list)
     for r in rows:
         by_race[r["race_id"]].append(r)
@@ -5141,8 +5140,8 @@ def threshold_policy_scan(
         race_n = 0
         for rid, lst in by_race.items():
             ranked = sorted(
-                [x for x in lst if x["wp_pct"] is not None],
-                key=lambda x: -x["wp_pct"],
+                [x for x in lst if x["ev"] is not None],
+                key=lambda x: -x["ev"],
             )[:k]
             if not ranked:
                 continue

@@ -2210,7 +2210,7 @@ async function loadThresholdPolicyScan(sections) {
       html += tableFromArr("3. 下限スイープ（EV≥）", d["3_下限スイープ_EV"], "下限EV%");
     }
     if (show("topk")) {
-      html += tableFromArr("4. 1レースあたり予想的中率上位K件", d["4_1レース上位K件"], "上位K");
+      html += tableFromArr("4. 1レースあたりEV上位K件(予想的中率×オッズ基準)", d["4_1レース上位K件"], "上位K");
     }
     resultBox.innerHTML = html;
   } catch (e) {
