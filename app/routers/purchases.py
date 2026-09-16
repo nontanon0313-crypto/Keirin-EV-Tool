@@ -5067,6 +5067,12 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
     items = []
     for p in purchases:
         r = races_by_id.get(p.race_id)
+        bucket_name, bucket_mid = (
+            calc.get_prob_bucket(p.win_prob_at_purchase) if p.win_prob_at_purchase is not None else (None, None)
+        )
+        calibration_multiplier = None
+        if p.win_prob_raw is not None and p.win_prob_raw > 0 and p.win_prob_at_purchase is not None:
+            calibration_multiplier = round(p.win_prob_at_purchase / p.win_prob_raw, 2)
         items.append({
             "race_id": p.race_id,
             "venue_name": r.venue_name if r else None,
@@ -5079,6 +5085,13 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
             "win_prob_at_purchase_pct": (
                 round(p.win_prob_at_purchase * 100, 2) if p.win_prob_at_purchase is not None else None
             ),
+            # 補正前(モデルの生推定値)。補正後との差が大きいほど、
+            # キャリブレーション係数(0.3〜3.0倍)の影響を強く受けていることを示す。
+            "win_prob_raw_pct": (
+                round(p.win_prob_raw * 100, 2) if p.win_prob_raw is not None else None
+            ),
+            "calibration_multiplier": calibration_multiplier,
+            "prob_bucket": bucket_name,
             "ev_pct_at_purchase": round(p.ev_pct_at_purchase, 2) if p.ev_pct_at_purchase is not None else None,
             "stake_amount": p.stake_amount,
             "odds_at_purchase": p.odds_at_purchase,
@@ -5086,6 +5099,30 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
             "result": p.result,
             "purchased_at": p.purchased_at.isoformat() if p.purchased_at else None,
         })
+
+    # 「予想勝率○%」が実際に信頼できる数字か1件ずつ判断できるよう、
+    # 同じ勝率帯(prob_bucket)に属する実購入だけを集めた実的中率を併記する
+    # (のんの指摘により追加: 個別の予想勝率が、その勝率帯全体の実績と
+    # 一致しているかをその場で確認できるようにする)。
+    bucket_agg = {}
+    for it in items:
+        if it["prob_bucket"] is None:
+            continue
+        b = bucket_agg.setdefault(it["prob_bucket"], {"count": 0, "wins": 0, "prob_sum": 0.0})
+        b["count"] += 1
+        if it["result"] == "win":
+            b["wins"] += 1
+        b["prob_sum"] += (it["win_prob_at_purchase_pct"] or 0)
+    for it in items:
+        b = bucket_agg.get(it["prob_bucket"])
+        if b and b["count"] > 0:
+            it["bucket_n"] = b["count"]
+            it["bucket_actual_win_rate_pct"] = round(b["wins"] / b["count"] * 100, 1)
+            it["bucket_predicted_avg_pct"] = round(b["prob_sum"] / b["count"], 1)
+        else:
+            it["bucket_n"] = None
+            it["bucket_actual_win_rate_pct"] = None
+            it["bucket_predicted_avg_pct"] = None
 
     if sort == "date_desc":
         items.sort(key=lambda x: x["purchased_at"] or "", reverse=True)
