@@ -2175,24 +2175,24 @@ async function loadThresholdPolicyScan(sections) {
     const fmt = (v) => (v === null || v === undefined) ? "-" : v;
     const show = (key) => !sections || sections.includes("all") || sections.includes(key);
 
-    let html = `<p><strong>閾値政策集計</strong>（対象=\( {fmt(d.scope)} / since= \){fmt(d.since_resolved)}）</p>`;
+    let html = `<p><strong>閾値政策集計</strong>（対象=${fmt(d.scope)} / since=${fmt(d.since_resolved)}）</p>`;
     html += `<p class="note">${fmt(d.note)}</p>`;
     const c = d["件数"] || {};
     const o = d["全体"] || {};
-    html += `<p>件数: 合計\( {fmt(c["合計"])} / 実投票 \){fmt(c["実投票"])} / 見送り\( {fmt(c["見送り"])} / レース \){fmt(c["レース数"])}</p>`;
-    html += `<p>全体: n=\( {fmt(o.n)} hits= \){fmt(o.hits)} 実績的中率=\( {fmt(o["実績的中率%"])}% 予想的中率平均= \){fmt(o["予想的中率平均%"])}% ROI=\( {fmt(o["ROI%"])}% 平均EV= \){fmt(o["平均EV%"])}%</p>`;
+    html += `<p>件数: 合計${fmt(c["合計"])} / 実投票${fmt(c["実投票"])} / 見送り${fmt(c["見送り"])} / レース${fmt(c["レース数"])}</p>`;
+    html += `<p>全体: n=${fmt(o.n)} hits=${fmt(o.hits)} 実績的中率=${fmt(o["実績的中率%"])}% 予想的中率平均=${fmt(o["予想的中率平均%"])}% ROI=${fmt(o["ROI%"])}% 平均EV=${fmt(o["平均EV%"])}%</p>`;
 
     const tableFromObj = (title, obj, keyLabel) => {
-      let h = `<h3>\( {title}</h3><table><tr><th> \){keyLabel}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
+      let h = `<h3>${title}</h3><table><tr><th>${keyLabel}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
       for (const [k, v] of Object.entries(obj || {})) {
-        h += `<tr><td>\( {k}</td><td> \){fmt(v.n)}</td><td>\( {fmt(v.hits)}</td><td> \){fmt(v["実績的中率%"])}</td><td>\( {fmt(v["予想的中率平均%"])}</td><td> \){fmt(v["的中率比_実績÷予想"])}</td><td>\( {fmt(v["ROI%"])}</td><td> \){fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
+        h += `<tr><td>${k}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
       }
       return h + `</table>`;
     };
     const tableFromArr = (title, arr, keyField) => {
-      let h = `<h3>\( {title}</h3><table><tr><th> \){keyField}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th><th>レース的中率%</th></tr>`;
+      let h = `<h3>${title}</h3><table><tr><th>${keyField}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th><th>レース的中率%</th></tr>`;
       for (const v of arr || []) {
-        h += `<tr><td>\( {fmt(v[keyField] ?? v["上位K"])}</td><td> \){fmt(v.n)}</td><td>\( {fmt(v.hits)}</td><td> \){fmt(v["実績的中率%"])}</td><td>\( {fmt(v["予想的中率平均%"])}</td><td> \){fmt(v["的中率比_実績÷予想"])}</td><td>\( {fmt(v["ROI%"])}</td><td> \){fmt(v["平均EV%"])}</td><td>\( {fmt(v["平均オッズ"])}</td><td> \){fmt(v["レース的中率%"])}</td></tr>`;
+        h += `<tr><td>${fmt(v[keyField] ?? v["上位K"])}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td><td>${fmt(v["レース的中率%"])}</td></tr>`;
       }
       return h + `</table>`;
     };
