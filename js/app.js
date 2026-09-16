@@ -1692,9 +1692,24 @@ function setupCopyDownload(resultBoxId, copyBtnId, downloadBtnId, filenamePrefix
   const box = document.getElementById(resultBoxId);
   const copyBtn = document.getElementById(copyBtnId);
   const downloadBtn = document.getElementById(downloadBtnId);
+  const collectText = () => {
+    // 実績検証パネルは statsResult と purchaseHistoryResult の両方に出すため、
+    // 表示中の内容をまとめてコピーする
+    const ids = [resultBoxId, "purchaseHistoryResult", "statsResult"];
+    const seen = new Set();
+    const parts = [];
+    for (const id of ids) {
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const el = document.getElementById(id);
+      const t = (el && (el.innerText || el.textContent) || "").trim();
+      if (t) parts.push(t);
+    }
+    return parts.join("\n\n");
+  };
   if (copyBtn) {
     copyBtn.addEventListener("click", async () => {
-      const text = (box && (box.innerText || box.textContent)) || "";
+      const text = collectText();
       if (!text.trim()) { alert("コピーする内容がまだありません。先に結果を表示してください。"); return; }
       try {
         await navigator.clipboard.writeText(text);
@@ -1708,7 +1723,7 @@ function setupCopyDownload(resultBoxId, copyBtnId, downloadBtnId, filenamePrefix
   }
   if (downloadBtn) {
     downloadBtn.addEventListener("click", () => {
-      const text = (box && (box.innerText || box.textContent)) || "";
+      const text = typeof collectText === "function" ? collectText() : ((box && (box.innerText || box.textContent)) || "");
       if (!text.trim()) { alert("保存する内容がまだありません。先に結果を表示してください。"); return; }
       const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
@@ -2162,7 +2177,7 @@ document.getElementById("loadPurchaseHistoryBtn").addEventListener("click", asyn
     html += `<table><tr><th>レースID</th><th>券種</th><th>買い目</th><th>予想勝率</th><th>勝率帯</th><th>オッズ</th><th>市場確率</th><th>払戻</th></tr>`;
     for (const it of data.items) {
       const cls = it.result === "win" ? "ev-positive" : "";
-      html += `<tr class="\( {cls}"><td> \){it.race_id}</td><td>\( {it.bet_type}</td><td> \){it.combination}</td><td>\( {it.win_prob_at_purchase_pct ?? "-"} \){it.win_prob_at_purchase_pct !== null ? "%" : ""}</td><td>\( {it.prob_bucket ?? "-"}</td><td> \){it.odds_at_purchase ?? "-"}</td><td>\( {it.market_prob_pct ?? "-"} \){it.market_prob_pct !== null ? "%" : ""}</td><td>${it.payout_amount ?? 0}円</td></tr>`;
+      html += `<tr class="${cls}"><td>${it.race_id}</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.win_prob_at_purchase_pct ?? "-"}${it.win_prob_at_purchase_pct !== null ? "%" : ""}</td><td>${it.prob_bucket ?? "-"}</td><td>${it.odds_at_purchase ?? "-"}</td><td>${it.market_prob_pct ?? "-"}${it.market_prob_pct !== null ? "%" : ""}</td><td>${it.payout_amount ?? 0}円</td></tr>`;
     }
     html += `</table>`;
     resultBox.innerHTML = html;
