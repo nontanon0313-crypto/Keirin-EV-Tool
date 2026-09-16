@@ -4951,6 +4951,228 @@ def threshold_band_scan(
         "sweep_min_ev": sweep_ev(),
     }
 
+
+
+@router.get("/diagnostics/threshold-policy-scan")
+def threshold_policy_scan(
+    since: Optional[str] = "calibration_switch",
+    scope: str = "all",
+    unit_stake: float = 100.0,
+    db: Session = Depends(get_db),
+):
+    """
+    除外(見送り)を含む閾値・点数政策の集計。
+    scope: all | purchase | skipped
+    1) 予想的中率帯  2) オッズ帯  3) EV帯  4) 1レースあたり上位K件
+    文言は「的中率」(勝率は使わない)。投票プランの的中率と同じく買い目1本の確率を使う。
+    """
+    from collections import defaultdict
+
+    scope = (scope or "all").strip().lower()
+    if scope not in ("all", "purchase", "skipped"):
+        raise HTTPException(400, "scope は all / purchase / skipped のいずれか")
+
+    since_dt = _parse_since_param(since) if since and since != "all" else None
+
+    purchases = []
+    if scope in ("all", "purchase"):
+        pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+        if since_dt is not None:
+            pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+        purchases = [p for p in pq.all() if float(p.stake_amount or 0) > 0]
+
+    skipped = []
+    if scope in ("all", "skipped"):
+        sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
+        if since_dt is not None:
+            sq = sq.filter(models.SkippedBet.created_at >= since_dt)
+        skipped = sq.all()
+
+    race_ids = {p.race_id for p in purchases} | {s.race_id for s in skipped}
+    odds_map = {}
+    if race_ids:
+        for o in db.query(models.Odds).filter(
+            models.Odds.race_id.in_(race_ids), models.Odds.bet_type == "3連単"
+        ).all():
+            if o.odds_value:
+                odds_map[(o.race_id, o.bet_type, o.combination)] = float(o.odds_value)
+
+    rows = []
+    for p in purchases:
+        if (p.bet_type or "") != "3連単":
+            continue
+        odds = p.odds_at_purchase or odds_map.get((p.race_id, p.bet_type, p.combination))
+        wp = p.win_prob_at_purchase
+        ev = p.ev_pct_at_purchase
+        if ev is None and wp is not None and odds:
+            ev = (float(wp) * float(odds) - 1.0) * 100.0
+        rows.append({
+            "src": "purchase",
+            "race_id": p.race_id,
+            "wp_pct": float(wp) * 100.0 if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+            "ev": float(ev) if ev is not None else None,
+            "won": p.result == "win",
+            "stake": float(p.stake_amount or 0),
+            "payout": float(p.payout_amount or 0),
+        })
+    for s in skipped:
+        if (s.bet_type or "") != "3連単":
+            continue
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        wp = s.win_prob_estimated
+        ev = s.ev_pct_estimated
+        if ev is None and wp is not None and odds:
+            ev = (float(wp) * float(odds) - 1.0) * 100.0
+        won = s.actual_result == "win"
+        stake = float(unit_stake)
+        payout = (stake * float(odds)) if (won and odds) else 0.0
+        rows.append({
+            "src": "skipped",
+            "race_id": s.race_id,
+            "wp_pct": float(wp) * 100.0 if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+            "ev": float(ev) if ev is not None else None,
+            "won": won,
+            "stake": stake,
+            "payout": payout,
+        })
+
+    def pack(sub):
+        n = len(sub)
+        hits = sum(1 for r in sub if r["won"])
+        stake = sum(r["stake"] for r in sub)
+        payout = sum(r["payout"] for r in sub)
+        pred = [r["wp_pct"] for r in sub if r["wp_pct"] is not None]
+        odds_l = [r["odds"] for r in sub if r["odds"] is not None]
+        ev_l = [r["ev"] for r in sub if r["ev"] is not None]
+        act_hit = (100.0 * hits / n) if n else None
+        pred_avg = (sum(pred) / len(pred)) if pred else None
+        return {
+            "n": n,
+            "hits": hits,
+            "実績的中率%": round(act_hit, 3) if act_hit is not None else None,
+            "予想的中率平均%": round(pred_avg, 3) if pred_avg is not None else None,
+            "的中率比_実績÷予想": round(act_hit / pred_avg, 3) if (act_hit is not None and pred_avg and pred_avg > 0) else None,
+            "ROI%": round(100.0 * payout / stake, 2) if stake else None,
+            "平均EV%": round(sum(ev_l) / len(ev_l), 2) if ev_l else None,
+            "平均オッズ": round(sum(odds_l) / len(odds_l), 2) if odds_l else None,
+            "投資": round(stake, 0),
+            "払戻": round(payout, 0),
+        }
+
+    def band_wp(v):
+        if v is None: return "不明"
+        if v < 1: return "0-1%"
+        if v < 2: return "1-2%"
+        if v < 3: return "2-3%"
+        if v < 5: return "3-5%"
+        if v < 8: return "5-8%"
+        if v < 10: return "8-10%"
+        if v < 15: return "10-15%"
+        return "15%+"
+
+    def band_odds(o):
+        if o is None: return "不明"
+        if o < 30: return "<30"
+        if o < 50: return "30-50"
+        if o < 100: return "50-100"
+        if o < 300: return "100-300"
+        if o < 1000: return "300-1000"
+        return "1000+"
+
+    def band_ev(e):
+        if e is None: return "不明"
+        if e < 0: return "<0"
+        if e < 100: return "0-100"
+        if e < 300: return "100-300"
+        if e < 500: return "300-500"
+        if e < 1000: return "500-1000"
+        return "1000+"
+
+    by_wp, by_odds, by_ev = defaultdict(list), defaultdict(list), defaultdict(list)
+    for r in rows:
+        by_wp[band_wp(r["wp_pct"])].append(r)
+        by_odds[band_odds(r["odds"])].append(r)
+        by_ev[band_ev(r["ev"])].append(r)
+
+    wp_order = ["0-1%","1-2%","2-3%","3-5%","5-8%","8-10%","10-15%","15%+","不明"]
+    odds_order = ["<30","30-50","50-100","100-300","300-1000","1000+","不明"]
+    ev_order = ["<0","0-100","100-300","300-500","500-1000","1000+","不明"]
+
+    # 累積スイープ（この値以上だけ買う）
+    def sweep_wp():
+        out = []
+        for thr in [0, 1, 2, 3, 5, 8, 10]:
+            sub = [r for r in rows if r["wp_pct"] is not None and r["wp_pct"] >= thr]
+            out.append({"下限予想的中率%": thr, **pack(sub)})
+        return out
+
+    def sweep_odds():
+        out = []
+        for thr in [0, 30, 35, 50, 100, 300]:
+            sub = [r for r in rows if r["odds"] is not None and r["odds"] >= thr]
+            out.append({"下限オッズ": thr, **pack(sub)})
+        return out
+
+    def sweep_ev():
+        out = []
+        for thr in [0, 100, 200, 300, 500, 1000]:
+            sub = [r for r in rows if r["ev"] is not None and r["ev"] >= thr]
+            out.append({"下限EV%": thr, **pack(sub)})
+        return out
+
+    # 4) 1レースあたり予想的中率上位K件だけ買った場合
+    by_race = defaultdict(list)
+    for r in rows:
+        by_race[r["race_id"]].append(r)
+
+    def topk_sim(k: int):
+        chosen = []
+        race_hit = 0
+        race_n = 0
+        for rid, lst in by_race.items():
+            ranked = sorted(
+                [x for x in lst if x["wp_pct"] is not None],
+                key=lambda x: -x["wp_pct"],
+            )[:k]
+            if not ranked:
+                continue
+            race_n += 1
+            if any(x["won"] for x in ranked):
+                race_hit += 1
+            chosen.extend(ranked)
+        base = pack(chosen)
+        base["レース数"] = race_n
+        base["レース的中率%"] = round(100.0 * race_hit / race_n, 2) if race_n else None
+        base["上位K"] = k
+        return base
+
+    topk = [topk_sim(k) for k in (1, 2, 3, 5, 8)]
+
+    return {
+        "note": "見送り含む閾値政策用。予想的中率=買い目1本の確率(投票プランと同じ定義)。勝率という語は使わない。",
+        "scope": scope,
+        "since": since,
+        "since_resolved": since_dt.isoformat() if since_dt else None,
+        "unit_stake_for_skipped": unit_stake,
+        "件数": {
+            "合計": len(rows),
+            "実投票": sum(1 for r in rows if r["src"] == "purchase"),
+            "見送り": sum(1 for r in rows if r["src"] == "skipped"),
+            "レース数": len(by_race),
+        },
+        "全体": pack(rows),
+        "1_予想的中率帯": {k: pack(by_wp[k]) for k in wp_order if k in by_wp},
+        "1_下限スイープ_予想的中率": sweep_wp(),
+        "2_オッズ帯": {k: pack(by_odds[k]) for k in odds_order if k in by_odds},
+        "2_下限スイープ_オッズ": sweep_odds(),
+        "3_EV帯": {k: pack(by_ev[k]) for k in ev_order if k in by_ev},
+        "3_下限スイープ_EV": sweep_ev(),
+        "4_1レース上位K件": topk,
+    }
+
+
 @router.get("/diagnostics/voted-bets-table")
 def voted_bets_table(
     since: Optional[str] = "calibration_switch",
