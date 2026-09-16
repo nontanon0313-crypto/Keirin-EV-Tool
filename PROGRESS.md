@@ -55,6 +55,16 @@
 
 この節は **Grokが担当するときの作業契約**。一般ルールに加えて必ず守る。
 
+
+### 事故記録 2026-09-16: 構文エラーのまま commit/push
+
+- **原因**: Termuxスクリプトで `line_restricted` 削除時に `if two_param_mode` のインデントが崩れ `IndentationError`。`py_compile` は失敗したがシェルに `set -e` が無く、その後の `git commit` / `git push` が実行された。
+- **対策（Grok必守）**:
+  1. スクリプト先頭で `set -euo pipefail`
+  2. `py_compile` 成功後でなければ `git add` しない
+  3. `git commit` 前に再度 `python3 -m py_compile` を走らせ、失敗なら exit 1
+  4. 「compile失敗なのに DONE と出る」出し方は禁止
+
 ### A. 成果物の渡し方（最重要）
 
 1. **サンドボックス上の編集だけではユーザー環境（Termuxのクローン）に届かない。**

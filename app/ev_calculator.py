@@ -92,8 +92,8 @@ def harville_prob(
             and line_map.get(car) is not None
             and line_map.get(car) == line_map.get(prev_car)
         )
-        # 2着/3着: 同ライン残があれば候補限定。無ければ残存全体。
-                if two_param_mode and same_line:
+        # 同ライン残のみへの候補限定は禁止（三連単確率が1着勝率まで膨らむ）。
+        if two_param_mode and same_line:
             boosted = {}
             for c, v in remaining_probs.items():
                 if line_map.get(c) == line_map.get(prev_car):
@@ -106,7 +106,6 @@ def harville_prob(
             denom = sum(boosted.values())
             cond_p = (boosted.get(car, 0.0) / denom) if denom > 1e-9 else 0.0
         elif line_map and line_boost != 1.0 and same_line:
-            # 残っている車の中で、同ラインの車だけをブーストしてから正規化する
             boosted = {
                 c: (v * line_boost if line_map.get(c) == line_map.get(prev_car) else v)
                 for c, v in remaining_probs.items()
