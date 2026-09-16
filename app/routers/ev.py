@@ -1202,8 +1202,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         candidates = sorted(
             kept,
             key=lambda x: (
+                -float(x.get("ev_pct") or 0),
                 -float(x.get("win_prob") or 0),
-                -float(x.get("odds_value") or 0),
             ),
         )
 

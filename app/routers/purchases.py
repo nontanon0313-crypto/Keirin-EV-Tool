@@ -5117,7 +5117,8 @@ def threshold_policy_scan(
 
     def sweep_odds():
         out = []
-        for thr in [0, 30, 35, 50, 100, 300]:
+        thresholds = [0] + list(range(30, 101)) + [150, 200, 300, 500, 1000]
+        for thr in thresholds:
             sub = [r for r in rows if r["odds"] is not None and r["odds"] >= thr]
             out.append({"下限オッズ": thr, **pack(sub)})
         return out
