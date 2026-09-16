@@ -309,15 +309,6 @@ def update_live_bet(live_bet_id: int, payload: schemas.LiveBetUpdate, db: Sessio
         row.planned_expected_profit = row.actual_stake * (
             row.planned_win_prob * row.planned_odds - 1.0
         )
-    if (
-        row.actual_stake is not None
-        and row.actual_stake > 0
-        and row.planned_win_prob is not None
-        and row.planned_odds is not None
-    ):
-        row.planned_expected_profit = (
-            row.actual_stake * (row.planned_win_prob * row.planned_odds - 1.0)
-        )
     if payload.actual_result is not None:
         if payload.actual_result not in ("pending", "win", "lose", "not_voted"):
             raise HTTPException(status_code=400, detail="invalid actual_result")
