@@ -2170,14 +2170,17 @@ document.getElementById("loadPurchaseHistoryBtn").addEventListener("click", asyn
     }
     let html = `<p><strong>購入履歴一覧(実購入のみ)</strong></p>`;
     const betTypeSummary = Object.entries(data.bet_type_counts || {}).map(([bt, v]) => `${bt}:${v.count}件(的中${v.wins}件・${v.win_rate_pct}%)`).join(" / ");
-    html += `<p class="note">実購入件数: ${data.count}件 / 投票したレース数: ${data.n_races}件 / 1レースあたり平均: ${data.avg_bets_per_race}買い目 / このうち的中: ${data.wins}件(${data.win_rate_pct}%)。券種内訳: ${betTypeSummary || "-"}。表の並び順は購入時点の予想勝率が高い順です。</p>`;
+    const probs = (data.items || []).map(it => it.win_prob_at_purchase_pct).filter(v => v != null && !Number.isNaN(v));
+    const avgPred = probs.length ? (probs.reduce((a, b) => a + b, 0) / probs.length) : null;
+    const avgPredTxt = avgPred != null ? avgPred.toFixed(2) + "%" : "-";
+    html += `<p class="note">実購入件数: ${data.count}件 / 投票したレース数: ${data.n_races}件 / 1レースあたり平均: ${data.avg_bets_per_race}買い目 / このうち的中: ${data.wins}件(${data.win_rate_pct}%) / 予想的中率平均: ${avgPredTxt}。券種内訳: ${betTypeSummary || "-"}。表の並び順は予想勝率が高い順です。</p>`;
     if (data.multi_bet_race_count > 0) {
       html += `<p class="note" style="color:#f59e0b;">⚠️ 同一レースに2買い目以上入っているレースが${data.multi_bet_race_count}件あります(同じレースIDが複数行)。</p>`;
     }
-    html += `<table><tr><th>レースID</th><th>券種</th><th>買い目</th><th>予想勝率</th><th>勝率帯</th><th>オッズ</th><th>市場確率</th><th>払戻</th></tr>`;
+    html += `<table><tr><th>レースID</th><th>券種</th><th>買い目</th><th>予想勝率</th><th>オッズ</th><th>払戻</th></tr>`;
     for (const it of data.items) {
       const cls = it.result === "win" ? "ev-positive" : "";
-      html += `<tr class="${cls}"><td>${it.race_id}</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.win_prob_at_purchase_pct ?? "-"}${it.win_prob_at_purchase_pct !== null ? "%" : ""}</td><td>${it.prob_bucket ?? "-"}</td><td>${it.odds_at_purchase ?? "-"}</td><td>${it.market_prob_pct ?? "-"}${it.market_prob_pct !== null ? "%" : ""}</td><td>${it.payout_amount ?? 0}円</td></tr>`;
+      html += `<tr class="${cls}"><td>${it.race_id}</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.win_prob_at_purchase_pct ?? "-"}${it.win_prob_at_purchase_pct !== null ? "%" : ""}</td><td>${it.odds_at_purchase ?? "-"}</td><td>${it.payout_amount ?? 0}円</td></tr>`;
     }
     html += `</table>`;
     resultBox.innerHTML = html;
