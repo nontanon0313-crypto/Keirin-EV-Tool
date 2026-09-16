@@ -2190,9 +2190,9 @@ async function loadThresholdPolicyScan(sections) {
       return h + `</table>`;
     };
     const tableFromArr = (title, arr, keyField) => {
-      let h = `<h3>${title}</h3><table><tr><th>${keyField}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th><th>レース的中率%</th></tr>`;
+      let h = `<h3>${title}</h3><table><tr><th>${keyField}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
       for (const v of arr || []) {
-        h += `<tr><td>${fmt(v[keyField] ?? v["上位K"])}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td><td>${fmt(v["レース的中率%"])}</td></tr>`;
+        h += `<tr><td>${fmt(v[keyField] ?? v["上位K"])}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
       }
       return h + `</table>`;
     };

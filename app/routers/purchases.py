@@ -4967,6 +4967,7 @@ def threshold_policy_scan(
     文言は「的中率」(勝率は使わない)。投票プランの的中率と同じく買い目1本の確率を使う。
     """
     from collections import defaultdict
+    import math
 
     scope = (scope or "all").strip().lower()
     if scope not in ("all", "purchase", "skipped"):
@@ -5063,8 +5064,11 @@ def threshold_policy_scan(
 
     def band_wp(v):
         if v is None: return "不明"
-        if v < 1: return "0-1%"
-        if v < 2: return "1-2%"
+        if v < 0: v = 0.0
+        if v < 2:
+            lo = math.floor(v / 0.1) * 0.1
+            hi = lo + 0.1
+            return f"{lo:.1f}-{hi:.1f}%"
         if v < 3: return "2-3%"
         if v < 5: return "3-5%"
         if v < 8: return "5-8%"
@@ -5074,7 +5078,11 @@ def threshold_policy_scan(
 
     def band_odds(o):
         if o is None: return "不明"
-        if o < 30: return "<30"
+        if o < 0: o = 0.0
+        if o < 30:
+            lo = math.floor(o)
+            hi = lo + 1
+            return f"{lo}-{hi}"
         if o < 50: return "30-50"
         if o < 100: return "50-100"
         if o < 300: return "100-300"
@@ -5096,8 +5104,8 @@ def threshold_policy_scan(
         by_odds[band_odds(r["odds"])].append(r)
         by_ev[band_ev(r["ev"])].append(r)
 
-    wp_order = ["0-1%","1-2%","2-3%","3-5%","5-8%","8-10%","10-15%","15%+","不明"]
-    odds_order = ["<30","30-50","50-100","100-300","300-1000","1000+","不明"]
+    wp_order = [f"{i/10:.1f}-{(i+1)/10:.1f}%" for i in range(20)] + ["2-3%","3-5%","5-8%","8-10%","10-15%","15%+","不明"]
+    odds_order = [f"{i}-{i+1}" for i in range(30)] + ["30-50","50-100","100-300","300-1000","1000+","不明"]
     ev_order = ["<0","0-100","100-300","300-500","500-1000","1000+","不明"]
 
     # 累積スイープ（この値以上だけ買う）
@@ -5144,11 +5152,10 @@ def threshold_policy_scan(
             chosen.extend(ranked)
         base = pack(chosen)
         base["レース数"] = race_n
-        base["レース的中率%"] = round(100.0 * race_hit / race_n, 2) if race_n else None
         base["上位K"] = k
         return base
 
-    topk = [topk_sim(k) for k in (1, 2, 3, 5, 8)]
+    topk = [topk_sim(k) for k in (1, 2, 3, 5, 8, 10, 15, 20)]
 
     return {
         "note": "見送り含む閾値政策用。予想的中率=買い目1本の確率(投票プランと同じ定義)。勝率という語は使わない。",
