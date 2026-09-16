@@ -2203,7 +2203,7 @@ async function loadThresholdPolicyScan(sections) {
     }
     if (show("odds")) {
       html += tableFromObj("2. オッズ帯", d["2_オッズ帯"], "帯");
-      html += tableFromArr("2. 下限スイープ（オッズ≥）", d["2_下限スイープ_オッズ"], "下限オッズ");
+      html += tableFromArr("2. 上限スイープ（オッズ≤・これ以下だけ買う）", d["2_下限スイープ_オッズ"], "上限オッズ");
     }
     if (show("ev")) {
       html += tableFromObj("3. EV帯", d["3_EV帯"], "帯");
