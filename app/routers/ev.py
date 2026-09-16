@@ -908,7 +908,14 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                         f"不調ステージ除外({race.race_stage}:実績{st['expectancy_pct']}%/"
                         f"{st['n']}件)"
                     )
-        is_recommended = (not is_skip) and (ev_pct >= effective_min_ev) and (gate_reason is None)
+        min_odds = float(getattr(req, "min_odds", 0.0) or 0.0)
+        odds_below_min = min_odds > 0 and float(o.odds_value or 0.0) < min_odds
+        is_recommended = (
+            (not is_skip)
+            and (ev_pct >= effective_min_ev)
+            and (gate_reason is None)
+            and (not odds_below_min)
+        )
         # 2026-09-10確定: ステージサンプル不足による着順券の一律見送りは使わない
         stage_order_gate = False
         if stage_order_gate:
@@ -926,6 +933,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             "odds_value": o.odds_value,
             "ev_pct": round(ev_pct, 2),
             "gate_reason": gate_reason,
+            "odds_below_min": odds_below_min,
             "effective_min_ev": effective_min_ev,
         })
         if not is_recommended:
@@ -1016,6 +1024,11 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
                 ))
             elif e.get("gate_reason"):
                 skipped_for_verification.append((e, e["gate_reason"]))
+            elif e.get("odds_below_min"):
+                skipped_for_verification.append((
+                    e,
+                    f"オッズ下限未達(必要{req.min_odds}倍以上/実際{e.get('odds_value')}倍)",
+                ))
             else:
                 # 実績ゲートでEV底上げされた場合
                 eff = e.get("effective_min_ev")
@@ -1136,7 +1149,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             if ev_pct < effective_min_ev:
                 continue
             min_odds = float(getattr(req, "min_odds", 0) or 0)
-            if min_odds > 0 and float(e.get("odds_value") or 0) <= min_odds:
+            if min_odds > 0 and float(e.get("odds_value") or 0) < min_odds:
                 continue
             if e.get("gate_reason"):
                 continue
