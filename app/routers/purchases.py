@@ -4968,6 +4968,47 @@ def threshold_policy_scan(
     """
     from collections import defaultdict
     import math
+    import numpy as np
+
+    def _wilson_ci(hits: int, n: int, z: float = 1.96):
+        """実績的中率のWilson信頼区間（正規近似より少数サンプルで安定）"""
+        if not n:
+            return None, None
+        p = hits / n
+        denom = 1 + z * z / n
+        center = p + z * z / (2 * n)
+        margin = z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n)
+        lo = max(0.0, (center - margin) / denom)
+        hi = min(1.0, (center + margin) / denom)
+        return round(lo * 100, 3), round(hi * 100, 3)
+
+    def _boot_iters_for_n(n: int) -> int:
+        if n > 20000:
+            return 300
+        if n > 5000:
+            return 500
+        return 1000
+
+    def _bootstrap_roi_ci(stakes: "np.ndarray", payouts: "np.ndarray", seed: int = 42):
+        """行を復元抽出してROIを再計算し、2.5〜97.5パーセンタイルを信頼区間とする"""
+        n = len(stakes)
+        if n < 5 or stakes.sum() <= 0:
+            return None, None
+        iters = _boot_iters_for_n(n)
+        rng = np.random.default_rng(seed)
+        rois = np.empty(iters)
+        valid = 0
+        for _ in range(iters):
+            idx = rng.integers(0, n, size=n)
+            s = stakes[idx].sum()
+            if s <= 0:
+                continue
+            rois[valid] = 100.0 * payouts[idx].sum() / s
+            valid += 1
+        if valid < 5:
+            return None, None
+        lo, hi = np.percentile(rois[:valid], [2.5, 97.5])
+        return round(float(lo), 2), round(float(hi), 2)
 
     scope = (scope or "all").strip().lower()
     if scope not in ("all", "purchase", "skipped"):
@@ -5049,13 +5090,21 @@ def threshold_policy_scan(
         ev_l = [r["ev"] for r in sub if r["ev"] is not None]
         act_hit = (100.0 * hits / n) if n else None
         pred_avg = (sum(pred) / len(pred)) if pred else None
+        hit_ci_lo, hit_ci_hi = _wilson_ci(hits, n)
+        roi_ci_lo, roi_ci_hi = None, None
+        if n >= 5 and stake > 0:
+            stakes_arr = np.fromiter((r["stake"] for r in sub), dtype=np.float64, count=n)
+            payouts_arr = np.fromiter((r["payout"] for r in sub), dtype=np.float64, count=n)
+            roi_ci_lo, roi_ci_hi = _bootstrap_roi_ci(stakes_arr, payouts_arr)
         return {
             "n": n,
             "hits": hits,
             "実績的中率%": round(act_hit, 3) if act_hit is not None else None,
+            "実績的中率95%CI": [hit_ci_lo, hit_ci_hi] if hit_ci_lo is not None else None,
             "予想的中率平均%": round(pred_avg, 3) if pred_avg is not None else None,
             "的中率比_実績÷予想": round(act_hit / pred_avg, 3) if (act_hit is not None and pred_avg and pred_avg > 0) else None,
             "ROI%": round(100.0 * payout / stake, 2) if stake else None,
+            "ROI95%CI": [roi_ci_lo, roi_ci_hi] if roi_ci_lo is not None else None,
             "平均EV%": round(sum(ev_l) / len(ev_l), 2) if ev_l else None,
             "平均オッズ": round(sum(odds_l) / len(odds_l), 2) if odds_l else None,
             "投資": round(stake, 0),
