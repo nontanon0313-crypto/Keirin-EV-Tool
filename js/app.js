@@ -2159,9 +2159,10 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
 });
 
 
-document.getElementById("loadThresholdPolicyBtn")?.addEventListener("click", async () => {
+/* replaced by thresholdPolicyPanel handlers */
+if (false) {
   const resultBox = document.getElementById("statsResult");
-  const scope = prompt("対象を選んでください: all / purchase / skipped", "all") || "all";
+  const scope = "all";
   resultBox.textContent = "閾値政策集計を読み込み中...";
   try {
     const res = await fetch(apiUrl(`/purchases/diagnostics/threshold-policy-scan?since=calibration_switch&scope=${encodeURIComponent(scope)}`));
@@ -2202,6 +2203,70 @@ document.getElementById("loadThresholdPolicyBtn")?.addEventListener("click", asy
     resultBox.textContent = "エラー: " + e.message;
   }
 });
+
+
+
+// ---------- 閾値政策集計（見送り含む・フィルター付き） ----------
+async function loadThresholdPolicyScan(sections) {
+  const resultBox = document.getElementById("statsResult");
+  const scopeEl = document.getElementById("thresholdPolicyScope");
+  const scope = (scopeEl && scopeEl.value) || "all";
+  resultBox.textContent = "閾値政策集計を読み込み中...";
+  try {
+    const res = await fetch(apiUrl(`/purchases/diagnostics/threshold-policy-scan?since=calibration_switch&scope=${encodeURIComponent(scope)}`));
+    const d = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(d));
+    const fmt = (v) => (v === null || v === undefined) ? "-" : v;
+    const show = (key) => !sections || sections.includes("all") || sections.includes(key);
+
+    let html = `<p><strong>閾値政策集計</strong>（対象=\( {fmt(d.scope)} / since= \){fmt(d.since_resolved)}）</p>`;
+    html += `<p class="note">${fmt(d.note)}</p>`;
+    const c = d["件数"] || {};
+    const o = d["全体"] || {};
+    html += `<p>件数: 合計\( {fmt(c["合計"])} / 実投票 \){fmt(c["実投票"])} / 見送り\( {fmt(c["見送り"])} / レース \){fmt(c["レース数"])}</p>`;
+    html += `<p>全体: n=\( {fmt(o.n)} hits= \){fmt(o.hits)} 実績的中率=\( {fmt(o["実績的中率%"])}% 予想的中率平均= \){fmt(o["予想的中率平均%"])}% ROI=\( {fmt(o["ROI%"])}% 平均EV= \){fmt(o["平均EV%"])}%</p>`;
+
+    const tableFromObj = (title, obj, keyLabel) => {
+      let h = `<h3>\( {title}</h3><table><tr><th> \){keyLabel}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
+      for (const [k, v] of Object.entries(obj || {})) {
+        h += `<tr><td>\( {k}</td><td> \){fmt(v.n)}</td><td>\( {fmt(v.hits)}</td><td> \){fmt(v["実績的中率%"])}</td><td>\( {fmt(v["予想的中率平均%"])}</td><td> \){fmt(v["的中率比_実績÷予想"])}</td><td>\( {fmt(v["ROI%"])}</td><td> \){fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
+      }
+      return h + `</table>`;
+    };
+    const tableFromArr = (title, arr, keyField) => {
+      let h = `<h3>\( {title}</h3><table><tr><th> \){keyField}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th><th>レース的中率%</th></tr>`;
+      for (const v of arr || []) {
+        h += `<tr><td>\( {fmt(v[keyField] ?? v["上位K"])}</td><td> \){fmt(v.n)}</td><td>\( {fmt(v.hits)}</td><td> \){fmt(v["実績的中率%"])}</td><td>\( {fmt(v["予想的中率平均%"])}</td><td> \){fmt(v["的中率比_実績÷予想"])}</td><td>\( {fmt(v["ROI%"])}</td><td> \){fmt(v["平均EV%"])}</td><td>\( {fmt(v["平均オッズ"])}</td><td> \){fmt(v["レース的中率%"])}</td></tr>`;
+      }
+      return h + `</table>`;
+    };
+
+    if (show("hit")) {
+      html += tableFromObj("1. 予想的中率帯（除外含む可）", d["1_予想的中率帯"], "帯");
+      html += tableFromArr("1. 下限スイープ（予想的中率≥）", d["1_下限スイープ_予想的中率"], "下限予想的中率%");
+    }
+    if (show("odds")) {
+      html += tableFromObj("2. オッズ帯", d["2_オッズ帯"], "帯");
+      html += tableFromArr("2. 下限スイープ（オッズ≥）", d["2_下限スイープ_オッズ"], "下限オッズ");
+    }
+    if (show("ev")) {
+      html += tableFromObj("3. EV帯", d["3_EV帯"], "帯");
+      html += tableFromArr("3. 下限スイープ（EV≥）", d["3_下限スイープ_EV"], "下限EV%");
+    }
+    if (show("topk")) {
+      html += tableFromArr("4. 1レースあたり予想的中率上位K件", d["4_1レース上位K件"], "上位K");
+    }
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+}
+
+document.getElementById("loadThresholdPolicyAllBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["all"]));
+document.getElementById("loadThresholdPolicyHitBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["hit"]));
+document.getElementById("loadThresholdPolicyOddsBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["odds"]));
+document.getElementById("loadThresholdPolicyEvBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["ev"]));
+document.getElementById("loadThresholdPolicyTopKBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["topk"]));
 
 
 document.getElementById("loadPurchaseHistoryBtn").addEventListener("click", async () => {

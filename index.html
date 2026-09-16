@@ -159,6 +159,24 @@
     <h2>実績検証</h2>
     <button id="loadStatsBtn">集計を表示</button>
     <button id="loadThresholdPolicyBtn" style="background:#0f766e;">📊閾値政策集計(見送り含む)</button>
+    
+    <div id="thresholdPolicyPanel" style="margin:12px 0;padding:10px;border:1px solid #334155;border-radius:8px;background:#0f172a;">
+      <p style="margin:0 0 8px 0;"><strong>📊 閾値政策集計（見送り含む）</strong></p>
+      <p class="note" style="margin:0 0 8px 0;">除外された候補も含め、下限的中率・下限オッズ・EV・1レース点数を検証します。予想的中率は買い目1本の確率（投票プランと同じ定義）。</p>
+      <label style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;">対象
+        <select id="thresholdPolicyScope" style="width:auto;padding:4px 8px;">
+          <option value="all">全て（実投票+見送り）</option>
+          <option value="purchase">実投票のみ</option>
+          <option value="skipped">見送りのみ</option>
+        </select>
+      </label>
+      <button type="button" id="loadThresholdPolicyAllBtn" style="background:#0f766e;width:auto;padding:6px 12px;">全項目を表示</button>
+      <button type="button" id="loadThresholdPolicyHitBtn" style="background:#155e75;width:auto;padding:6px 12px;">1.的中率</button>
+      <button type="button" id="loadThresholdPolicyOddsBtn" style="background:#155e75;width:auto;padding:6px 12px;">2.オッズ</button>
+      <button type="button" id="loadThresholdPolicyEvBtn" style="background:#155e75;width:auto;padding:6px 12px;">3.EV</button>
+      <button type="button" id="loadThresholdPolicyTopKBtn" style="background:#155e75;width:auto;padding:6px 12px;">4.上位K件</button>
+    </div>
+
     <button id="loadPurchaseHistoryBtn" style="background:#334155;">📜購入履歴一覧(実購入のみ・的中率順)</button>
     <button id="loadCalibrationBtn" style="background:#06b6d4;">自動補正の状態を確認</button>
     <button id="loadCalibrationCompareBtn" style="background:#8b5cf6;">補正前/後の比較(条件別)</button>
