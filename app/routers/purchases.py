@@ -5184,8 +5184,9 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
         model_vs_market_ratio = None
         if p.odds_at_purchase:
             market_prob_pct = round(calc.market_prob_from_odds(p.odds_at_purchase, p.bet_type) * 100, 3)
-            if market_prob_pct and market_prob_pct > 0 and p.win_prob_at_purchase is not None:
-                model_vs_market_ratio = round((p.win_prob_at_purchase * 100) / market_prob_pct, 1)
+            # 市場比は再計算後の買い目確率で見る
+            if market_prob_pct and market_prob_pct > 0 and display_prob is not None:
+                model_vs_market_ratio = round((display_prob * 100) / market_prob_pct, 1)
         items.append({
             "race_id": p.race_id,
             "venue_name": r.venue_name if r else None,
@@ -5195,17 +5196,25 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
             "race_stage": r.race_stage if r else None,
             "bet_type": p.bet_type,
             "combination": p.combination,
+            # 主表示: 現行Harvilleで再計算した「買い目1本」の的中率
             "win_prob_at_purchase_pct": (
-                round(p.win_prob_at_purchase * 100, 2) if p.win_prob_at_purchase is not None else None
+                round(display_prob * 100, 2) if display_prob is not None else None
             ),
-            # 補正前(モデルの生推定値)。補正後との差が大きいほど、
-            # キャリブレーション係数(0.3〜3.0倍)の影響を強く受けていることを示す。
+            "stored_win_prob_pct": (
+                round(stored_prob * 100, 2) if stored_prob is not None else None
+            ),
+            "recomputed_win_prob_pct": (
+                round(recomputed * 100, 2) if recomputed is not None else None
+            ),
+            "win_prob_inflated": bool(
+                stored_prob is not None and recomputed is not None
+                and stored_prob > 0.15
+                and (recomputed <= 0 or stored_prob / max(recomputed, 1e-9) >= 3.0)
+            ),
             "win_prob_raw_pct": (
                 round(p.win_prob_raw * 100, 2) if p.win_prob_raw is not None else None
             ),
             "calibration_multiplier": calibration_multiplier,
-            # オッズから逆算した市場の織り込み確率(控除率概算込み)と、
-            # モデル予想がその何倍かを表す倍率。
             "market_prob_pct": market_prob_pct,
             "model_vs_market_ratio": model_vs_market_ratio,
             "prob_bucket": bucket_name,
