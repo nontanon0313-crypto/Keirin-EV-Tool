@@ -9,6 +9,44 @@ from .. import models, schemas
 from . import bankroll as bankroll_router
 from .. import ev_calculator as calc
 
+
+def _recompute_combo_win_prob(db: Session, race, bet_type: str, combination: str):
+    """保存値を信じず、現行Harvilleで買い目1本の的中確率を再計算する。"""
+    from typing import Optional as _Opt
+    if race is None or not combination:
+        return None
+    try:
+        from .ev import _build_win_probs, _line_map_from_race, _estimate_prob
+        from .. import ev_calculator as _calc
+        entries = list(race.entries or [])
+        if len(entries) < 2:
+            return None
+        win_probs = _build_win_probs(entries)
+        if not win_probs:
+            return None
+        line_map, line_boost = _line_map_from_race(race)
+        cars = tuple(int(x) for x in combination.split("-") if str(x).strip())
+        if not cars:
+            return None
+        p = _estimate_prob(
+            win_probs, bet_type or "3連単", cars,
+            line_map=line_map, line_boost=line_boost,
+        )
+        arity = _calc.BET_TYPE_ARITY.get(bet_type or "3連単") or len(cars)
+        car_numbers = sorted(win_probs.keys())
+        if len(car_numbers) >= arity:
+            mass = _calc.total_ordered_mass(
+                win_probs, car_numbers, arity, line_map=line_map, line_boost=line_boost,
+            )
+            if mass and mass > 1e-9:
+                p = p / mass
+        if p is None or p < 0:
+            return None
+        return float(min(p, 1.0))
+    except Exception:
+        return None
+
+
 router = APIRouter(prefix="/purchases", tags=["purchases"])
 
 
@@ -3494,7 +3532,18 @@ def big_expected_bets(db: Session = Depends(get_db), limit: int = 20):
             "stake_amount": p.stake_amount,
             "odds_at_purchase": p.odds_at_purchase,
             "win_prob_at_purchase_pct": (
-                round(p.win_prob_at_purchase * 100, 2) if p.win_prob_at_purchase is not None else None
+                round(display_prob * 100, 2) if display_prob is not None else None
+            ),
+            "stored_win_prob_pct": (
+                round(stored_prob * 100, 2) if stored_prob is not None else None
+            ),
+            "recomputed_win_prob_pct": (
+                round(recomputed * 100, 2) if recomputed is not None else None
+            ),
+            "win_prob_inflated": bool(
+                stored_prob is not None and recomputed is not None
+                and stored_prob > 0.15
+                and (recomputed <= 0 or stored_prob / max(recomputed, 1e-9) >= 3.0)
             ),
             "ev_pct_at_purchase": p.ev_pct_at_purchase,
             "expected_profit": round(expected_profit, 0),
@@ -5033,6 +5082,54 @@ def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_sw
     return {**result, "cache_hit": False}
 
 
+
+@router.post("/diagnostics/backfill-recompute-win-probs")
+def backfill_recompute_win_probs(
+    since: Optional[str] = "calibration_switch",
+    dry_run: bool = True,
+    limit: int = 500,
+    db: Session = Depends(get_db),
+):
+    """保存 win_prob を現行Harvilleで再計算。dry_run=true では書かない。"""
+    since_dt = _parse_since_param(since) if since and since != "all" else None
+    q = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        q = q.filter(models.Purchase.purchased_at >= since_dt)
+    purchases = q.order_by(models.Purchase.id.asc()).limit(limit).all()
+    from sqlalchemy.orm import joinedload
+    race_ids = {p.race_id for p in purchases}
+    races = {
+        r.id: r
+        for r in db.query(models.Race).options(joinedload(models.Race.entries)).filter(
+            models.Race.id.in_(race_ids)
+        ).all()
+    } if race_ids else {}
+    samples = []
+    updated = 0
+    for p in purchases:
+        r = races.get(p.race_id)
+        new_p = _recompute_combo_win_prob(db, r, p.bet_type, p.combination)
+        if new_p is None:
+            continue
+        old = p.win_prob_at_purchase
+        inflated = old is not None and old > 0.15 and (new_p <= 0 or old / max(new_p, 1e-9) >= 3.0)
+        if len(samples) < 30 and (inflated or (old is not None and abs(old - new_p) > 0.02)):
+            samples.append({
+                "id": p.id, "race_id": p.race_id, "combination": p.combination,
+                "stored_pct": round(old * 100, 2) if old is not None else None,
+                "recomputed_pct": round(new_p * 100, 2), "inflated": inflated,
+            })
+        if not dry_run:
+            p.win_prob_at_purchase = new_p
+            p.win_prob_raw = new_p
+            if p.odds_at_purchase and p.odds_at_purchase > 0:
+                p.ev_pct_at_purchase = (new_p * float(p.odds_at_purchase) - 1.0) * 100.0
+            updated += 1
+    if not dry_run:
+        db.commit()
+    return {"dry_run": dry_run, "scanned": len(purchases), "updated": updated, "samples": samples}
+
+
 @router.get("/history")
 def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "win_prob_desc", db: Session = Depends(get_db)):
     """
@@ -5059,16 +5156,22 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
         }
 
     race_ids = {p.race_id for p in purchases}
+    from sqlalchemy.orm import joinedload
     races_by_id = {
         r.id: r
-        for r in db.query(models.Race).filter(models.Race.id.in_(race_ids)).all()
+        for r in db.query(models.Race).options(joinedload(models.Race.entries)).filter(
+            models.Race.id.in_(race_ids)
+        ).all()
     }
 
     items = []
     for p in purchases:
         r = races_by_id.get(p.race_id)
+        recomputed = _recompute_combo_win_prob(db, r, p.bet_type, p.combination)
+        display_prob = recomputed if recomputed is not None else p.win_prob_at_purchase
+        stored_prob = p.win_prob_at_purchase
         bucket_name, bucket_mid = (
-            calc.get_prob_bucket(p.win_prob_at_purchase) if p.win_prob_at_purchase is not None else (None, None)
+            calc.get_prob_bucket(display_prob) if display_prob is not None else (None, None)
         )
         calibration_multiplier = None
         if p.win_prob_raw is not None and p.win_prob_raw > 0 and p.win_prob_at_purchase is not None:
