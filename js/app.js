@@ -247,14 +247,41 @@ function showFavoritesPanelFromCacheOrFetch(force) {
 
 async function fetchTodayRaces(force) {
   const c = raceListCache.today;
-  if (!force && _cacheValid(c)) return c.races;
+  if (!force && _cacheValid(c)) {
+    const now = new Date();
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+    return c.races.filter(r => {
+      const postTime = String(r.post_time ?? "").trim();
+      if (!/^\d{1,2}:\d{2}$/.test(postTime)) return true;
+
+      const [h, min] = postTime.split(":").map(Number);
+      return h * 60 + min > nowMinutes;
+    });
+  }
   const res = await fetch(apiUrl("/races/today"));
   const data = await res.json();
   let races = (data || []).map(r => ({
-    id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
+    id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number, post_time: r.post_time,
     entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
     label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}${r.actual_result ? " ・結果確定済み" : ""}`,
   }));
+
+    // 本日のレース一覧では、発走時刻を過ぎたレースを非表示にする。
+    if (Array.isArray(races)) {
+      const now = new Date();
+      const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+      races = races.filter(r => {
+        const postTime = String(r.post_time ?? "").trim();
+        if (!/^\d{1,2}:\d{2}$/.test(postTime)) return true;
+
+        const [h, min] = postTime.split(":").map(Number);
+        const postTimeMinutes = h * 60 + min;
+
+        return postTimeMinutes > nowMinutes;
+      });
+    }
   if (Array.isArray(races)) {
     races = races.filter(r => {
       const st = String(
