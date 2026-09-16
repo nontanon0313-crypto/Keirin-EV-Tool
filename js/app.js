@@ -2891,22 +2891,10 @@ function loadCalAxisEnabled() {
 }
 
 function isCalibrationApplyEnabled() {
-  const el = document.getElementById("applyCalibrationCheckbox");
-  return !!el && el.checked;
+  // 2026-09-16: 勝率帯キャリブレーションは投票プランへ一切適用しなくなった。
+  // チェックボックスはdisabled表示のみ(過去のlocalStorage保存値に関わらず常にfalse)。
+  return false;
 }
-
-// 自動補正ON/OFFチェックボックスの状態を保存・復元する。
-// 従来は保存処理が無く、ページを開き直すたびHTML側のchecked初期値(常にON)に
-// 戻ってしまっていた(のんの指摘により2026-09-08修正)。
-(function initCalibrationApplyCheckbox() {
-  const el = document.getElementById("applyCalibrationCheckbox");
-  if (!el) return;
-  const saved = localStorage.getItem("keirin_apply_calibration_v2");
-  el.checked = saved === "true";
-  el.addEventListener("change", () => {
-    localStorage.setItem("keirin_apply_calibration_v2", String(el.checked));
-  });
-})();
 
 
 

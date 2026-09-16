@@ -455,11 +455,7 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
     db.query(models.EvResult).filter(models.EvResult.race_id == race_id).delete()
 
     as_of_dt = getattr(race, "post_time", None) or getattr(race, "race_date", None)
-    calibration_factors = purchases_router.get_calibration_factors_retroactive(
-        db,
-        use_cache=(as_of_dt is None),
-        as_of_dt=as_of_dt,
-    )
+    # 2026-09-16: 勝率帯キャリブレーションは適用しなくなったため取得処理を撤去。
 
     created = []
     low_prob_warnings = {}
@@ -470,10 +466,9 @@ def calculate_ev(race_id: int, req: schemas.EvCalcRequest, db: Session = Depends
             continue
         cars = tuple(int(x) for x in o.combination.split("-"))
         est_prob_raw = _estimate_prob(win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost)
-        if getattr(req, "apply_calibration", False):
-            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob_raw, calibration_factors, bet_type=o.bet_type)
-        else:
-            est_prob, low_prob_warning = est_prob_raw, False
+        # 2026-09-16: 勝率帯キャリブレーションは投票プランへ一切適用しない
+        # (のんの指示により、apply_calibrationフラグごと撤去。常に生推定値を使う)。
+        est_prob, low_prob_warning = est_prob_raw, False
         low_prob_warnings[(o.bet_type, o.combination)] = low_prob_warning
 
         market_prob = normalized_market.get(o.bet_type, {}).get(
@@ -594,7 +589,7 @@ def threshold_table(
         raise HTTPException(400, "選手の勝率データが揃っていません")
 
     car_numbers = list(win_probs.keys())
-    calibration_factors = purchases_router.get_calibration_factors_retroactive(db)
+    # 2026-09-16: 勝率帯キャリブレーションは適用しなくなったため取得処理を撤去。
 
     results = []
     for bet_type, arity in calc.BET_TYPE_ARITY.items():
@@ -608,7 +603,8 @@ def threshold_table(
         )
         for combo in combos:
             est_prob = _estimate_prob(win_probs, bet_type, combo)
-            est_prob, low_prob_warning, _, _ = _apply_calibration(est_prob, calibration_factors, bet_type=bet_type)
+            # 2026-09-16: 勝率帯キャリブレーションは撤去(常に生推定値を使う)。
+            low_prob_warning = est_prob < 0.05
             is_skip, _ = calc.apply_min_prob_filter(est_prob, 100, min_win_prob)  # 勝率フィルターのみ判定
             if is_skip or est_prob <= 0:
                 continue
@@ -779,14 +775,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     # 発走時刻より後に確定した結果は、このレースの判断材料に含めない。
     as_of_dt = getattr(race, "post_time", None) or getattr(race, "race_date", None)
 
-    calibration_factors = purchases_router.get_calibration_factors_retroactive(
-        db,
-        use_cache=(as_of_dt is None),
-        as_of_dt=as_of_dt,
-    )
-    # 投票判断では第1段の勝率帯キャリブレーションのみ使用する。
-    # 券種別補正・購入集合補正・オッズ帯補正・高オッズ補正は使用しない。
-    _t2 = _time.time()  # ここまで: 勝率帯キャリブレーション取得
+    # 2026-09-16: 勝率帯キャリブレーションは投票プランへ適用しなくなったため、
+    # 取得処理ごと撤去(以前ここが「1レース約45〜50秒かかる」原因調査の対象だった)。
+    _t2 = _time.time()  # ここまで: (キャリブレーション取得は廃止済み)
 
     # 着順まで当てる必要がある券種(3連単・2車単)は、顔ぶれだけ当てればいい券種
     # (3連複・2車複・ワイド)より難しく、レースのステージ(S級決勝等)によっては
@@ -893,13 +884,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         arity = calc.BET_TYPE_ARITY.get(o.bet_type)
         if arity in norm_mass:
             est_prob_raw = est_prob_raw / norm_mass[arity]
-        if getattr(req, "apply_calibration", False):
-            est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = _apply_calibration(
-                est_prob_raw, calibration_factors, bet_type=o.bet_type
-            )
-            low_prob_warning = est_prob < 0.05
-        else:
-            est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
+        # 2026-09-16: 勝率帯キャリブレーションは投票プランへ一切適用しない
+        # (のんの指示により、apply_calibrationフラグごと撤去。常に生推定値を使う)。
+        est_prob, low_prob_warning, data_sufficiency_pct, accuracy_pct = est_prob_raw, False, 0.0, None
         ev_pct = calc.calc_ev_pct(est_prob, o.odds_value, req.rebate_pct)
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
