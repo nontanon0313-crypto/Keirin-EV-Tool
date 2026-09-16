@@ -5073,6 +5073,16 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
         calibration_multiplier = None
         if p.win_prob_raw is not None and p.win_prob_raw > 0 and p.win_prob_at_purchase is not None:
             calibration_multiplier = round(p.win_prob_at_purchase / p.win_prob_raw, 2)
+        # 市場(オッズ)が織り込んでいる確率との比較(のんの指摘により追加)。
+        # モデルの予想勝率がキャリブレーション無しでも市場と桁違いに乖離している場合、
+        # キャリブレーションではなく確率推定モデル自体(またはその回のデータ)の
+        # 問題である可能性が高いことを、1件ずつその場で確認できるようにする。
+        market_prob_pct = None
+        model_vs_market_ratio = None
+        if p.odds_at_purchase:
+            market_prob_pct = round(calc.market_prob_from_odds(p.odds_at_purchase, p.bet_type) * 100, 3)
+            if market_prob_pct and market_prob_pct > 0 and p.win_prob_at_purchase is not None:
+                model_vs_market_ratio = round((p.win_prob_at_purchase * 100) / market_prob_pct, 1)
         items.append({
             "race_id": p.race_id,
             "venue_name": r.venue_name if r else None,
@@ -5091,6 +5101,10 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
                 round(p.win_prob_raw * 100, 2) if p.win_prob_raw is not None else None
             ),
             "calibration_multiplier": calibration_multiplier,
+            # オッズから逆算した市場の織り込み確率(控除率概算込み)と、
+            # モデル予想がその何倍かを表す倍率。
+            "market_prob_pct": market_prob_pct,
+            "model_vs_market_ratio": model_vs_market_ratio,
             "prob_bucket": bucket_name,
             "ev_pct_at_purchase": round(p.ev_pct_at_purchase, 2) if p.ev_pct_at_purchase is not None else None,
             "stake_amount": p.stake_amount,
@@ -5135,6 +5149,17 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
     n_bets = len(items)
     wins = sum(1 for it in items if it["result"] == "win")
 
+    # 「過去データは3連単しか投票していないはず」を1件ずつ数えずに確認できるよう、
+    # 券種ごとの件数・的中数・的中率も返す(のんの指摘により追加)。
+    bet_type_counts = {}
+    for it in items:
+        bt = bet_type_counts.setdefault(it["bet_type"], {"count": 0, "wins": 0})
+        bt["count"] += 1
+        if it["result"] == "win":
+            bt["wins"] += 1
+    for bt, v in bet_type_counts.items():
+        v["win_rate_pct"] = round(v["wins"] / v["count"] * 100, 1) if v["count"] else None
+
     # 同一レースに複数買い目が入っていないかをその場で分かるよう、
     # レースごとの購入件数も添える(2件以上のレースだけ抽出)。
     race_bet_counts = {}
@@ -5151,6 +5176,7 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
         "avg_bets_per_race": round(n_bets / n_races, 2) if n_races else None,
         "wins": wins,
         "win_rate_pct": round(wins / n_bets * 100, 1) if n_bets else None,
+        "bet_type_counts": bet_type_counts,
         "multi_bet_race_count": len(multi_bet_races),
         "multi_bet_races": multi_bet_races[:50],
         "since": since,

@@ -2154,15 +2154,18 @@ document.getElementById("loadPurchaseHistoryBtn").addEventListener("click", asyn
       return;
     }
     let html = `<p><strong>購入履歴一覧(実購入のみ)</strong></p>`;
-    html += `<p class="note">実購入件数: ${data.count}件 / 投票したレース数: ${data.n_races}件 / 1レースあたり平均: ${data.avg_bets_per_race}買い目 / このうち的中: ${data.wins}件(${data.win_rate_pct}%)。表の並び順は購入時点の予想勝率が高い順です。「勝率帯の実的中率」は、その行と同じ勝率帯(0-5%/5-15%/15-30%/30%以上)に属する実購入だけを集めた実際の的中率です。個別の予想勝率(例:39%)がその帯の実績と大きく食い違う場合、その帯自体のサンプル数が少なくキャリブレーションがまだ信頼できない可能性があります。「補正倍率」は補正前(モデルの生推定値)から補正後へ何倍されたかで、0.3〜3.0倍にクリップされています(3.0倍の行は上限に張り付いている=補正が効きすぎている疑いがあります)。</p>`;
+    const betTypeSummary = Object.entries(data.bet_type_counts || {}).map(([bt, v]) => `${bt}:${v.count}件(的中${v.wins}件・${v.win_rate_pct}%)`).join(" / ");
+    html += `<p class="note">実購入件数: ${data.count}件 / 投票したレース数: ${data.n_races}件 / 1レースあたり平均: ${data.avg_bets_per_race}買い目 / このうち的中: ${data.wins}件(${data.win_rate_pct}%)。券種内訳: ${betTypeSummary || "-"}。表の並び順は購入時点の予想勝率が高い順です。</p>`;
+    html += `<p class="note">「勝率帯の実的中率」は、その行と同じ勝率帯(0-5%/5-15%/15-30%/30%以上)に属する実購入だけを集めた実際の的中率です。「補正前→補正倍率」は生推定値からの倍率(1.00倍=補正なし。現在は投票プランへのキャリブレーション適用自体を撤去済みのため、新しい購入は常に1.00倍になります)。「市場比」は、購入時オッズから逆算した市場の織り込み確率に対して、モデルの予想勝率が何倍だったかです。極端に高い(数十倍以上)行は、キャリブレーションではなく確率推定モデル側(またはその回の出走表データ)に問題がある可能性が高いため、赤字で強調しています。</p>`;
     if (data.multi_bet_race_count > 0) {
       html += `<p class="note" style="color:#f59e0b;">⚠️ 同一レースに2買い目以上入っているレースが${data.multi_bet_race_count}件あります(下表で同じレースIDが複数回出てくる行を確認してください)。</p>`;
     }
-    html += `<table><tr><th>レースID</th><th>開催場</th><th>R</th><th>日時</th><th>券種</th><th>買い目</th><th>予想勝率</th><th>補正前</th><th>補正倍率</th><th>勝率帯</th><th>勝率帯の実的中率</th><th>オッズ</th><th>結果</th><th>払戻</th></tr>`;
+    html += `<table><tr><th>レースID</th><th>開催場</th><th>R</th><th>日時</th><th>券種</th><th>買い目</th><th>予想勝率</th><th>補正前</th><th>補正倍率</th><th>勝率帯</th><th>勝率帯の実的中率</th><th>オッズ</th><th>市場確率</th><th>市場比</th><th>結果</th><th>払戻</th></tr>`;
     for (const it of data.items) {
       const cls = it.result === "win" ? "ev-positive" : "";
       const capCls = it.calibration_multiplier >= 3.0 ? ' style="color:#ef4444;font-weight:bold;"' : "";
-      html += `<tr class="${cls}"><td>${it.race_id}</td><td>${it.venue_name ?? "-"}</td><td>${it.race_number ?? "-"}</td><td>${it.race_date ? it.race_date.slice(0, 10) : "-"}</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.win_prob_at_purchase_pct ?? "-"}${it.win_prob_at_purchase_pct !== null ? "%" : ""}</td><td>${it.win_prob_raw_pct ?? "-"}${it.win_prob_raw_pct !== null ? "%" : ""}</td><td${capCls}>${it.calibration_multiplier ?? "-"}${it.calibration_multiplier !== null ? "倍" : ""}</td><td>${it.prob_bucket ?? "-"}</td><td>${it.bucket_actual_win_rate_pct ?? "-"}${it.bucket_actual_win_rate_pct !== null ? `%(${it.bucket_n}件)` : ""}</td><td>${it.odds_at_purchase ?? "-"}</td><td>${it.result}</td><td>${it.payout_amount ?? 0}円</td></tr>`;
+      const ratioCls = it.model_vs_market_ratio >= 10 ? ' style="color:#ef4444;font-weight:bold;"' : "";
+      html += `<tr class="${cls}"><td>${it.race_id}</td><td>${it.venue_name ?? "-"}</td><td>${it.race_number ?? "-"}</td><td>${it.race_date ? it.race_date.slice(0, 10) : "-"}</td><td>${it.bet_type}</td><td>${it.combination}</td><td>${it.win_prob_at_purchase_pct ?? "-"}${it.win_prob_at_purchase_pct !== null ? "%" : ""}</td><td>${it.win_prob_raw_pct ?? "-"}${it.win_prob_raw_pct !== null ? "%" : ""}</td><td${capCls}>${it.calibration_multiplier ?? "-"}${it.calibration_multiplier !== null ? "倍" : ""}</td><td>${it.prob_bucket ?? "-"}</td><td>${it.bucket_actual_win_rate_pct ?? "-"}${it.bucket_actual_win_rate_pct !== null ? `%(${it.bucket_n}件)` : ""}</td><td>${it.odds_at_purchase ?? "-"}</td><td>${it.market_prob_pct ?? "-"}${it.market_prob_pct !== null ? "%" : ""}</td><td${ratioCls}>${it.model_vs_market_ratio ?? "-"}${it.model_vs_market_ratio !== null ? "倍" : ""}</td><td>${it.result}</td><td>${it.payout_amount ?? 0}円</td></tr>`;
     }
     html += `</table>`;
     resultBox.innerHTML = html;
