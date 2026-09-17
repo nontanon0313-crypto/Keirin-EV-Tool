@@ -2158,13 +2158,17 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
 
 
 // ---------- 閾値政策集計（見送り含む・フィルター付き） ----------
-async function loadThresholdPolicyScan(sections) {
+async function loadThresholdPolicyScan(sections, combinedCheck) {
   const resultBox = document.getElementById("statsResult");
   const scopeEl = document.getElementById("thresholdPolicyScope");
   const scope = (scopeEl && scopeEl.value) || "all";
   resultBox.textContent = "閾値政策集計を読み込み中...";
   try {
-    const res = await fetch(apiUrl(`/purchases/diagnostics/threshold-policy-scan?since=calibration_switch&scope=${encodeURIComponent(scope)}`));
+    let url = `/purchases/diagnostics/threshold-policy-scan?since=calibration_switch&scope=${encodeURIComponent(scope)}`;
+    if (combinedCheck) {
+      url += `&check_min_wp_pct=${encodeURIComponent(combinedCheck.minWpPct)}&check_min_odds=${encodeURIComponent(combinedCheck.minOdds)}`;
+    }
+    const res = await fetch(apiUrl(url));
     const d = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(d));
     const fmt = (v) => (v === null || v === undefined) ? "-" : v;
@@ -2208,6 +2212,14 @@ async function loadThresholdPolicyScan(sections) {
     if (show("topk")) {
       html += tableFromArr("4. 1レースあたりEV上位K件(予想的中率×オッズ基準)", d["4_1レース上位K件"], "上位K");
     }
+    if (d["5_複合フィルタ確認"]) {
+      const v = d["5_複合フィルタ確認"];
+      const cond = v["条件"] || {};
+      html += `<h3>5. 複合フィルタ確認（予想的中率≥${fmt(cond["予想的中率下限%"])}% かつ オッズ≥${fmt(cond["オッズ下限倍"])}倍）</h3>`;
+      html += `<table><tr><th>n</th><th>hits</th><th>実績的中率%</th><th>実績的中率95%CI</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>ROI95%CI</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
+      html += `<tr><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmtCi(v["実績的中率95%CI"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmtCi(v["ROI95%CI"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr></table>`;
+      html += `<p class="note">ROI95%CIの下限が100%を上回っていれば、この2条件の組み合わせで安定した黒字(ROI100%以上)が統計的に裏付けられていると判断できます。</p>`;
+    }
     resultBox.innerHTML = html;
   } catch (e) {
     resultBox.textContent = "エラー: " + e.message;
@@ -2219,6 +2231,11 @@ document.getElementById("loadThresholdPolicyHitBtn")?.addEventListener("click", 
 document.getElementById("loadThresholdPolicyOddsBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["odds"]));
 document.getElementById("loadThresholdPolicyEvBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["ev"]));
 document.getElementById("loadThresholdPolicyTopKBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["topk"]));
+document.getElementById("loadCombinedFilterCheckBtn")?.addEventListener("click", () => {
+  const minWpPct = parseFloat(document.getElementById("combinedCheckMinWp").value) || 2;
+  const minOdds = parseFloat(document.getElementById("combinedCheckMinOdds").value) || 125;
+  loadThresholdPolicyScan(["all"], { minWpPct, minOdds });
+});
 
 // ---------- オッズ下限フィルタ追加の影響（見送り増加チェック） ----------
 document.getElementById("loadOddsFilterImpactBtn")?.addEventListener("click", async () => {

@@ -5050,12 +5050,16 @@ def threshold_policy_scan(
     since: Optional[str] = "calibration_switch",
     scope: str = "all",
     unit_stake: float = 100.0,
+    check_min_wp_pct: Optional[float] = None,
+    check_min_odds: Optional[float] = None,
     db: Session = Depends(get_db),
 ):
     """
     除外(見送り)を含む閾値・点数政策の集計。
     scope: all | purchase | skipped
     1) 予想的中率帯  2) オッズ帯  3) EV帯  4) 1レースあたり上位K件
+    check_min_wp_pct・check_min_odds を指定すると、その2条件を同時に満たす
+    複合フィルタの実績的中率・ROIとその95%信頼区間を「5_複合フィルタ確認」として追加する。
     文言は「的中率」(勝率は使わない)。投票プランの的中率と同じく買い目1本の確率を使う。
     """
     from collections import defaultdict
@@ -5303,6 +5307,18 @@ def threshold_policy_scan(
 
     topk = [topk_sim(k) for k in (1, 2, 3, 5, 8, 10, 15, 20)]
 
+    combined_check = None
+    if check_min_wp_pct is not None and check_min_odds is not None:
+        combined_sub = [
+            r for r in rows
+            if r["wp_pct"] is not None and r["wp_pct"] >= check_min_wp_pct
+            and r["odds"] is not None and r["odds"] >= check_min_odds
+        ]
+        combined_check = {
+            "条件": {"予想的中率下限%": check_min_wp_pct, "オッズ下限倍": check_min_odds},
+            **pack(combined_sub),
+        }
+
     return {
         "note": "見送り含む閾値政策用。予想的中率=買い目1本の確率(投票プランと同じ定義)。勝率という語は使わない。",
         "scope": scope,
@@ -5323,6 +5339,7 @@ def threshold_policy_scan(
         "3_EV帯": {k: pack(by_ev[k]) for k in ev_order if k in by_ev},
         "3_下限スイープ_EV": sweep_ev(),
         "4_1レース上位K件": topk,
+        "5_複合フィルタ確認": combined_check,
     }
 
 
