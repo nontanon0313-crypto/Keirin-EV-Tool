@@ -247,41 +247,14 @@ function showFavoritesPanelFromCacheOrFetch(force) {
 
 async function fetchTodayRaces(force) {
   const c = raceListCache.today;
-  if (!force && _cacheValid(c)) {
-    const now = new Date();
-    const nowMinutes = now.getHours() * 60 + now.getMinutes();
-
-    return c.races.filter(r => {
-      const postTime = String(r.post_time ?? "").trim();
-      if (!/^\d{1,2}:\d{2}$/.test(postTime)) return true;
-
-      const [h, min] = postTime.split(":").map(Number);
-      return h * 60 + min > nowMinutes;
-    });
-  }
+  if (!force && _cacheValid(c)) return c.races;
   const res = await fetch(apiUrl("/races/today"));
   const data = await res.json();
   let races = (data || []).map(r => ({
-    id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number, post_time: r.post_time,
+    id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
     entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
     label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}${r.actual_result ? " ・結果確定済み" : ""}`,
   }));
-
-    // 本日のレース一覧では、発走時刻を過ぎたレースを非表示にする。
-    if (Array.isArray(races)) {
-      const now = new Date();
-      const nowMinutes = now.getHours() * 60 + now.getMinutes();
-
-      races = races.filter(r => {
-        const postTime = String(r.post_time ?? "").trim();
-        if (!/^\d{1,2}:\d{2}$/.test(postTime)) return true;
-
-        const [h, min] = postTime.split(":").map(Number);
-        const postTimeMinutes = h * 60 + min;
-
-        return postTimeMinutes > nowMinutes;
-      });
-    }
   if (Array.isArray(races)) {
     races = races.filter(r => {
       const st = String(
@@ -2209,17 +2182,18 @@ async function loadThresholdPolicyScan(sections) {
     html += `<p>件数: 合計${fmt(c["合計"])} / 実投票${fmt(c["実投票"])} / 見送り${fmt(c["見送り"])} / レース${fmt(c["レース数"])}</p>`;
     html += `<p>全体: n=${fmt(o.n)} hits=${fmt(o.hits)} 実績的中率=${fmt(o["実績的中率%"])}% 予想的中率平均=${fmt(o["予想的中率平均%"])}% ROI=${fmt(o["ROI%"])}% 平均EV=${fmt(o["平均EV%"])}%</p>`;
 
+    const fmtCi = (ci) => (ci && ci[0] !== null && ci[0] !== undefined) ? `[${ci[0]}, ${ci[1]}]` : "-";
     const tableFromObj = (title, obj, keyLabel) => {
-      let h = `<h3>${title}</h3><table><tr><th>${keyLabel}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
+      let h = `<h3>${title}</h3><table><tr><th>${keyLabel}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>実績的中率95%CI</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>ROI95%CI</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
       for (const [k, v] of Object.entries(obj || {})) {
-        h += `<tr><td>${k}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
+        h += `<tr><td>${k}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmtCi(v["実績的中率95%CI"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmtCi(v["ROI95%CI"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
       }
       return h + `</table>`;
     };
     const tableFromArr = (title, arr, keyField) => {
-      let h = `<h3>${title}</h3><table><tr><th>${keyField}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
+      let h = `<h3>${title}</h3><table><tr><th>${keyField}</th><th>n</th><th>hits</th><th>実績的中率%</th><th>実績的中率95%CI</th><th>予想的中率平均%</th><th>実績÷予想</th><th>ROI%</th><th>ROI95%CI</th><th>平均EV%</th><th>平均オッズ</th></tr>`;
       for (const v of arr || []) {
-        h += `<tr><td>${fmt(v[keyField] ?? v["上位K"])}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
+        h += `<tr><td>${fmt(v[keyField] ?? v["上位K"])}</td><td>${fmt(v.n)}</td><td>${fmt(v.hits)}</td><td>${fmt(v["実績的中率%"])}</td><td>${fmtCi(v["実績的中率95%CI"])}</td><td>${fmt(v["予想的中率平均%"])}</td><td>${fmt(v["的中率比_実績÷予想"])}</td><td>${fmt(v["ROI%"])}</td><td>${fmtCi(v["ROI95%CI"])}</td><td>${fmt(v["平均EV%"])}</td><td>${fmt(v["平均オッズ"])}</td></tr>`;
       }
       return h + `</table>`;
     };
