@@ -2225,6 +2225,26 @@ document.getElementById("loadThresholdPolicyOddsBtn")?.addEventListener("click",
 document.getElementById("loadThresholdPolicyEvBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["ev"]));
 document.getElementById("loadThresholdPolicyTopKBtn")?.addEventListener("click", () => loadThresholdPolicyScan(["topk"]));
 
+// ---------- オッズ下限フィルタ追加の影響（見送り増加チェック） ----------
+document.getElementById("loadOddsFilterImpactBtn")?.addEventListener("click", async () => {
+  const resultBox = document.getElementById("statsResult");
+  resultBox.textContent = "オッズ下限追加の影響を集計中...";
+  try {
+    const res = await fetch(apiUrl(`/purchases/diagnostics/odds-filter-impact?since=calibration_switch&min_wp_pct=2&min_odds=125`));
+    const d = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(d));
+    let html = `<p><strong>オッズ下限追加の影響</strong>（予想的中率≥${d["条件"]["予想的中率下限%"]}% / オッズ≥${d["条件"]["オッズ下限倍"]}倍）</p>`;
+    html += `<p>対象レース数: ${d["対象レース数"]}</p>`;
+    html += `<p>予想的中率フィルタのみで候補ありのレース数: ${d["予想的中率フィルタのみで候補ありのレース数"]}</p>`;
+    html += `<p>オッズ下限も加えて候補ありのレース数: ${d["オッズ下限も加えて候補ありのレース数"]}</p>`;
+    html += `<p style="color:#f59e0b;">オッズ下限追加により新たに見送りになるレース数: ${d["オッズ下限追加により新たに見送りになるレース数"]}件（${d["新たに見送りになる割合%"] ?? "-"}%）</p>`;
+    html += `<p class="note">${d.note}</p>`;
+    resultBox.innerHTML = html;
+  } catch (e) {
+    resultBox.textContent = "エラー: " + e.message;
+  }
+});
+
 
 document.getElementById("loadPurchaseHistoryBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("purchaseHistoryResult");

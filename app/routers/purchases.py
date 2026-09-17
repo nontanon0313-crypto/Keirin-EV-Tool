@@ -4953,6 +4953,98 @@ def threshold_band_scan(
 
 
 
+@router.get("/diagnostics/odds-filter-impact")
+def odds_filter_impact(
+    since: Optional[str] = "calibration_switch",
+    min_wp_pct: float = 2.0,
+    min_odds: float = 125.0,
+    db: Session = Depends(get_db),
+):
+    """
+    現行の予想的中率フィルタ(既定2%以上)に加えて、オッズ下限フィルタを追加した場合、
+    投票可能な候補が1つも無くなり丸ごと見送りになるレースがどれだけ増えるかを、
+    購入・見送り検証記録から推定する。
+    注意: 見送り記録は期待値マイナスの組み合わせを推定確率が高い順の上位N件
+    (3連単は120件)までしか保存していないため、極端に低確率帯の候補は
+    一部網羅されていない可能性がある。ただし推定確率が高い候補ほど優先的に
+    記録される仕組みのため、min_wp_pct以上の候補についての捕捉率は高いと考えられる。
+    """
+    from collections import defaultdict as _defaultdict
+
+    since_dt = _parse_since_param(since) if since and since != "all" else None
+
+    pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
+    if since_dt is not None:
+        pq = pq.filter(models.Purchase.purchased_at >= since_dt)
+    purchases = [p for p in pq.all() if float(p.stake_amount or 0) > 0]
+
+    sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
+    if since_dt is not None:
+        sq = sq.filter(models.SkippedBet.created_at >= since_dt)
+    skipped = sq.all()
+
+    race_ids = {p.race_id for p in purchases} | {s.race_id for s in skipped}
+    odds_map = {}
+    if race_ids:
+        for o in db.query(models.Odds).filter(
+            models.Odds.race_id.in_(race_ids), models.Odds.bet_type == "3連単"
+        ).all():
+            if o.odds_value:
+                odds_map[(o.race_id, o.bet_type, o.combination)] = float(o.odds_value)
+
+    by_race = _defaultdict(list)
+    for p in purchases:
+        if (p.bet_type or "") != "3連単":
+            continue
+        odds = p.odds_at_purchase or odds_map.get((p.race_id, p.bet_type, p.combination))
+        wp = p.win_prob_at_purchase
+        by_race[p.race_id].append({
+            "wp_pct": float(wp) * 100.0 if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+        })
+    for s in skipped:
+        if (s.bet_type or "") != "3連単":
+            continue
+        odds = odds_map.get((s.race_id, s.bet_type, s.combination))
+        wp = s.win_prob_estimated
+        by_race[s.race_id].append({
+            "wp_pct": float(wp) * 100.0 if wp is not None else None,
+            "odds": float(odds) if odds is not None else None,
+        })
+
+    total_races = len(by_race)
+    has_wp_candidate = 0
+    has_wp_and_odds_candidate = 0
+    newly_blocked_races = []
+    for rid, items in by_race.items():
+        wp_ok = [it for it in items if it["wp_pct"] is not None and it["wp_pct"] >= min_wp_pct]
+        if wp_ok:
+            has_wp_candidate += 1
+            wp_and_odds_ok = [it for it in wp_ok if it["odds"] is not None and it["odds"] >= min_odds]
+            if wp_and_odds_ok:
+                has_wp_and_odds_candidate += 1
+            else:
+                newly_blocked_races.append(rid)
+
+    return {
+        "since_resolved": since,
+        "条件": {"予想的中率下限%": min_wp_pct, "オッズ下限倍": min_odds},
+        "対象レース数": total_races,
+        "予想的中率フィルタのみで候補ありのレース数": has_wp_candidate,
+        "オッズ下限も加えて候補ありのレース数": has_wp_and_odds_candidate,
+        "オッズ下限追加により新たに見送りになるレース数": len(newly_blocked_races),
+        "新たに見送りになる割合%": (
+            round(100.0 * len(newly_blocked_races) / has_wp_candidate, 2)
+            if has_wp_candidate else None
+        ),
+        "note": (
+            "見送り記録は期待値マイナスの組み合わせを推定確率上位N件(3連単は120件)までしか"
+            "保存していないため、低確率帯の候補網羅には限界がある。"
+            "min_wp_pct以上の候補は優先的に記録される仕組みのため捕捉率は高いと考えられる。"
+        ),
+    }
+
+
 @router.get("/diagnostics/threshold-policy-scan")
 def threshold_policy_scan(
     since: Optional[str] = "calibration_switch",
