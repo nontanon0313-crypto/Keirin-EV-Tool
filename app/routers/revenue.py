@@ -377,6 +377,9 @@ def revenue_stats(db: Session = Depends(get_db)):
     not_voted_count = 0
     pending_count = 0
 
+    odds_sum = 0.0
+    odds_count = 0
+
     for r in rows:
         if r.vote_status == "not_voted":
             not_voted_count += 1
@@ -403,6 +406,10 @@ def revenue_stats(db: Session = Depends(get_db)):
         actual_payout_sum += payout
         actual_pnl_sum += payout - stake
         voted_count += 1
+
+        if r.planned_odds is not None:
+            odds_sum += r.planned_odds
+            odds_count += 1
 
         if r.actual_result == "win":
             hit_count += 1
@@ -486,6 +493,11 @@ def revenue_stats(db: Session = Depends(get_db)):
             "hit_count": hit_count,
             "not_voted_count": not_voted_count,
             "pending_count": pending_count,
+            "avg_odds": (
+                round(odds_sum / odds_count, 2)
+                if odds_count
+                else None
+            ),
         },
         "diff": {
             "pnl": _diff(

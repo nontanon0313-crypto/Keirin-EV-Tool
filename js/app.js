@@ -793,6 +793,7 @@ function renderRevenueStats(data) {
     `<p>実績回収率: <strong>${pct(actual.roi_pct)}</strong> / ` +
     `的中率: ${pct(actual.hit_rate_pct)} ` +
     `(${actual.hit_count ?? 0}的中 / ${actual.voted_count ?? 0}投票済み)</p>` +
+    `<p>平均オッズ: ${actual.avg_odds != null ? actual.avg_odds + "倍" : "-"}</p>` +
     `<p class="note">未確定: ${actual.pending_count ?? 0}件 / ` +
     `未投票: ${actual.not_voted_count ?? 0}件</p>` +
     `<hr>` +
