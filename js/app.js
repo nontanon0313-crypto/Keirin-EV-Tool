@@ -250,23 +250,17 @@ async function fetchTodayRaces(force) {
   if (!force && _cacheValid(c)) return c.races;
   const res = await fetch(apiUrl("/races/today"));
   const data = await res.json();
-  let races = (data || []).map(r => ({
-    id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
-    entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
-    label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}${r.actual_result ? " ・結果確定済み" : ""}`,
-  }));
-  if (Array.isArray(races)) {
-    races = races.filter(r => {
-      const st = String(
-        r.status ?? r.race_status ?? r.raceStatus ?? ""
-      ).toLowerCase();
-      return !(
-        r.finished === true ||
-        r.completed === true ||
-        ["finished","completed","終了","確定"].includes(st)
-      );
-    });
-  }
+  const now = new Date();
+  const nowHm = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+  // 発走時刻(post_time)を過ぎたレースは投票プランタブの選択肢から非表示にする
+  // (結果確定前でも、発走済みなら投票不可のため)
+  let races = (data || [])
+    .filter(r => !(r.post_time && r.post_time < nowHm))
+    .map(r => ({
+      id: r.race_id, race_date: null, venue_name: r.venue_name, race_number: r.race_number,
+      entry_count: r.riders_count, odds_count: null, has_plan: !!r.has_plan,
+      label_extra: `${r.post_time ? r.post_time + " " : ""}${_planLabel(r)}`,
+    }));
 raceListCache.today = { at: Date.now(), races };
   return races;
 }
@@ -1061,6 +1055,7 @@ function renderRevenueList(data) {
         <p>
           <strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong>
           ${r.bet_type} ${r.combination}<br>
+          予想勝率: ${r.planned_win_prob != null ? (r.planned_win_prob * 100).toFixed(2) + "%" : "-"} /
           投資予定: ${yen(r.planned_stake)} /
           実投資: ${yen(r.actual_stake)} /
           結果: ${r.actual_result || "-"} /

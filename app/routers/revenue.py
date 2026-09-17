@@ -343,7 +343,7 @@ def list_live_bets(
     q = db.query(models.LiveBet)
     if race_id is not None:
         q = q.filter(models.LiveBet.race_id == race_id)
-    rows = q.order_by(models.LiveBet.created_at.asc(), models.LiveBet.id.asc()).limit(limit).all()
+    rows = q.order_by(models.LiveBet.created_at.desc(), models.LiveBet.id.desc()).limit(limit).all()
     return {"count": len(rows), "items": [_row_to_dict(r) for r in rows]}
 
 
