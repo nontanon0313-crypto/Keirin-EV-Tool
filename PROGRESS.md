@@ -391,3 +391,4 @@
 - `exit` / `logout` は使用禁止。エラー時も対話シェルを終了させない。
 - 修正対象の構造が現行ソースと一致しない場合は、その処理だけ停止し、compile/commit/pushしない。
 - 作業開始時は必ずこのPROGRESS.mdを読み、上記ルールを確認する。
+- 2026-09-18: 収益記録の想定値欠落原因を修正。購入時に作成したPurchaseのIDをLiveBetManualCreate.purchase_idで受け取り、`Purchase.win_prob_at_purchase` / `odds_at_purchase` / `ev_pct_at_purchase`を収益記録へ補完する。投資予定額は実投資額`Purchase.stake_amount`と混同せず、`Purchase.ev_result_id`から`EvResult.recommended_stake`を取得して補完する。フロントのプラン検索に依存しない。

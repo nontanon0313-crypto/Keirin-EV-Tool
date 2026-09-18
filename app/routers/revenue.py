@@ -241,6 +241,33 @@ def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(ge
         venue_name = venue_name or meta["venue_name"]
         race_number = race_number if race_number is not None else meta["race_number"]
 
+    # 購入履歴に紐付いている場合、購入時点の想定値をサーバー側で補完する。
+    # フロント側のlastRacePlanだけに依存せず、Purchaseを正本として扱う。
+    if payload.purchase_id:
+        purchase = (
+            db.query(models.Purchase)
+            .filter(models.Purchase.id == payload.purchase_id)
+            .first()
+        )
+        if purchase:
+            if payload.planned_win_prob is None:
+                payload.planned_win_prob = purchase.win_prob_at_purchase
+            if payload.planned_odds is None:
+                payload.planned_odds = purchase.odds_at_purchase
+            if payload.planned_ev_pct is None:
+                payload.planned_ev_pct = purchase.ev_pct_at_purchase
+
+            # 投資予定額は実投資額(Purchase.stake_amount)ではなく、
+            # EV計算時の推奨投資額(EvResult.recommended_stake)を使用する。
+            if payload.planned_stake is None and purchase.ev_result_id:
+                ev_row = (
+                    db.query(models.EvResult)
+                    .filter(models.EvResult.id == purchase.ev_result_id)
+                    .first()
+                )
+                if ev_row and ev_row.recommended_stake is not None:
+                    payload.planned_stake = ev_row.recommended_stake
+
     # 想定利益は「プラン上の予定投資額」ではなく、
     # 実際に投票した金額(actual_stake)を基準に算出する。
     # planned_expected_profit はフロントから送信されても、
