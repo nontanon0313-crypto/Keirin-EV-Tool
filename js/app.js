@@ -1074,7 +1074,7 @@ function renderRevenueList(data) {
         <p>
           <strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong>
           ${r.bet_type} ${r.combination}<br>
-          購入時刻: ${formatPurchaseTime(r.created_at)} / 予想的中率: ${r.planned_win_prob != null ? (r.planned_win_prob * 100).toFixed(2) + "%" : "-"} /
+          購入時刻: ${formatPurchaseTime(r.created_at)}<br>予想的中率: ${r.planned_win_prob != null ? (r.planned_win_prob * 100).toFixed(2) + "%" : "-"} /
           投資予定: ${yen(r.planned_stake)} /
           実投資: ${yen(r.actual_stake)} /
           結果: ${r.actual_result || "-"} /

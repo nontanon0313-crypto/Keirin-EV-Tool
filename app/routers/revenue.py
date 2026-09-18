@@ -363,6 +363,118 @@ def delete_live_bet(live_bet_id: int, db: Session = Depends(get_db)):
     return {"deleted": True, "id": live_bet_id}
 
 
+
+@router.post("/backfill-planned")
+def backfill_planned_from_purchases(db: Session = Depends(get_db)):
+    """既存LiveBetの欠落した想定値をPurchaseから補完する保守処理。"""
+    import re as _re
+
+    def norm(v):
+        if v is None:
+            return ""
+        return _re.sub(r"[^0-9A-Za-z]", "", str(v)).lower()
+
+    rows = db.query(models.LiveBet).filter(
+        models.LiveBet.race_id.isnot(None)
+    ).all()
+
+    updated = []
+    skipped = []
+
+    for row in rows:
+        if (
+            row.planned_stake is not None
+            and row.planned_win_prob is not None
+            and row.planned_odds is not None
+            and row.planned_ev_pct is not None
+        ):
+            continue
+
+        purchases = (
+            db.query(models.Purchase)
+            .filter(models.Purchase.race_id == row.race_id)
+            .filter(models.Purchase.bet_type == row.bet_type)
+            .all()
+        )
+
+        candidates = [
+            x for x in purchases
+            if norm(x.combination) == norm(row.combination)
+        ]
+
+        if not candidates:
+            skipped.append({
+                "live_bet_id": row.id,
+                "reason": "purchase_not_found",
+            })
+            continue
+
+        if row.created_at is not None:
+            def distance(x):
+                if x.purchased_at is None:
+                    return float("inf")
+                a = row.created_at
+                b = x.purchased_at
+                if getattr(a, "tzinfo", None):
+                    a = a.replace(tzinfo=None)
+                if getattr(b, "tzinfo", None):
+                    b = b.replace(tzinfo=None)
+                return abs((a - b).total_seconds())
+            purchase = min(candidates, key=distance)
+        else:
+            purchase = candidates[0]
+
+        changed = []
+
+        if row.planned_win_prob is None and purchase.win_prob_at_purchase is not None:
+            row.planned_win_prob = purchase.win_prob_at_purchase
+            changed.append("planned_win_prob")
+
+        if row.planned_odds is None and purchase.odds_at_purchase is not None:
+            row.planned_odds = purchase.odds_at_purchase
+            changed.append("planned_odds")
+
+        if row.planned_ev_pct is None and purchase.ev_pct_at_purchase is not None:
+            row.planned_ev_pct = purchase.ev_pct_at_purchase
+            changed.append("planned_ev_pct")
+
+        if row.planned_stake is None and purchase.ev_result_id:
+            ev_row = (
+                db.query(models.EvResult)
+                .filter(models.EvResult.id == purchase.ev_result_id)
+                .first()
+            )
+            if ev_row and ev_row.recommended_stake is not None:
+                row.planned_stake = ev_row.recommended_stake
+                changed.append("planned_stake")
+
+        if (
+            row.actual_stake is not None
+            and row.actual_stake > 0
+            and row.planned_win_prob is not None
+            and row.planned_odds is not None
+        ):
+            row.planned_expected_profit = row.actual_stake * (
+                row.planned_win_prob * row.planned_odds - 1.0
+            )
+
+        if changed:
+            updated.append({
+                "live_bet_id": row.id,
+                "purchase_id": purchase.id,
+                "combination": row.combination,
+                "fields": changed,
+            })
+
+    db.commit()
+
+    return {
+        "updated_count": len(updated),
+        "skipped_count": len(skipped),
+        "updated": updated,
+        "skipped": skipped,
+    }
+
 @router.get("/list")
 def list_live_bets(
     race_id: Optional[int] = None,
