@@ -239,6 +239,27 @@ def _select_portfolio(
             "_winning": winning_cache[key],
         })
 
+
+    # 的中率重視: 候補確定後にレース予算を等分。100円未満になる点は的中率の低い方から除外
+    if prefer_hit_rate and prepared:
+        prepared.sort(key=lambda x: (-float(x.get("win_prob") or 0), -float(x.get("odds_value") or 0)))
+        if max_items and max_items > 0:
+            prepared = prepared[: int(max_items)]
+        n = len(prepared)
+        while n > 0:
+            unit = int(budget_cap // n // 100) * 100
+            if unit >= 100:
+                break
+            n -= 1
+        prepared = prepared[:n]
+        if n > 0:
+            unit = int(budget_cap // n // 100) * 100
+            for c in prepared:
+                c["_stake"] = unit
+                c["_value"] = float(c.get("win_prob") or 0)
+        else:
+            prepared = []
+
     limit = max_items if max_items and max_items > 0 else len(prepared)
 
     selected = []
@@ -892,9 +913,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
         if getattr(req, "prefer_hit_rate", None) is True:
-            effective_min_ev = max(float(getattr(req, "min_ev_pct", 0.0)), 0.0)
+            effective_min_ev = float(\"-inf\")  # EVはプラン対象外
         else:
-            effective_min_ev = max(float(getattr(req, "min_ev_pct", 0.0)), 0.0)
+            effective_min_ev = max(float(getattr(req, \"min_ev_pct\", 0.0)), 0.0)
         gate_reason = None
         if apply_gates:
             # 現行仕様:
@@ -1145,10 +1166,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             # 本命一覧は事前予想なので的中確率だけで判断する。
             # 投票プランでは直前オッズを使ってEVを再計算し、
             # 下限EV未満の買い目は本命1着でも購入候補にしない。
-            effective_min_ev = max(float(getattr(req, "min_ev_pct", 0.0)), 0.0)
+            # EVは投票プラン選定の対象外（的中率・オッズのみ）
             ev_pct = float(e.get("ev_pct") or 0)
-            if ev_pct < effective_min_ev:
-                continue
             min_odds = float(getattr(req, "min_odds", 0) or 0)
             if min_odds > 0 and float(e.get("odds_value") or 0) < min_odds:
                 continue
@@ -1196,13 +1215,8 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
             if float(c.get("win_prob") or 0) < float(req.min_win_prob):
                 skipped_for_verification.append((c, "的中率重視:最低的中確率未満"))
                 continue
-            effective_min_ev = max(float(getattr(req, "min_ev_pct", 0.0)), 0.0)
+            # EVは投票プラン選定の対象外
             actual_ev = float(c.get("ev_pct") or 0)
-            if actual_ev < effective_min_ev:
-                skipped_for_verification.append(
-                    (c, f"的中率重視:下限EV未満(<{effective_min_ev}%/実際{actual_ev}%)")
-                )
-                continue
             min_odds = float(getattr(req, "min_odds", 0) or 0)
             if min_odds > 0 and float(c.get("odds_value") or 0) <= min_odds:
                 skipped_for_verification.append((c, f"的中率重視:オッズ下限未満(<{min_odds})"))

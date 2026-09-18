@@ -96,7 +96,7 @@ class RacePlanRequest(BaseModel):
     max_race_pct: Optional[float] = None  # 未指定なら資金管理シミュレーションで確認した値(bankroll_state.race_cap_pct)を自動使用
     min_win_prob: float = 0.0  # 安定的中の土台: 低確率すぎる穴は既定で薄くする
     min_ev_pct: float = 0.0  # 想定上振れ織り込みの入場下限
-    min_odds: float = 125.0  # 125倍未満を投票プランから除外(低オッズ帯が有意な赤字ゾーンと判明したため2026-09-17変更)
+    min_odds: float = 125.0  # 最低オッズ125倍未満は除外
     prefer_hit_rate: bool = True
     prefer_same_line: bool = False  # 同ライン絡み優先  # True=安定制約つき。1着本命三連単・的中確率優先
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
@@ -106,7 +106,7 @@ class RacePlanRequest(BaseModel):
     apply_calibration: bool = False  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
     apply_purchase_set_calibration: bool = False  # 購入集合の残差校正（第2段）
     avoid_garami: bool = True  # 券種をまたいで「的中したのに合計投票額を下回る(ガミる)」結果が起きないよう選定するか
-    apply_performance_gates: bool = True  # 不調ステージ見送りのみ(券種・帯の除外はしない。設計厳守)
+    apply_performance_gates: bool = False  # 不調ステージ見送りは既定OFF
     apply_odds_safety_margin: bool = True  # 過去のPurchase実績から算出したオッズ安全マージンを適用するか
     max_single_bet_pct_of_race_cap: float = 1.0
     max_payout_soft: float = 5_000_000  # 想定払戻がこの額超なら投票額を下げる
