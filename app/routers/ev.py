@@ -913,9 +913,9 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         is_skip, _ = calc.apply_min_prob_filter(est_prob, ev_pct, req.min_win_prob)
 
         if getattr(req, "prefer_hit_rate", None) is True:
-            effective_min_ev = float(\"-inf\")  # EVはプラン対象外
+            effective_min_ev = float("-inf")  # EVはプラン対象外
         else:
-            effective_min_ev = max(float(getattr(req, \"min_ev_pct\", 0.0)), 0.0)
+            effective_min_ev = max(float(getattr(req, "min_ev_pct", 0.0)), 0.0)
         gate_reason = None
         if apply_gates:
             # 現行仕様:
