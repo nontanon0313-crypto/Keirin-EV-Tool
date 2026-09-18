@@ -1073,12 +1073,52 @@ function renderRevenueList(data) {
   let html = "";
   for (const r of revenueRowsCache) {
     const pending = r.actual_result === "pending";
+    let boughtAt = "-";
+    {
+      const raw = r.created_at || r.race_date;
+      if (raw) {
+        const d = new Date(raw);
+        boughtAt = Number.isNaN(d.getTime())
+          ? String(raw).slice(0, 19)
+          : d.toLocaleString("ja-JP", {
+              timeZone: "Asia/Tokyo",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            });
+      }
+    }
+    // planned_win_prob は 0-1。無ければ planned から再計算表示しない
+    let predHit = "-";
+    if (r.planned_win_prob != null && Number.isFinite(Number(r.planned_win_prob))) {
+      predHit = (Number(r.planned_win_prob) * 100).toFixed(2) + "%";
+    }
+    let expProfit = "-";
+    if (r.planned_expected_profit != null && Number.isFinite(Number(r.planned_expected_profit))) {
+      expProfit = yen(r.planned_expected_profit);
+    } else if (
+      r.planned_win_prob != null &&
+      r.planned_odds != null &&
+      (r.actual_stake != null || r.planned_stake != null)
+    ) {
+      const st = Number(r.actual_stake != null ? r.actual_stake : r.planned_stake) || 0;
+      const p = Number(r.planned_win_prob);
+      const o = Number(r.planned_odds);
+      if (st > 0 && p > 0 && o > 0) expProfit = yen(st * (p * o - 1));
+    }
     html += `
       <div style="border-bottom:1px solid #334155;padding:10px 0;">
-        <p>
+        <p style="margin:0 0 6px 0;">
           <strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong>
-          ${r.bet_type} ${r.combination}<br>
-          購入時刻: ${formatPurchaseTime(r.created_at)}<br>予想的中率: ${r.planned_win_prob != null ? (r.planned_win_prob * 100).toFixed(2) + "%" : "-"} /
+          ${r.bet_type} ${r.combination}
+        </p>
+        <p style="margin:0;line-height:1.6;">
+          購入時刻: ${boughtAt}<br>
+          予想的中率: ${predHit}<br>
+          想定利益: ${expProfit}<br>
           投資予定: ${yen(r.planned_stake)} /
           実投資: ${yen(r.actual_stake)} /
           結果: ${r.actual_result || "-"} /
@@ -1227,24 +1267,29 @@ async function registerLastPlanToRevenue() {
   )) return;
 
   const items = lastRacePlan.items
-    .filter(it => it.stake && it.stake > 0)
-    .map(it => ({
-      bet_type: it.bet_type,
-      combination: it.combination,
-      planned_stake: it.stake,
-      planned_win_prob: it.win_prob != null
-        ? it.win_prob
-        : Number(it.estimated_win_prob_pct || 0) / 100,
-      planned_odds: it.odds_value,
-      planned_ev_pct: it.ev_pct,
-      planned_expected_profit:
-        it.stake * (
-          (it.win_prob != null
-            ? it.win_prob
-            : Number(it.estimated_win_prob_pct || 0) / 100) *
-          Number(it.odds_value || 0) - 1
-        ),
-    }));
+    .filter(it => Number(it.stake || it.raw_stake || 0) > 0)
+    .map(it => {
+      const stake = Number(it.stake || it.raw_stake || 0);
+      let wp = it.win_prob;
+      if (wp == null && it.estimated_win_prob_pct != null) {
+        wp = Number(it.estimated_win_prob_pct) / 100;
+      }
+      wp = (wp != null && Number.isFinite(Number(wp))) ? Number(wp) : null;
+      const odds = Number(it.odds_value || it.odds || 0) || null;
+      let exp = null;
+      if (wp != null && odds != null && stake > 0) {
+        exp = stake * (wp * odds - 1);
+      }
+      return {
+        bet_type: it.bet_type,
+        combination: it.combination,
+        planned_stake: stake,
+        planned_win_prob: wp,
+        planned_odds: odds,
+        planned_ev_pct: it.ev_pct != null ? Number(it.ev_pct) : null,
+        planned_expected_profit: exp,
+      };
+    });
 
   try {
     const res = await fetch(apiUrl("/revenue/from-plan"), {

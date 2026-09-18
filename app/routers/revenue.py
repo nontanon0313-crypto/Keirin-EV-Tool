@@ -150,8 +150,14 @@ def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Dep
     mark_voted = bool(payload.mark_as_voted)
     for it in payload.items:
         planned_exp = it.planned_expected_profit
-        if planned_exp is None and it.planned_stake and it.planned_win_prob is not None and it.planned_odds is not None:
-            planned_exp = it.planned_stake * (it.planned_win_prob * it.planned_odds - 1.0)
+        p_stake = it.planned_stake
+        p_wp = it.planned_win_prob
+        p_odds = it.planned_odds
+        # 0-1 と 0-100 の両方が来ても正規化
+        if p_wp is not None and float(p_wp) > 1.0:
+            p_wp = float(p_wp) / 100.0
+        if planned_exp is None and p_stake and p_wp is not None and p_odds is not None:
+            planned_exp = float(p_stake) * (float(p_wp) * float(p_odds) - 1.0)
         row = models.LiveBet(
             race_id=meta["race_id"],
             race_date=meta["race_date"],
@@ -159,13 +165,13 @@ def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Dep
             race_number=meta["race_number"],
             bet_type=it.bet_type,
             combination=it.combination,
-            planned_stake=it.planned_stake,
-            planned_win_prob=it.planned_win_prob,
-            planned_odds=it.planned_odds,
+            planned_stake=p_stake,
+            planned_win_prob=p_wp,
+            planned_odds=p_odds,
             planned_ev_pct=it.planned_ev_pct,
             planned_expected_profit=planned_exp,
             vote_status="voted" if mark_voted else "planned",
-            actual_stake=(it.planned_stake if mark_voted else None),
+            actual_stake=(p_stake if mark_voted else None),
             actual_result="pending",
             actual_payout=0.0,
             source="from_plan",
