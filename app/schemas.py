@@ -151,6 +151,7 @@ class LiveBetManualCreate(BaseModel):
     bet_type: str
     combination: str
     actual_stake: float
+    purchase_id: Optional[int] = None
     planned_stake: Optional[float] = None
     planned_win_prob: Optional[float] = None
     planned_odds: Optional[float] = None

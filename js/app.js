@@ -778,6 +778,24 @@ function pct(v) {
 
 
 
+function formatPurchaseTime(value) {
+  if (!value) return "-";
+  const raw = String(value);
+  const iso = /[zZ]|[+-]\d{2}:\d{2}$/.test(raw) ? raw : `${raw}Z`;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "-";
+  return d.toLocaleString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 function renderRevenueStats(data) {
   const box = document.getElementById("revenueStatsBox");
   if (!box) return;
@@ -1056,7 +1074,7 @@ function renderRevenueList(data) {
         <p>
           <strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong>
           ${r.bet_type} ${r.combination}<br>
-          予想勝率: ${r.planned_win_prob != null ? (r.planned_win_prob * 100).toFixed(2) + "%" : "-"} /
+          購入時刻: ${formatPurchaseTime(r.created_at)} / 予想的中率: ${r.planned_win_prob != null ? (r.planned_win_prob * 100).toFixed(2) + "%" : "-"} /
           投資予定: ${yen(r.planned_stake)} /
           実投資: ${yen(r.actual_stake)} /
           結果: ${r.actual_result || "-"} /
@@ -1322,9 +1340,16 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
     ? lastRacePlan
     : (Array.isArray(lastRacePlan?.items) ? lastRacePlan.items : []);
 
-  const planItem = planItems.find(it =>
+  function normalizePurchaseCombination(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const digits = raw.match(/[1-9]/g);
+  return digits && digits.length >= 2 ? digits.join("-") : raw;
+}
+
+const planItem = planItems.find(it =>
     String(it.bet_type ?? it.betType ?? "") === String(betType) &&
-    String(it.combination ?? "") === String(combination)
+    normalizePurchaseCombination(it.combination) === normalizePurchaseCombination(combination)
   ) || null;
 
   const plannedWinProbRaw =
@@ -1404,6 +1429,8 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
         planned_win_prob: plannedWinProb,
         planned_odds: plannedOdds,
         planned_ev_pct: plannedEvPct,
+        purchase_id: data.id,
+        
         actual_stake: stake,
         actual_result: "pending",
         actual_payout: 0,
