@@ -485,7 +485,7 @@ def backfill_planned_from_purchases(db: Session = Depends(get_db)):
 def list_live_bets(
     race_id: Optional[int] = None,
     limit: int = Query(200, ge=1, le=1000),
-    days: int = Query(2, ge=1, le=30, description="直近何日分(既定2=今日+昨日)"),
+    days: int = Query(14, ge=1, le=365, description="直近何日分(既定14。過去記録表示用)"),
     db: Session = Depends(get_db),
 ):
     """収益一覧。JSTで今日と昨日のみ(2日前以前は非表示)。"""
