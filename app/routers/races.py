@@ -61,11 +61,15 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         raise HTTPException(404, "レースが見つかりません")
 
     try:
+        # "123" -> "1-2-3" を parse 前に正規化し、DBにも正規化後を保存する
+        raw = (actual_result or "").strip().replace(" ", "")
+        if raw.isdigit() and len(raw) >= 2:
+            actual_result = "-".join(list(raw))
         parsed_result = calc.parse_actual_result(actual_result)
         if not parsed_result["groups"]:
             raise ValueError("empty")
     except ValueError:
-        raise HTTPException(400, "着順の形式が正しくありません(例: 2-5-1、同着は7-14=9のように=で区切る)")
+        raise HTTPException(400, "着順の形式が正しくありません(例: 2-5-1 または 251、同着は7-14=9)")
 
     race.actual_result = actual_result
 

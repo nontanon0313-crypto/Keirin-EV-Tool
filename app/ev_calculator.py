@@ -178,12 +178,17 @@ def parse_actual_result(actual_result: str) -> dict:
     同着がある場合は、同着の着順を"="で区切って入力する
     (のんの要望により追加。例: 2着と3着が同着で3着が実質無い場合など)。
     例: "7-14=9" → 1着7番、2着は14番と9番の同着。
+    ハイフン無しの連続数字 "123" は "1-2-3" として扱う(車番1-9前提)。
     戻り値: {
         "groups": [[7],[14,9]],  # 着順ごとの車番グループ(同着は複数車)
         "top3_set": {7,14,9},    # 上位3着に絡む車番の集合(3連複・ワイド判定用)
         "canonical_orderings": [(7,14,9),(7,9,14)],  # 同着を展開した「あり得る着順」全パターン
     }
     """
+    # compact digits to 1-2-3
+    raw = (actual_result or "").strip().replace(" ", "")
+    if raw.isdigit() and len(raw) >= 2:
+        actual_result = "-".join(list(raw))
     groups = []
     for part in actual_result.split("-"):
         part = part.strip()

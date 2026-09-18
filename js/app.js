@@ -1477,8 +1477,8 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
         : "(このレースは買い示唆なし・購入なしでした)";
       div.innerHTML = `
         <p><strong>${group.venue_name} ${group.race_number}R</strong><br>未確定: ${itemsHtml}</p>
-        <label>実際の着順(例: 2-5-1 = 1着2番,2着5番,3着1番。同着は"="で区切る 例: 7-14=9)</label>
-        <input type="text" placeholder="2-5-1(同着なら 7-14=9)" id="result_${raceId}">
+        <label>実際の着順(例: 251 または 2-5-1。同着は 7-14=9)</label>
+        <input type="text" placeholder="251 または 2-5-1" id="result_${raceId}">
         <button data-race="${raceId}" class="confirmResultBtn">この着順で一括確定する</button>
         ${group.items.length ? `<button data-race="${raceId}" class="discardPendingBtn" style="background:#facc15;">実際は投票しなかった(この分を破棄)</button>` : ""}
         <div id="confirmMsg_${raceId}" class="result-box"></div>
@@ -1504,10 +1504,14 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
     document.querySelectorAll(".confirmResultBtn").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const raceId = btn.dataset.race;
-        const actualResult = document.getElementById(`result_${raceId}`).value.trim();
+        let actualResult = document.getElementById(`result_${raceId}`).value.trim().replace(/\s+/g, "");
+        // "123" -> "1-2-3"（車番1-9の連続数字）
+        if (/^\d{2,}$/.test(actualResult)) {
+          actualResult = actualResult.split("").join("-");
+        }
         const msgBox = document.getElementById(`confirmMsg_${raceId}`);
         if (!actualResult) {
-          alert("着順を入力してください(例: 2-5-1)");
+          alert("着順を入力してください(例: 251 または 2-5-1)");
           return;
         }
         msgBox.textContent = "確定中...";
