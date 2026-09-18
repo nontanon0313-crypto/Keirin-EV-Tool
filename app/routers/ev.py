@@ -228,7 +228,8 @@ def _select_portfolio(
             ]
 
         if prefer_hit_rate:
-            value = stake * float(c["win_prob"])
+            # 投票額で順位が歪まないよう的中率のみで優先
+            value = float(c["win_prob"])
         else:
             value = stake * (c["win_prob"] * c["odds_value"] - 1.0)
         prepared.append({
@@ -1339,7 +1340,7 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
         elif excluded_by_garami_count > 0 and req.avoid_garami:
             reasons.append("ガミり回避または予算制約で選外")
         else:
-            reasons.append("レース予算・優先順位で選外")
+            reasons.append("的中率順の採用枠・予算・ガミり制約で選外")
         preview_candidates.append({
             "bet_type": c["bet_type"],
             "combination": c["combination"],
