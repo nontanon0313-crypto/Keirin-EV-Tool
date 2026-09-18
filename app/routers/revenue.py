@@ -169,6 +169,8 @@ def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Dep
             actual_result="pending",
             actual_payout=0.0,
             source="from_plan",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
         )
         db.add(row)
         created.append(row)
@@ -338,13 +340,38 @@ def delete_live_bet(live_bet_id: int, db: Session = Depends(get_db)):
 def list_live_bets(
     race_id: Optional[int] = None,
     limit: int = Query(200, ge=1, le=1000),
+    days: int = Query(2, ge=1, le=30, description="直近何日分(既定2=今日+昨日)"),
     db: Session = Depends(get_db),
 ):
+    """収益一覧。JSTで今日と昨日のみ(2日前以前は非表示)。"""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import or_, and_
+
+    jst = timezone(timedelta(hours=9))
+    now_jst = datetime.now(jst)
+    start_jst = now_jst.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=max(0, days - 1))
+    start_utc = start_jst.astimezone(timezone.utc).replace(tzinfo=None)
+    start_date_naive = start_jst.replace(tzinfo=None)
+
     q = db.query(models.LiveBet)
     if race_id is not None:
         q = q.filter(models.LiveBet.race_id == race_id)
-    rows = q.order_by(models.LiveBet.created_at.desc(), models.LiveBet.id.desc()).limit(limit).all()
-    return {"count": len(rows), "items": [_row_to_dict(r) for r in rows]}
+    q = q.filter(
+        or_(
+            and_(models.LiveBet.race_date.isnot(None), models.LiveBet.race_date >= start_date_naive),
+            and_(models.LiveBet.created_at.isnot(None), models.LiveBet.created_at >= start_utc),
+        )
+    )
+    rows = q.order_by(
+        models.LiveBet.created_at.desc().nullslast(),
+        models.LiveBet.id.desc(),
+    ).limit(limit).all()
+    return {
+        "count": len(rows),
+        "days": days,
+        "since_jst": start_jst.isoformat(),
+        "items": [_row_to_dict(r) for r in rows],
+    }
 
 
 
