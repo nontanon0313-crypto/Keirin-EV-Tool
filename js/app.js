@@ -611,7 +611,10 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
         // ズレていて実運用として危険だったため、単一の情報源に統一した
         // (のんの指摘により2026-09-06に修正)。
         rebate_pct: getRebatePct(),
-        max_items: parseInt(document.getElementById("maxItemsInput").value) || 20,
+        max_items: (() => {
+          const v = parseInt(document.getElementById("maxItemsInput").value, 10);
+          return Number.isNaN(v) ? 0 : Math.max(0, v);
+        })(),
         apply_calibration: isCalibrationApplyEnabled(),
         apply_performance_gates: document.getElementById("applyPerformanceGatesCheckbox")
           ? document.getElementById("applyPerformanceGatesCheckbox").checked : true,
