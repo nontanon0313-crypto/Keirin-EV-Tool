@@ -100,7 +100,7 @@ class RacePlanRequest(BaseModel):
     prefer_hit_rate: bool = True
     prefer_same_line: bool = False  # 同ライン絡み優先  # True=安定制約つき。1着本命三連単・的中確率優先
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
-    max_items: int = 1  # 2026-09-13: 戦略A(最高勝率1点のみ)を採用。全期間検証で複数点分散より優れていた
+    max_items: int = 0  # 0=件数上限なし。条件を満たす候補をレース予算内で採用（点数は固定しない）
     max_race_fill_pct: float = 0.5  # race_capの使用上限比率  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
     exclude_low_prob_warning: bool = False  # 大穴帯(0-5%・実績未検証)も候補として評価し、警告は表示する
     apply_calibration: bool = False  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
