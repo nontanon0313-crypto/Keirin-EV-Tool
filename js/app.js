@@ -1374,10 +1374,14 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
   const raceId = document.getElementById("raceSelect").value;
   const betType = document.getElementById("purchaseBetType").value;
   const combination = document.getElementById("purchaseCombination").value;
-  const stake = parseFloat(document.getElementById("purchaseStake").value);
+  // 入力は口数。1口=100円（例: 1 → 100円、3 → 300円）
+  const stakeUnits = parseFloat(document.getElementById("purchaseStake").value);
+  const stake = Number.isFinite(stakeUnits) && stakeUnits > 0
+    ? Math.round(stakeUnits) * 100
+    : NaN;
   const resultBox = document.getElementById("purchaseResult");
-  if (!raceId || !betType || !combination || !stake) {
-    alert("すべての項目を入力してください");
+  if (!raceId || !betType || !combination || !Number.isFinite(stake) || stake < 100) {
+    alert("レース・券種・買い目・口数(1以上の整数)を入力してください。1=100円です");
     return;
   }
 
