@@ -370,6 +370,19 @@ def delete_live_bet(live_bet_id: int, db: Session = Depends(get_db)):
 
 
 
+
+def _normalize_combo(comb: str):
+    """312 -> {312, 3-1-2} / 3-1-2 -> {3-1-2, 312}"""
+    if not comb:
+        return set()
+    c = str(comb).strip()
+    out = {c}
+    if "-" in c:
+        out.add(c.replace("-", ""))
+    elif c.isdigit() and len(c) >= 3:
+        out.add("-".join(list(c)))
+    return out
+
 @router.post("/backfill-planned")
 def backfill_planned(dry_run: bool = True, db: Session = Depends(get_db)):
     """
