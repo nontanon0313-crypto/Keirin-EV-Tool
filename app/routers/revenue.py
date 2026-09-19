@@ -371,115 +371,112 @@ def delete_live_bet(live_bet_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/backfill-planned")
-def backfill_planned_from_purchases(db: Session = Depends(get_db)):
-    """既存LiveBetの欠落した想定値をPurchaseから補完する保守処理。"""
-    import re as _re
+def backfill_planned(dry_run: bool = True, db: Session = Depends(get_db)):
+    """
+    planned_* が空の LiveBet を、同一レース・同一買い目の Purchase から埋める。
+    買い目の 312 / 3-1-2 表記ゆれを吸収する。
+    """
+    from datetime import datetime
 
-    def norm(v):
-        if v is None:
-            return ""
-        return _re.sub(r"[^0-9A-Za-z]", "", str(v)).lower()
-
-    rows = db.query(models.LiveBet).filter(
-        models.LiveBet.race_id.isnot(None)
-    ).all()
-
-    updated = []
-    skipped = []
-
-    for row in rows:
-        if (
-            row.planned_stake is not None
-            and row.planned_win_prob is not None
-            and row.planned_odds is not None
-            and row.planned_ev_pct is not None
-        ):
-            continue
-
-        purchases = (
-            db.query(models.Purchase)
-            .filter(models.Purchase.race_id == row.race_id)
-            .filter(models.Purchase.bet_type == row.bet_type)
-            .all()
+    rows = db.query(models.LiveBet).filter(models.LiveBet.vote_status == "voted").all()
+    updated, skipped = [], []
+    for lb in rows:
+        need = (
+            lb.planned_win_prob is None
+            or lb.planned_odds is None
+            or lb.planned_expected_profit is None
         )
-
-        candidates = [
-            x for x in purchases
-            if norm(x.combination) == norm(row.combination)
-        ]
-
-        if not candidates:
-            skipped.append({
-                "live_bet_id": row.id,
-                "reason": "purchase_not_found",
-            })
+        if not need:
             continue
 
-        if row.created_at is not None:
-            def distance(x):
-                if x.purchased_at is None:
-                    return float("inf")
-                a = row.created_at
-                b = x.purchased_at
-                if getattr(a, "tzinfo", None):
-                    a = a.replace(tzinfo=None)
-                if getattr(b, "tzinfo", None):
-                    b = b.replace(tzinfo=None)
-                return abs((a - b).total_seconds())
-            purchase = min(candidates, key=distance)
-        else:
-            purchase = candidates[0]
-
-        changed = []
-
-        if row.planned_win_prob is None and purchase.win_prob_at_purchase is not None:
-            row.planned_win_prob = purchase.win_prob_at_purchase
-            changed.append("planned_win_prob")
-
-        if row.planned_odds is None and purchase.odds_at_purchase is not None:
-            row.planned_odds = purchase.odds_at_purchase
-            changed.append("planned_odds")
-
-        if row.planned_ev_pct is None and purchase.ev_pct_at_purchase is not None:
-            row.planned_ev_pct = purchase.ev_pct_at_purchase
-            changed.append("planned_ev_pct")
-
-        if row.planned_stake is None and purchase.ev_result_id:
-            ev_row = (
-                db.query(models.EvResult)
-                .filter(models.EvResult.id == purchase.ev_result_id)
+        combos = _normalize_combo(lb.combination)
+        p = None
+        if lb.race_id and combos:
+            p = (
+                db.query(models.Purchase)
+                .filter(
+                    models.Purchase.race_id == lb.race_id,
+                    models.Purchase.bet_type == lb.bet_type,
+                    models.Purchase.combination.in_(list(combos)),
+                )
+                .order_by(models.Purchase.purchased_at.desc())
                 .first()
             )
-            if ev_row and ev_row.recommended_stake is not None:
-                row.planned_stake = ev_row.recommended_stake
-                changed.append("planned_stake")
-
-        if (
-            row.actual_stake is not None
-            and row.actual_stake > 0
-            and row.planned_win_prob is not None
-            and row.planned_odds is not None
-        ):
-            row.planned_expected_profit = row.actual_stake * (
-                row.planned_win_prob * row.planned_odds - 1.0
+        # race_id が無い/不一致でも会場+Rで探す
+        if p is None and lb.venue_name and lb.race_number is not None and combos:
+            race = (
+                db.query(models.Race)
+                .filter(
+                    models.Race.venue_name == lb.venue_name,
+                    models.Race.race_number == lb.race_number,
+                )
+                .order_by(models.Race.id.desc())
+                .first()
             )
+            if race:
+                p = (
+                    db.query(models.Purchase)
+                    .filter(
+                        models.Purchase.race_id == race.id,
+                        models.Purchase.bet_type == lb.bet_type,
+                        models.Purchase.combination.in_(list(combos)),
+                    )
+                    .order_by(models.Purchase.purchased_at.desc())
+                    .first()
+                )
+                if lb.race_id is None:
+                    lb.race_id = race.id
 
-        if changed:
-            updated.append({
-                "live_bet_id": row.id,
-                "purchase_id": purchase.id,
-                "combination": row.combination,
-                "fields": changed,
+        if p is None:
+            skipped.append({
+                "id": lb.id,
+                "venue": lb.venue_name,
+                "R": lb.race_number,
+                "combination": lb.combination,
+                "reason": "no matching purchase",
             })
+            continue
 
-    db.commit()
+        if lb.planned_win_prob is None and getattr(p, "win_prob_at_purchase", None) is not None:
+            lb.planned_win_prob = float(p.win_prob_at_purchase)
+        if lb.planned_odds is None and getattr(p, "odds_at_purchase", None) is not None:
+            lb.planned_odds = float(p.odds_at_purchase)
+        stake = lb.actual_stake if lb.actual_stake is not None else lb.planned_stake
+        if lb.planned_stake is None and stake is not None:
+            lb.planned_stake = float(stake)
+        if (
+            lb.planned_expected_profit is None
+            and lb.planned_win_prob is not None
+            and lb.planned_odds is not None
+            and stake
+        ):
+            lb.planned_expected_profit = float(stake) * (
+                float(lb.planned_win_prob) * float(lb.planned_odds) - 1.0
+            )
+        # combination をハイフン形式に正規化（表示用）
+        if lb.combination and "-" not in str(lb.combination) and str(lb.combination).isdigit():
+            lb.combination = "-".join(list(str(lb.combination)))
+        lb.updated_at = datetime.utcnow()
+        updated.append({
+            "id": lb.id,
+            "combination": lb.combination,
+            "planned_win_prob": lb.planned_win_prob,
+            "planned_odds": lb.planned_odds,
+            "planned_expected_profit": lb.planned_expected_profit,
+        })
 
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
     return {
+        "dry_run": dry_run,
         "updated_count": len(updated),
         "skipped_count": len(skipped),
-        "updated": updated,
-        "skipped": skipped,
+        "updated": updated[:50],
+        "skipped": skipped[:30],
     }
+
 
 @router.get("/list")
 def list_live_bets(
