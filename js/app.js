@@ -1181,8 +1181,6 @@ function renderRevenueList(data) {
       }
     });
   });
-}
-
 
   box.querySelectorAll(".revenueEditBtn").forEach(btn => {
     btn.addEventListener("click", async () => {
@@ -1255,6 +1253,8 @@ function renderRevenueList(data) {
       }
     });
   });
+}
+
 
 async function loadRevenueList() {
   try {
