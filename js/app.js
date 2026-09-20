@@ -514,7 +514,8 @@ async function checkRace() {
     html += `<p class="note">得点=競走得点、S/H/B=各回数、決まり手は逃げ/捲り/差し/マークの回数、直近着順は1着/2着/3着の回数です。数字が全て「-」の場合、その項目がOCRで読み取れていません。</p>`;
 
 
-    html += `<p>オッズ件数: ${data.odds_count}件 <button id="refreshOddsBtn" type="button">🔄このレースのオッズだけ今すぐ再取得</button></p><ul>`;
+    // 「オッズだけ今すぐ再取得」は運用で使わないため非表示（件数のみ表示）
+    html += `<p>オッズ件数: ${data.odds_count}件</p><ul>`;
     if (Object.keys(data.odds_by_type).length === 0) {
       html += `<li style="color:#ef4444;">オッズが1件も読み込まれていません</li>`;
     } else {

@@ -42,7 +42,6 @@
 
     <select id="raceSelect"></select>
     <button id="refreshRaceListBtn" style="width:auto;padding:6px 12px;font-size:13px;background:#475569;"> 🔄一覧を更新</button>
-    <div id="raceDetailResult" class="result-box"></div>
 
     <label style="display:flex;align-items:center;gap:8px;margin-top:14px;">
       <input type="checkbox" id="rebateCheckbox" style="width:auto;margin:0;">
@@ -64,8 +63,11 @@
     </label>
     <button id="racePlanBtn" style="background:#a855f7;">このレースの自動投票プランを作成</button>
     <p class="note">AI予想がまだなら自動で実行してからプランを作成します(数十秒かかる場合があります)。</p>
-    <button id="thresholdTableBtn" style="background:#f59e0b;">オッズ無しで閾値表を作成(先読み用)</button>
+    <!-- 未使用のため非表示
+    <button id="thresholdTableBtn" style="background:#f59e0b;display:none;">オッズ無しで閾値表を作成(先読み用)</button>
+    -->
     <div id="evResult" class="result-box"></div>
+    <div id="raceDetailResult" class="result-box" style="margin-top:12px;"></div>
   </section>
 
 
@@ -299,7 +301,7 @@
 
 </main>
 
-<script src="js/app.js?v=107"></script>
+<script src="js/app.js?v=108"></script>
 <script>
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
