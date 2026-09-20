@@ -699,7 +699,8 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
 
 let lastRacePlan = null;
 
-document.getElementById("thresholdTableBtn").addEventListener("click", async () => {
+const _thresholdTableBtn = document.getElementById("thresholdTableBtn");
+if (_thresholdTableBtn) _thresholdTableBtn.addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   const resultBox = document.getElementById("evResult");
   if (!raceId) {
