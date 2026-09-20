@@ -81,7 +81,11 @@
                         <option value="3連単">3連単</option>
                       </select>
     <input type="text" id="purchaseCombination" placeholder="買い目(例: 1-2-3)">
-    <input type="number" id="purchaseStake" placeholder="口数(1=100円)" step="1" min="1">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <input type="number" id="purchaseStake" placeholder="口数 例:2" step="1" min="1" style="width:120px;margin:0;">
+      <span id="purchaseStakeYenPreview" class="note" style="margin:0;">→ 0円（1口=100円）</span>
+    </div>
+    <p class="note" style="margin:4px 0 0;">口数で入力。2→200円。100以上を入れると「円」とみなします（200→200円）。</p>
     <button id="recordPurchaseBtn">記録する</button>
     <div id="purchaseResult" class="result-box"></div>
   </section>
@@ -301,7 +305,7 @@
 
 </main>
 
-<script src="js/app.js?v=109"></script>
+<script src="js/app.js?v=110"></script>
 <script>
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

@@ -1112,19 +1112,12 @@ function renderRevenueList(data) {
       if (st > 0 && p > 0 && o > 0) expProfit = yen(st * (p * o - 1));
     }
     html += `
-      <div style="border-bottom:1px solid #334155;padding:10px 0;">
-        <p style="margin:0 0 6px 0;">
-          <strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong>
-          ${r.bet_type} ${r.combination}
-        </p>
-        <p style="margin:0;line-height:1.6;">
+      <div style="border-bottom:1px solid #334155;padding:8px 0;">
+        <p style="margin:0 0 4px 0;"><strong>${r.venue_name || "-"} ${r.race_number || "-"}R</strong> ${r.bet_type} ${r.combination}</p>
+        <p style="margin:0;line-height:1.55;white-space:normal;">
           購入時刻: ${boughtAt}<br>
-          予想的中率: ${predHit}<br>
-          想定利益: ${expProfit}<br>
-          投資予定: ${yen(r.planned_stake)} /
-          実投資: ${yen(r.actual_stake)} /
-          結果: ${r.actual_result || "-"} /
-          払戻: ${yen(r.actual_payout)}
+          予想的中率: ${predHit} / 想定利益: ${expProfit}<br>
+          投資予定: ${yen(r.planned_stake)} / 実投資: ${yen(r.actual_stake)} / 結果: ${r.actual_result || "-"} / 払戻: ${yen(r.actual_payout)}
         </p>
         ${
           pending && r.vote_status === "voted"
@@ -1371,19 +1364,48 @@ function appendRevenuePlanButton() {
   resultBox.appendChild(btn);
 }
 
+
+/** 購入金額入力: 1〜99は口数(×100円)、100以上は円そのもの */
+function parsePurchaseStakeInput(raw) {
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const rounded = Math.round(n);
+  if (rounded >= 100) {
+    // 円入力（100円単位に丸め）
+    return Math.round(rounded / 100) * 100;
+  }
+  // 口数
+  return rounded * 100;
+}
+
+function updatePurchaseStakePreview() {
+  const el = document.getElementById("purchaseStakeYenPreview");
+  const input = document.getElementById("purchaseStake");
+  if (!el || !input) return;
+  const yen = parsePurchaseStakeInput(input.value);
+  if (yen == null) {
+    el.textContent = "→ 0円（1口=100円）";
+    return;
+  }
+  const raw = parseFloat(input.value);
+  const asUnits = Number.isFinite(raw) && raw > 0 && Math.round(raw) < 100;
+  el.textContent = asUnits
+    ? `→ \( {yen.toLocaleString("ja-JP")}円（ \){Math.round(raw)}口）`
+    : `→ ${yen.toLocaleString("ja-JP")}円`;
+}
+
 // ---------- ③ 購入記録 ----------
 document.getElementById("recordPurchaseBtn").addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   const betType = document.getElementById("purchaseBetType").value;
   const combination = document.getElementById("purchaseCombination").value;
-  // 入力は口数。1口=100円（例: 1 → 100円、3 → 300円）
-  const stakeUnits = parseFloat(document.getElementById("purchaseStake").value);
-  const stake = Number.isFinite(stakeUnits) && stakeUnits > 0
-    ? Math.round(stakeUnits) * 100
-    : NaN;
+  const stake = parsePurchaseStakeInput(document.getElementById("purchaseStake").value);
   const resultBox = document.getElementById("purchaseResult");
-  if (!raceId || !betType || !combination || !Number.isFinite(stake) || stake < 100) {
-    alert("レース・券種・買い目・口数(1以上の整数)を入力してください。1=100円です");
+  if (!raceId || !betType || !combination || stake == null || stake < 100) {
+    alert("レース・券種・買い目・金額を入力してください。\n口数: 1=100円 / 2=200円\nまたは 100以上で円指定");
+    return;
+  }
+  if (!confirm(`この内容で記録します。\n買い目: ${betType} ${combination}\n実投資: ${stake.toLocaleString("ja-JP")}円`)) {
     return;
   }
 
@@ -3624,3 +3646,12 @@ document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
     alert("設定の保存に失敗しました: " + e.message);
   }
 });
+
+
+(function bindPurchaseStakePreview() {
+  const input = document.getElementById("purchaseStake");
+  if (!input) return;
+  input.addEventListener("input", updatePurchaseStakePreview);
+  input.addEventListener("change", updatePurchaseStakePreview);
+  updatePurchaseStakePreview();
+})();
