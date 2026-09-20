@@ -393,3 +393,41 @@
 - 作業開始時は必ずこのPROGRESS.mdを読み、上記ルールを確認する。
 - 2026-09-18: 収益記録の想定値欠落原因を修正。購入時に作成したPurchaseのIDをLiveBetManualCreate.purchase_idで受け取り、`Purchase.win_prob_at_purchase` / `odds_at_purchase` / `ev_pct_at_purchase`を収益記録へ補完する。投資予定額は実投資額`Purchase.stake_amount`と混同せず、`Purchase.ev_result_id`から`EvResult.recommended_stake`を取得して補完する。フロントのプラン検索に依存しない。
 - 2026-09-18: 収益一覧の表示修正では、想定した文字列の完全一致に依存せず、現行ソースから購入時刻表示行を先に特定してから最小置換する。対象が一意でない場合は停止する。
+
+
+## 恒久ルール（Grok必須・2026-09-20追記）
+
+### 繰り返した失敗（反省）
+1. **フロントJSを壊したまま push した**
+   - 例: `revenueEditBtn` の listener を `renderRevenueList` の外に置き、`box is not defined` でスクリプト全体が停止
+   - 結果: レース一覧が出ない・タブやボタンが無反応
+2. **SyntaxError / 不正エスケープを push した**
+   - 例: Python置換で `\"` がソースに残り API 500
+3. **Service Worker のキャッシュを軽視した**
+   - 修正を push しても画面が古いまま / 壊れたJSが残り「更新されない」に見える
+4. **置換スクリプトの構文ミスで「何も入っていない」のに成功したように見えた**
+5. **推測で仕様変更し、デグレを出した**
+
+### 今後の絶対ルール（フロント変更時）
+1. **変更後は必ず `node --check js/app.js`（または同等）で構文確認してから commit**
+2. **`getElementById(...).addEventListener` は要素が無いと後続が全部死ぬ**
+   - 必須: `const el = document.getElementById(...); if (el) el.addEventListener(...)`
+3. **動的に生やしたボタンの listener は、必ず描画関数の中で付ける**
+   - トップレベルで `box.querySelectorAll` しない
+4. **index.html / app.js / sw.js を触ったら必ずキャッシュ破棄用バージョンを上げる**
+   - `js/app.js?v=N` と `CACHE_NAME = keirin-ev-vN`
+5. **app.js / index.html は Service Worker で network-first（キャッシュ優先にしない）**
+6. **問題が残る状態では commit/push しない**
+7. **仕様変更とバグ修正を混同しない。根拠のない閾値・ロジック変更禁止**
+8. **作業前に本節（恒久ルール）を読む。PROGRESS.md を読まずにフロントを触らない**
+
+### 画面がおかしいときの手順
+1. `node --check js/app.js`
+2. GitHub Pages の `app.js?v=` と `CACHE_NAME` が上がっているか確認
+3. 端末でサイトデータ削除 or SW unregister → 強制リロード
+4. `/races/today` が 200 で件数があるか確認（APIとフロントを切り分け）
+
+### 今回の修正（8727632）
+- SW: HTML/JS を network-first に変更
+- 購入記録ボタン listener をガード
+- SW 更新時のリロード処理を追加
