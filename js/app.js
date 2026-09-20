@@ -1365,33 +1365,23 @@ function appendRevenuePlanButton() {
 }
 
 
-/** 購入金額入力: 1〜99は口数(×100円)、100以上は円そのもの */
+/** 購入金額: 入力は口数のみ。1口=100円。見た目は入力欄の右に固定「00」 */
 function parsePurchaseStakeInput(raw) {
   const n = parseFloat(raw);
   if (!Number.isFinite(n) || n <= 0) return null;
-  const rounded = Math.round(n);
-  if (rounded >= 100) {
-    // 円入力（100円単位に丸め）
-    return Math.round(rounded / 100) * 100;
-  }
-  // 口数
-  return rounded * 100;
+  return Math.round(n) * 100;
 }
 
 function updatePurchaseStakePreview() {
   const el = document.getElementById("purchaseStakeYenPreview");
   const input = document.getElementById("purchaseStake");
   if (!el || !input) return;
-  const yen = parsePurchaseStakeInput(input.value);
-  if (yen == null) {
-    el.textContent = "→ 0円（1口=100円）";
+  const units = Math.round(parseFloat(input.value));
+  if (!Number.isFinite(units) || units <= 0) {
+    el.textContent = "（口数 → 円）";
     return;
   }
-  const raw = parseFloat(input.value);
-  const asUnits = Number.isFinite(raw) && raw > 0 && Math.round(raw) < 100;
-  el.textContent = asUnits
-    ? `→ \( {yen.toLocaleString("ja-JP")}円（ \){Math.round(raw)}口）`
-    : `→ ${yen.toLocaleString("ja-JP")}円`;
+  el.textContent = `（${units}口 → ${(units * 100).toLocaleString("ja-JP")}円）`;
 }
 
 // ---------- ③ 購入記録 ----------
@@ -1402,7 +1392,7 @@ document.getElementById("recordPurchaseBtn").addEventListener("click", async () 
   const stake = parsePurchaseStakeInput(document.getElementById("purchaseStake").value);
   const resultBox = document.getElementById("purchaseResult");
   if (!raceId || !betType || !combination || stake == null || stake < 100) {
-    alert("レース・券種・買い目・金額を入力してください。\n口数: 1=100円 / 2=200円\nまたは 100以上で円指定");
+    alert("レース・券種・買い目・口数を入力してください。\n例: 2 → 200円（右の00は固定表示）");
     return;
   }
   if (!confirm(`この内容で記録します。\n買い目: ${betType} ${combination}\n実投資: ${stake.toLocaleString("ja-JP")}円`)) {

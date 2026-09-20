@@ -81,11 +81,15 @@
                         <option value="3連単">3連単</option>
                       </select>
     <input type="text" id="purchaseCombination" placeholder="買い目(例: 1-2-3)">
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      <input type="number" id="purchaseStake" placeholder="口数 例:2" step="1" min="1" style="width:120px;margin:0;">
-      <span id="purchaseStakeYenPreview" class="note" style="margin:0;">→ 0円（1口=100円）</span>
+    <label style="display:block;margin:6px 0 2px;">購入金額（口数）</label>
+    <div style="display:flex;align-items:center;gap:0;flex-wrap:wrap;">
+      <input type="number" id="purchaseStake" placeholder="2" step="1" min="1"
+        style="width:88px;margin:0;text-align:right;border-top-right-radius:0;border-bottom-right-radius:0;">
+      <span style="display:inline-flex;align-items:center;padding:8px 10px;background:#1e293b;border:1px solid #334155;border-left:0;border-radius:0 6px 6px 0;font-weight:700;letter-spacing:1px;">00</span>
+      <span style="margin-left:8px;">円</span>
+      <span id="purchaseStakeYenPreview" class="note" style="margin-left:10px;">（2口 → 200円）</span>
     </div>
-    <p class="note" style="margin:4px 0 0;">口数で入力。2→200円。100以上を入れると「円」とみなします（200→200円）。</p>
+    <p class="note" style="margin:4px 0 0;">左側に口数だけ入力。右側の00は固定表示です。例: 2 → 200円 / 5 → 500円</p>
     <button id="recordPurchaseBtn">記録する</button>
     <div id="purchaseResult" class="result-box"></div>
   </section>
@@ -305,7 +309,7 @@
 
 </main>
 
-<script src="js/app.js?v=110"></script>
+<script src="js/app.js?v=111"></script>
 <script>
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
