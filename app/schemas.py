@@ -164,6 +164,7 @@ class LiveBetManualCreate(BaseModel):
 
 class LiveBetUpdate(BaseModel):
     vote_status: Optional[str] = None
+    planned_stake: Optional[float] = None
     actual_stake: Optional[float] = None
     actual_result: Optional[str] = None
     actual_payout: Optional[float] = None

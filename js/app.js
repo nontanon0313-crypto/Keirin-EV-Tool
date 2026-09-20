@@ -1127,6 +1127,15 @@ function renderRevenueList(data) {
              </button>`
           : ""
         }
+        <button type="button" class="revenueEditBtn"
+          data-id="${r.id}"
+          data-stake="${r.actual_stake ?? r.planned_stake ?? ''}"
+          data-payout="${r.actual_payout ?? 0}"
+          data-result="${r.actual_result || 'pending'}"
+          data-combo="${r.combination || ''}"
+          style="background:#38bdf8;width:auto;margin-right:6px;">
+          編集
+        </button>
         <button type="button" class="revenueDeleteBtn"
           data-id="${r.id}" style="background:#facc15;width:auto;">
           削除
@@ -1173,6 +1182,79 @@ function renderRevenueList(data) {
     });
   });
 }
+
+
+  box.querySelectorAll(".revenueEditBtn").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const curStake = btn.dataset.stake;
+      const curPayout = btn.dataset.payout;
+      const curResult = btn.dataset.result || "pending";
+      const combo = btn.dataset.combo || "";
+
+      const stakeIn = prompt(
+        "実投資額を円で入力（100円単位）\n買い目: " + combo + "\n現在: " + (curStake || "-") + "円",
+        curStake || "100"
+      );
+      if (stakeIn === null) return;
+      const actual_stake = parseFloat(String(stakeIn).replace(/[,，]/g, ""));
+      if (!Number.isFinite(actual_stake) || actual_stake < 0) {
+        alert("実投資額が不正です");
+        return;
+      }
+
+      const payoutIn = prompt(
+        "払戻金額（円）。未的中なら 0\n現在: " + (curPayout || 0) + "円",
+        curPayout || "0"
+      );
+      if (payoutIn === null) return;
+      const actual_payout = parseFloat(String(payoutIn).replace(/[,，]/g, ""));
+      if (!Number.isFinite(actual_payout) || actual_payout < 0) {
+        alert("払戻が不正です");
+        return;
+      }
+
+      let actual_result = curResult;
+      if (actual_payout > 0) {
+        actual_result = "win";
+      } else {
+        const rIn = prompt(
+          "結果を入力: pending / win / lose",
+          curResult === "win" && actual_payout <= 0 ? "lose" : curResult
+        );
+        if (rIn === null) return;
+        actual_result = String(rIn).trim().toLowerCase();
+        if (!["pending", "win", "lose", "not_voted"].includes(actual_result)) {
+          alert("結果は pending / win / lose のいずれか");
+          return;
+        }
+      }
+
+      if (!confirm(
+        "更新します\n実投資: " + actual_stake.toLocaleString("ja-JP") +
+        "円\n払戻: " + actual_payout.toLocaleString("ja-JP") +
+        "円\n結果: " + actual_result
+      )) return;
+
+      try {
+        const res = await fetch(apiUrl("/revenue/" + id), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            actual_stake: actual_stake,
+            actual_payout: actual_payout,
+            actual_result: actual_result,
+            vote_status: "voted",
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+        await loadRevenue();
+      } catch (e) {
+        alert("更新に失敗しました: " + e.message);
+      }
+    });
+  });
 
 async function loadRevenueList() {
   try {

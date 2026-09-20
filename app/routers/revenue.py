@@ -223,6 +223,9 @@ def mark_win(live_bet_id: int, payload: schemas.LiveBetWinUpdate, db: Session = 
     if not row:
         raise HTTPException(status_code=404, detail="live_bet not found")
     row.vote_status = "voted"
+    if payload.planned_stake is not None:
+        row.planned_stake = payload.planned_stake
+
     if payload.actual_stake is not None:
         row.actual_stake = payload.actual_stake
     elif row.actual_stake is None and row.planned_stake is not None:
