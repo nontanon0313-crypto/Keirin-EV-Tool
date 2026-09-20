@@ -309,14 +309,32 @@
 
 </main>
 
-<script src="js/app.js?v=113"></script>
+<script src="js/app.js?v=114"></script>
 <script>
 if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js");
+  window.addEventListener("load", async () => {
+    try {
+      const reg = await navigator.serviceWorker.register("sw.js?v=123");
+      // 待ちのSWがあれば即有効化
+      if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+      reg.addEventListener("updatefound", () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener("statechange", () => {
+          if (nw.state === "installed" && navigator.serviceWorker.controller) {
+            // 新SW入り替え後に一度だけリロード
+            if (!sessionStorage.getItem("sw_reloaded_v123")) {
+              sessionStorage.setItem("sw_reloaded_v123", "1");
+              location.reload();
+            }
+          }
+        });
+      });
+    } catch (e) {
+      console.warn("SW register failed", e);
+    }
   });
 }
-
 </script>
 </body>
 </html>

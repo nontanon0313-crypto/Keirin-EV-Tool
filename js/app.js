@@ -1467,7 +1467,10 @@ function updatePurchaseStakePreview() {
 }
 
 // ---------- ③ 購入記録 ----------
-document.getElementById("recordPurchaseBtn").addEventListener("click", async () => {
+(function () {
+  const _recordPurchaseBtn = document.getElementById("recordPurchaseBtn");
+  if (!_recordPurchaseBtn) return;
+  _recordPurchaseBtn.addEventListener("click", async () => {
   const raceId = document.getElementById("raceSelect").value;
   const betType = document.getElementById("purchaseBetType").value;
   const combination = document.getElementById("purchaseCombination").value;
@@ -1607,6 +1610,7 @@ const planItem = planItems.find(it =>
     resultBox.textContent = "エラー: " + e.message;
   }
 });
+})();
 
 // ---------- ③-2 結果確定 ----------
 document.getElementById("loadPendingBtn").addEventListener("click", async () => {
