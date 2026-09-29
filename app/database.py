@@ -421,9 +421,39 @@ def _preferred_order():
         ordered = [PREFER] + [n for n in available if n != PREFER]
     else:
         ordered = available
+    # quota当日ブロックは試行しない(envを変えずシステム側で切替)
+    ordered = [n for n in ordered if not _is_quota_blocked(n)]
+    if not ordered:
+        return []
     healthy = [n for n in ordered if not _is_in_cooldown(n)]
     cooling = [n for n in ordered if _is_in_cooldown(n)]
     return healthy + cooling
+
+
+
+def _bootstrap_active_skip_quota_blocked() -> None:
+    global engine, SessionLocal, _active_name
+    order = _preferred_order()
+    if not order:
+        logger.error("no database tier available after excluding quota-blocked")
+        return
+    if _active_name in order:
+        return
+    name = order[0]
+    if name not in _sessions:
+        return
+    old = _active_name
+    _active_name = name
+    engine = _engines.get(name)
+    SessionLocal = _sessions.get(name)
+    logger.warning(
+        "database active %s -> %s (quota-blocked tiers excluded, no probe)",
+        old,
+        name,
+    )
+
+
+_bootstrap_active_skip_quota_blocked()
 
 
 def ensure_active_connection() -> None:
@@ -551,6 +581,9 @@ def init_db():
 
     for _other in _other_names(_active_name):
         # quota超過中のPrimaryへschema準備で接続しない。
+        if _is_quota_blocked(_other):
+            logger.info("skip schema preparation on %s (quota-blocked for today)", _other)
+            continue
         if _is_in_cooldown(_other):
             logger.info("skip schema preparation on %s because it is in cooldown", _other)
             continue
