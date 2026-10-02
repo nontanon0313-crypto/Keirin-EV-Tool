@@ -5435,43 +5435,243 @@ def list_skipped_bets(race_id: int, db: Session = Depends(get_db)):
 
 
 _purchase_stats_cache = {"computed_at": 0.0, "value": None}
-PURCHASE_STATS_CACHE_TTL_SECONDS = 60 * 10  # 10分。全件スキャンで数十秒かかるため、連打で毎回再計算しない
+PURCHASE_STATS_CACHE_TTL_SECONDS = 60 * 30
+PURCHASE_STATS_STALE_TTL_SECONDS = 60 * 60 * 6
+_purchase_stats_refresh_lock = __import__("threading").Lock()
+_purchase_stats_refreshing = False
+
+
+def _merge_bucket_dict(maps):
+    acc = {}
+    for m in maps:
+        if not isinstance(m, dict):
+            continue
+        for k, v in m.items():
+            if not isinstance(v, dict):
+                continue
+            a = acc.setdefault(k, {
+                "count": 0, "purchased_count": 0, "wins_num": 0.0,
+                "profit_sum": 0.0, "profit_n": 0, "ev_sum": 0.0, "ev_n": 0,
+            })
+            c = int(v.get("count") or 0)
+            pc = int(v.get("purchased_count") or 0)
+            a["count"] += c
+            a["purchased_count"] += pc
+            wr = v.get("win_rate_pct")
+            if wr is not None and pc > 0:
+                a["wins_num"] += float(wr) / 100.0 * pc
+            if v.get("profit") is not None and pc > 0:
+                a["profit_sum"] += float(v["profit"])
+                a["profit_n"] += 1
+            if v.get("expectancy_pct") is not None and pc > 0:
+                a["ev_sum"] += float(v["expectancy_pct"]) * pc
+                a["ev_n"] += pc
+    out = {}
+    for k, a in acc.items():
+        pc = a["purchased_count"]
+        wr = round(a["wins_num"] / pc * 100, 1) if pc else None
+        exp = round(a["ev_sum"] / a["ev_n"], 2) if a["ev_n"] else None
+        out[k] = {
+            "count": a["count"],
+            "purchased_count": pc,
+            "win_rate_pct": wr,
+            "win_rate_ci95": None,
+            "predicted_win_rate_pct": None,
+            "expected_win_rate_pct": None,
+            "roi_pct": round(exp + 100, 2) if exp is not None else None,
+            "expectancy_pct": exp,
+            "profit": round(a["profit_sum"], 0) if a["profit_n"] else None,
+            "predicted_roi_pct": None,
+            "expected_roi_pct": None,
+            "expected_profit": None,
+        }
+    return out
+
+
+def _merge_tier_stats(tier_results):
+    ok = [(name, r) for name, r in tier_results if isinstance(r, dict) and "message" not in r]
+    if not ok:
+        if tier_results:
+            return {
+                "message": "まだ確定した購入履歴がありません",
+                "tiers": [{"name": n, "error": (r.get("message") if isinstance(r, dict) else str(r))} for n, r in tier_results],
+            }
+        return {"message": "読めるDBがありません"}
+
+    total_bets = sum(int(r.get("total_bets") or 0) for _, r in ok)
+    real_purchase_count = sum(int(r.get("real_purchase_count") or 0) for _, r in ok)
+    skipped_eval_count = sum(int(r.get("skipped_eval_count") or 0) for _, r in ok)
+    n_races = sum(int(r.get("n_races_with_purchase") or 0) for _, r in ok)
+    profit = sum(float(r.get("overall_profit_total") or 0) for _, r in ok)
+
+    roi_weights = []
+    for _, r in ok:
+        pc = int(r.get("real_purchase_count") or 0)
+        roi = r.get("overall_roi_pct")
+        if pc > 0 and roi is not None:
+            roi_weights.append((pc, float(roi)))
+    overall_roi = (
+        sum(pc * roi for pc, roi in roi_weights) / sum(pc for pc, _ in roi_weights)
+        if roi_weights else None
+    )
+
+    win_weights = []
+    for _, r in ok:
+        tb = int(r.get("total_bets") or 0)
+        wr = r.get("overall_win_rate_pct")
+        if tb > 0 and wr is not None:
+            win_weights.append((tb, float(wr)))
+    overall_wr = (
+        sum(tb * wr for tb, wr in win_weights) / sum(tb for tb, _ in win_weights)
+        if win_weights else None
+    )
+
+    avg_bets = round(real_purchase_count / n_races, 2) if n_races else None
+    biggest = max(ok, key=lambda x: int(x[1].get("total_bets") or 0))[1]
+
+    merged = {
+        "overall_expectancy_pct": round(overall_roi - 100, 2) if overall_roi is not None else None,
+        "overall_roi_pct": round(overall_roi, 2) if overall_roi is not None else None,
+        "overall_profit_total": round(profit, 0),
+        "overall_win_rate_pct": round(overall_wr, 1) if overall_wr is not None else None,
+        "total_bets": total_bets,
+        "real_purchase_count": real_purchase_count,
+        "skipped_eval_count": skipped_eval_count,
+        "n_races_with_purchase": n_races,
+        "avg_bets_per_race": avg_bets,
+        "by_bet_type": _merge_bucket_dict([r.get("by_bet_type") for _, r in ok]),
+        "by_win_prob_bucket": _merge_bucket_dict([r.get("by_win_prob_bucket") for _, r in ok]),
+        "by_race_stage": _merge_bucket_dict([r.get("by_race_stage") for _, r in ok]),
+        "by_grade": _merge_bucket_dict([r.get("by_grade") for _, r in ok]),
+        "tiers": [
+            {
+                "name": name,
+                "total_bets": r.get("total_bets"),
+                "real_purchase_count": r.get("real_purchase_count"),
+                "overall_win_rate_pct": r.get("overall_win_rate_pct"),
+                "overall_roi_pct": r.get("overall_roi_pct"),
+                "overall_profit_total": r.get("overall_profit_total"),
+            }
+            for name, r in ok
+        ],
+        "tier_errors": [
+            {"name": name, "message": r.get("message") if isinstance(r, dict) else str(r)}
+            for name, r in tier_results
+            if not (isinstance(r, dict) and "message" not in r)
+        ],
+        "note": (
+            "primary / fallback / fallback2 をデータ移行せず合算した集計です。"
+            "race_id は系統ごとに別番号の可能性があるため、レース数は系統別件数の合計です。"
+        ),
+        "best_conditions_ranking": biggest.get("best_conditions_ranking"),
+        "worst_conditions_ranking": biggest.get("worst_conditions_ranking"),
+    }
+    for key in (
+        "predicted_roi_pct", "predicted_profit_total", "expected_roi_pct", "expected_profit_total",
+        "predicted_win_rate_pct", "expected_win_rate_pct", "avg_odds_weighted",
+        "sim_overall", "sim_by_bet_type", "calibration_significance",
+        "by_bank", "by_line_match", "by_bank_lead_advantage", "by_season",
+        "by_race_score", "by_leg_style", "by_popularity_pattern", "combo_buckets",
+    ):
+        if key not in merged and key in biggest:
+            merged[key] = biggest[key]
+    return merged
+
+
+def _compute_stats_all_readable_tiers(since_dt):
+    from .. import database as dbmod
+    opened = dbmod.open_readable_sessions()
+    tier_results = []
+    try:
+        if not opened:
+            return {"message": "読めるDBがありません"}
+        for name, session in opened:
+            try:
+                r = _compute_purchase_stats(session, since_dt)
+                tier_results.append((name, r))
+            except Exception as e:
+                tier_results.append((name, {"message": "%s: %s" % (type(e).__name__, e)}))
+        return _merge_tier_stats(tier_results)
+    finally:
+        for _, session in opened:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
+def _schedule_stats_refresh(since: str, since_dt):
+    global _purchase_stats_refreshing
+    import threading
+    import time as _time
+
+    with _purchase_stats_refresh_lock:
+        if _purchase_stats_refreshing:
+            return
+        _purchase_stats_refreshing = True
+
+    def _job():
+        global _purchase_stats_refreshing
+        try:
+            result = _compute_stats_all_readable_tiers(since_dt)
+            if isinstance(result, dict) and "message" not in result:
+                result["since"] = since
+                result["since_resolved"] = since_dt.isoformat() if since_dt else None
+                result["merged_tiers"] = True
+                _purchase_stats_cache["value"] = result
+                _purchase_stats_cache["computed_at"] = _time.time()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("background stats refresh failed: %s", e)
+        finally:
+            with _purchase_stats_refresh_lock:
+                _purchase_stats_refreshing = False
+
+    threading.Thread(target=_job, daemon=True).start()
 
 
 @router.get("/stats")
 def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_switch", db: Session = Depends(get_db)):
     """
-    勝率帯別・券種別の回収率など、複数の切り口で集計する。
-    単一要素だけで結論づけないためのFX版ルールを踏襲。
-
-    2026-09-06修正: 既定でCALIBRATION_SWITCH_AT(現行の投票基準の開始日時)以降の
-    データだけに絞り込むようにした。以前はsinceの絞り込みが無く、投票ロジックが
-    変わる前の旧データまで「現行基準の集計」として表示されていた(のんの指摘で発覚)。
-    全期間を見たい場合は since=all を指定する。
-
-    2026-09-06追加: 購入・見送り全件+関連オッズを毎回スキャンするため重く
-    (実測80秒超)、Neonの転送量も無視できないので既定条件(since=calibration_switch)
-    の結果だけ10分キャッシュする。最新のreplay結果をすぐ見たい時は refresh=true。
+    複数DB合算集計。キャッシュがあれば即返す（期限切れでもSTALE期間は即時+裏更新）。
     """
     import time as _time
 
     since = since or "calibration_switch"
-    use_cache = not refresh and since == "calibration_switch"
-
-    if use_cache:
-        cached = _purchase_stats_cache["value"]
-        if cached is not None and (_time.time() - _purchase_stats_cache["computed_at"]) < PURCHASE_STATS_CACHE_TTL_SECONDS:
-            return {**cached, "cache_hit": True, "cached_at": _purchase_stats_cache["computed_at"]}
-
+    use_cache = since == "calibration_switch"
     since_dt = _parse_since_param(since) if since != "all" else None
-    result = _compute_purchase_stats(db, since_dt)
+
+    if use_cache and not refresh:
+        cached = _purchase_stats_cache["value"]
+        cached_at = _purchase_stats_cache["computed_at"]
+        if cached is not None:
+            age = _time.time() - cached_at
+            if age < PURCHASE_STATS_CACHE_TTL_SECONDS:
+                return {**cached, "cache_hit": True, "stale": False, "cached_at": cached_at}
+            if age < PURCHASE_STATS_STALE_TTL_SECONDS:
+                _schedule_stats_refresh(since, since_dt)
+                return {**cached, "cache_hit": True, "stale": True, "cached_at": cached_at}
+
+    if use_cache and refresh and _purchase_stats_cache["value"] is not None:
+        _schedule_stats_refresh(since, since_dt)
+        return {
+            **_purchase_stats_cache["value"],
+            "cache_hit": True,
+            "stale": True,
+            "refresh_scheduled": True,
+            "cached_at": _purchase_stats_cache["computed_at"],
+        }
+
+    result = _compute_stats_all_readable_tiers(since_dt)
     if "message" not in result:
         result["since"] = since
         result["since_resolved"] = since_dt.isoformat() if since_dt else None
+        result["merged_tiers"] = True
         if use_cache:
             _purchase_stats_cache["value"] = result
             _purchase_stats_cache["computed_at"] = _time.time()
-    return {**result, "cache_hit": False}
+    return {**result, "cache_hit": False, "stale": False}
+
 
 
 

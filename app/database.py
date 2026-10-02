@@ -152,6 +152,30 @@ def get_active_db_info() -> dict:
     }
 
 
+
+def open_readable_sessions():
+    """今読める系統の Session を開く。quotaブロックは除外。callerがclose。"""
+    opened = []
+    for name in _TIER_ORDER:
+        if name not in _sessions:
+            continue
+        if _is_quota_blocked(name):
+            continue
+        session = None
+        try:
+            session = _sessions[name]()
+            session.execute(text("SELECT 1"))
+            opened.append((name, session))
+        except Exception as e:
+            logger.warning("open_readable_sessions: skip %s (%s)", name, e)
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+    return opened
+
+
 def _is_failover_worthy(exc: BaseException) -> bool:
     msg = str(exc).lower()
     keywords = (
