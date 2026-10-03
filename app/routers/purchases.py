@@ -599,23 +599,33 @@ def get_stage_expectancy_map(db: Session, min_samples: int = 50, use_cache: bool
         if cached is not None and (now - _stage_expectancy_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
             return cached
 
-    rows = (
-        db.query(models.Purchase, models.Race.race_stage)
+    # as_of 用に race の日時も一括取得（購入ごとの Race.get は N+1 で極端に遅い）
+    rows_raw = (
+        db.query(
+            models.Purchase,
+            models.Race.race_stage,
+            models.Race.post_time,
+            models.Race.race_date,
+            models.Race.created_at,
+        )
         .join(models.Race, models.Race.id == models.Purchase.race_id)
         .filter(models.Purchase.result != "pending")
         .filter(models.Purchase.purchased_at >= CALIBRATION_SWITCH_AT)
         .filter(models.Race.race_stage.isnot(None))
         .all()
     )
-    if as_of_dt is not None:
-        rows = [
-            (p, stage)
-            for p, stage in rows
-            if _race_is_before_as_of(
-                db.query(models.Race).get(p.race_id),
-                as_of_dt,
-            )
-        ]
+    rows = []
+    for p, stage, post_time, race_date, created_at in rows_raw:
+        if as_of_dt is not None:
+            class _R:
+                pass
+            r = _R()
+            r.post_time = post_time
+            r.race_date = race_date
+            r.created_at = created_at
+            if not _race_is_before_as_of(r, as_of_dt):
+                continue
+        rows.append((p, stage))
     buckets = {}
     for p, stage in rows:
         if not stage:

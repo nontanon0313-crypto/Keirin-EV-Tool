@@ -811,18 +811,26 @@ def race_plan(race_id: int, req: schemas.RacePlanRequest, db: Session = Depends(
     MIN_STAGE_SAMPLE_FOR_ORDER_BETS = 30
     stage_sample_n = None
     if race.race_stage:
-        stage_rows = (
+        # 全件 .all() はデータ増加で激重。件数だけ取る。
+        stage_q = (
             db.query(models.Race)
             .filter(models.Race.race_stage == race.race_stage)
             .filter(models.Race.actual_result.isnot(None))
-            .all()
         )
         if as_of_dt is not None:
-            stage_rows = [
-                r for r in stage_rows
-                if purchases_router._race_is_before_as_of(r, as_of_dt)
-            ]
-        stage_sample_n = len(stage_rows)
+            # post_time / race_date を SQL 側で絞る（概算。厳密は _race_is_before_as_of と同趣旨）
+            from sqlalchemy import or_, and_
+            stage_q = stage_q.filter(
+                or_(
+                    and_(models.Race.post_time.isnot(None), models.Race.post_time < as_of_dt),
+                    and_(
+                        models.Race.post_time.is_(None),
+                        models.Race.race_date.isnot(None),
+                        models.Race.race_date < as_of_dt,
+                    ),
+                )
+            )
+        stage_sample_n = stage_q.count()
     stage_sample_insufficient = (
         race.race_stage is not None and stage_sample_n is not None
         and stage_sample_n < MIN_STAGE_SAMPLE_FOR_ORDER_BETS
