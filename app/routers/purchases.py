@@ -5336,10 +5336,16 @@ def threshold_policy_scan(
         "since_resolved": since_dt.isoformat() if since_dt else None,
         "unit_stake_for_skipped": unit_stake,
         "件数": {
+            # 合計=買い目本数(1行=1買い目)。レース数=ユニークrace_id。
+            # 現行プランが1点/レースなら合計≈レース数になる(再投票後は特にそうなりやすい)。
             "合計": len(rows),
+            "買い目本数": len(rows),
             "実投票": sum(1 for r in rows if r["src"] == "purchase"),
             "見送り": sum(1 for r in rows if r["src"] == "skipped"),
             "レース数": len(by_race),
+            "1レースあたり平均買い目": round(len(rows) / len(by_race), 3) if by_race else None,
+            "複数買い目レース数": sum(1 for lst in by_race.values() if len(lst) > 1),
+            "最大買い目数_1レース": max((len(lst) for lst in by_race.values()), default=0),
         },
         "全体": pack(rows),
         "1_予想的中率帯": {k: pack(by_wp[k]) for k in wp_order if k in by_wp},
