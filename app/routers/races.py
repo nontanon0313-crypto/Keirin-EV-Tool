@@ -833,12 +833,12 @@ def replay_settled_one(
     soft_reset_bets(race_id, db)
     _t_reset_end = _time.time()
 
+    # 予想ページの投票プランと同じ設定で再投票する。
+    # RacePlanRequest のフィールド既定値をそのまま使い、replay専用の上書きはしない。
+    # max_race_pct 未指定 → 証拠金タブの race_cap_pct（画面と同じ単一の情報源）
     req = schemas.RacePlanRequest(
         race_id=race_id,
         bankroll=bankroll,
-        apply_performance_gates=apply_performance_gates,
-        apply_odds_safety_margin=apply_odds_safety_margin,
-        avoid_garami=False,  # replayは速度優先（ガミり厳密は任意）
     )
     _t_plan_start = _time.time()
     try:
