@@ -2265,7 +2265,7 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
   const resultBox = document.getElementById("statsResult");
   resultBox.textContent = "読み込み中...";
   try {
-    const res = await fetch(apiUrl("/purchases/stats"));
+    const res = await fetch(apiUrl("/purchases/stats?since=calibration_switch"));
     const data = await res.json();
     if (data.message) {
       resultBox.textContent = data.message;
@@ -2285,6 +2285,19 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       }
     }
     html += `<p class="note">${data.note}</p>`;
+    if (data.merged_tiers || (data.tiers && data.tiers.length)) {
+      html += `<p style="margin-top:10px;"><strong>🗄 DB系統別内訳（データ移行なし・読める系統の合算）</strong></p>`;
+      html += `<p class="note">上の実績・的中率は、下の系統を合算した値です。active だけではありません。</p>`;
+      html += `<table><tr><th>系統</th><th>評価件数</th><th>実購入</th><th>的中率</th><th>回収率</th><th>損益</th></tr>`;
+      for (const tr of (data.tiers || [])) {
+        html += `<tr><td>\( {tr.name ?? "-"}</td><td> \){tr.total_bets ?? "-"}</td><td>\( {tr.real_purchase_count ?? "-"}</td><td> \){tr.overall_win_rate_pct ?? "-"}\( {tr.overall_win_rate_pct != null ? "%" : ""}</td><td> \){tr.overall_roi_pct ?? "-"}\( {tr.overall_roi_pct != null ? "%" : ""}</td><td> \){tr.overall_profit_total ?? "-"}</td></tr>`;
+      }
+      html += `</table>`;
+      if (data.tier_errors && data.tier_errors.length) {
+        html += `<p class="note">読めなかった系統: ${data.tier_errors.map(e => (e.name || "") + " " + (e.message || "")).join(" / ")}</p>`;
+      }
+    }
+
 
     if (data.best_conditions_ranking && data.best_conditions_ranking.length) {
       html += `<p style="margin-top:12px;"><strong>🏆 好調な条件(実績が高い順)</strong></p>`;
