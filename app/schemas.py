@@ -94,13 +94,13 @@ class RacePlanRequest(BaseModel):
     fractional_coefficient: float = 0.25  # 固定値として運用(通常は変更不要)
     max_bet_pct_per_bet: float = 0.05  # 1点あたりの上限比率
     max_race_pct: Optional[float] = None  # 未指定なら資金管理シミュレーションで確認した値(bankroll_state.race_cap_pct)を自動使用
-    min_win_prob: float = 0.0  # 安定的中の土台: 低確率すぎる穴は既定で薄くする
+    min_win_prob: float = 0.02  # 予想ページ minProbInput 既定2%
     min_ev_pct: float = 0.0  # 想定上振れ織り込みの入場下限
     min_odds: float = 125.0  # 最低オッズ125倍未満は除外
     prefer_hit_rate: bool = True
     prefer_same_line: bool = False  # 同ライン絡み優先  # True=安定制約つき。1着本命三連単・的中確率優先
     rebate_pct: float = 0.0  # 還元レース(勝敗に関わらずポイント還元)の場合、還元率(0-1)を指定
-    max_items: int = 0  # 0=件数上限なし。条件を満たす候補をレース予算内で採用（点数は固定しない）
+    max_items: int = 20  # 予想ページ maxItemsInput 既定20。0は送ったときのみ上限なし
     max_race_fill_pct: float = 0.5  # race_capの使用上限比率  # 投票アプリへの手入力を現実的な時間で終えられる件数の上限
     exclude_low_prob_warning: bool = False  # 大穴帯(0-5%・実績未検証)も候補として評価し、警告は表示する
     apply_calibration: bool = False  # 勝率帯キャリブレーションを適用するか(検証用にOFF可)
