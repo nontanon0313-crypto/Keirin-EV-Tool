@@ -51,18 +51,18 @@ def _normalize_url(url: str) -> str:
 def _make_engine(url: str):
     if not url:
         return None
+    # Neon pooler は startup の statement_timeout を拒否する。
+    # https://neon.tech/docs/connect/connection-errors#unsupported-startup-parameter
+    connect_args = {"connect_timeout": 10}
+    u = (url or "").lower()
+    neon_pooler = ("neon.tech" in u) and ("pooler" in u)
+    if not neon_pooler:
+        connect_args["options"] = "-c statement_timeout=8000"
     return create_engine(
         url,
         pool_pre_ping=True,
         pool_recycle=300,
-        connect_args={
-            "connect_timeout": 10,
-            # 2026-09-12: connect_timeoutはTCP接続確立までしかカバーせず、
-            # Aivenが休止から復帰する途中など「接続は通るがクエリ応答が遅れる」
-            # ケースでSELECT 1自体がハングし続ける可能性があった。
-            # statement_timeoutでクエリ単位でも確実にタイムアウトさせる。
-            "options": "-c statement_timeout=8000",
-        },
+        connect_args=connect_args,
     )
 
 
