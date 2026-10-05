@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
@@ -14,6 +14,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def keirin_db_tier_middleware(request: Request, call_next):
+    from . import database as dbmod
+    tier = request.headers.get("X-Keirin-DB-Tier") or request.headers.get("x-keirin-db-tier")
+    token = None
+    if tier:
+        tier = tier.strip().lower()
+        try:
+            token = dbmod.set_request_tier(tier)
+        except Exception:
+            token = None
+    try:
+        return await call_next(request)
+    finally:
+        if token is not None:
+            dbmod.reset_request_tier(token)
+
 
 app.include_router(bank.router)
 app.include_router(bankroll.router)

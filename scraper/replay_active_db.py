@@ -14,6 +14,10 @@ EXCLUDE_DONE = os.environ.get("KEIRIN_EXCLUDE_REPLAYED", "false").lower() in ("1
 DATA = Path(os.environ.get("KEIRIN_DATA_DIR", Path(__file__).resolve().parent / "data"))
 PROGRESS = DATA / "replay_active_db_progress.json"
 SESSION = requests.Session()
+TIER = (os.environ.get("KEIRIN_DB_TIER") or "").strip().lower()
+if TIER:
+    SESSION.headers["X-Keirin-DB-Tier"] = TIER
+
 
 def log(msg):
     print(msg, flush=True)
@@ -54,7 +58,7 @@ def req(method, url, max_retries=8, timeout=180, **kw):
     return last
 
 def main():
-    log(f"API={API} BANKROLL={BANKROLL:,.0f} exclude_already_replayed={EXCLUDE_DONE}")
+    log(f"API={API} BANKROLL={BANKROLL:,.0f} exclude_already_replayed={EXCLUDE_DONE} tier={TIER or \"(active)\"}")
     h = req("GET", f"{API}/health", timeout=60)
     if h is None or h.status_code != 200:
         log(f"health FAIL status={getattr(h, 'status_code', None)}")

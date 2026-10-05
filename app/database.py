@@ -1,4 +1,5 @@
 import os
+from contextvars import ContextVar
 import threading
 import logging
 import time
@@ -519,11 +520,25 @@ def ensure_active_connection() -> None:
         raise last_err
 
 
+
+_request_tier = ContextVar("keirin_request_tier", default=None)
+
+def set_request_tier(name):
+    """リクエスト単位で読み書き先DBを固定する。Noneで解除。"""
+    if name is not None and name not in _TIER_ORDER:
+        raise ValueError(f"invalid tier: {name}")
+    return _request_tier.set(name)
+
+def reset_request_tier(token):
+    _request_tier.reset(token)
+
+def get_request_tier():
+    return _request_tier.get()
+
 def get_db():
     """
     リクエストごとに prefer 順で接続を試す。
-    以前は一度 fallback に落ちるとプロセス終了まで primary に戻らなかった。
-    Neon が一時停止→復帰したあとも prefer=primary なら primary を再試行する。
+    X-Keirin-DB-Tier ヘッダがある場合はその系統を優先（再投票・集計の系統指定用）。
     """
     if not _sessions:
         raise RuntimeError(
@@ -537,6 +552,30 @@ def get_db():
 
     db = None
     last_err = None
+
+    forced = _request_tier.get()
+    if forced and forced in _sessions and not _is_quota_blocked(forced):
+        try:
+            candidate = _sessions[forced]()
+            candidate.execute(text("SELECT 1"))
+            _clear_cooldown(forced)
+            db = candidate
+            try:
+                yield db
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+            return
+        except Exception as e:
+            last_err = e
+            logger.warning("forced tier %s failed: %s", forced, e)
+            try:
+                _mark_cooldown(forced, e)
+            except Exception:
+                pass
+
     for name in order:
         try:
             factory = _sessions[name]
