@@ -118,19 +118,22 @@ def get_active_db_info() -> dict:
     ok = {}
     for name in _TIER_ORDER:
         if name in _sessions:
-            if _is_in_cooldown(name):
+            if _is_quota_blocked(name):
                 ok[name] = False
-                if _is_quota_blocked(name):
-                    errors[name] = "quota-exceeded: blocked until next day"
-                else:
-                    errors[name] = "temporarily in cooldown"
+                errors[name] = "quota-exceeded: blocked until next day"
                 continue
+            # 一時cooldown中でも実プローブ（復旧をすぐ反映）
             try:
                 _ping(_sessions[name])
+                _clear_cooldown(name)
                 ok[name] = True
                 errors[name] = None
             except Exception as e:
                 ok[name] = False
+                try:
+                    _mark_cooldown(name, e)
+                except Exception:
+                    pass
                 errors[name] = str(e)[:500]
     active_url = _TIER_URLS.get(active, "")
     return {
@@ -154,20 +157,32 @@ def get_active_db_info() -> dict:
 
 
 def open_readable_sessions():
-    """今読める系統の Session を開く。quotaブロックは除外。callerがclose。"""
+    """
+    集計用に「今読める系統」の Session を開く。
+    - 当日quotaブロックのみ除外
+    - 一時cooldownは無視して毎回プローブ（復活した primary を載せるため）
+    - 成功したら cooldown を解除
+    caller が必ず close すること。
+    """
     opened = []
     for name in _TIER_ORDER:
         if name not in _sessions:
             continue
         if _is_quota_blocked(name):
+            logger.info("open_readable_sessions: skip %s (quota-blocked today)", name)
             continue
         session = None
         try:
             session = _sessions[name]()
             session.execute(text("SELECT 1"))
+            _clear_cooldown(name)
             opened.append((name, session))
         except Exception as e:
             logger.warning("open_readable_sessions: skip %s (%s)", name, e)
+            try:
+                _mark_cooldown(name, e)
+            except Exception:
+                pass
             if session is not None:
                 try:
                     session.close()
