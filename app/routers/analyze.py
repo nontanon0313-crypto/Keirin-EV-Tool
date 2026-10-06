@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List
@@ -366,6 +366,29 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
             "lead_advantage_score": bank.lead_advantage_score,
         }
 
+    def _raise_gemini_error(stage: str, e: Exception):
+        """利用枠切れは429、それ以外は502で detail を必ず返す。"""
+        msg = str(e)
+        low = msg.lower()
+        is_quota = (
+            "レート制限" in msg
+            or "無料枠" in msg
+            or "resourceexhausted" in low
+            or "quota" in low
+            or "429" in low
+            or "rate limit" in low
+            or "rate_limit" in low
+        )
+        if is_quota:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Gemini利用枠切れのため{stage}に失敗しました。時間を空けて再試行してください。詳細: {msg}",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"{stage}に失敗しました: {msg}",
+        )
+
     # 1段階目: 展開予想を先に生成する
     try:
         development = simulate_race_development(
@@ -375,10 +398,12 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
         )
         race.development_simulation = development
         db.commit()
+    except HTTPException:
+        raise
     except Exception as e:
         development = race.development_simulation  # 失敗時は前回分があればそれを使う
         if development is None:
-            raise HTTPException(502, f"展開予想の生成に失敗しました: {e}")
+            _raise_gemini_error("展開予想の生成", e)
 
     # 2段階目: 展開予想を踏まえて勝率を推定する
     try:
@@ -388,8 +413,10 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
             development_simulation=development,
             weather_info=weather_info,
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(502, f"AI勝率推定に失敗しました: {e}")
+        _raise_gemini_error("AI勝率推定", e)
 
     # tipstarとの重み付け合成は廃止。最終勝率はAI単独。
     updated_count = 0
