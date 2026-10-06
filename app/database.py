@@ -539,6 +539,7 @@ def get_db():
     """
     リクエストごとに prefer 順で接続を試す。
     X-Keirin-DB-Tier ヘッダがある場合はその系統を優先（再投票・集計の系統指定用）。
+    yield は必ず1回だけ。forced 分岐で早期 return しない（generator didn't stop 対策）。
     """
     if not _sessions:
         raise RuntimeError(
@@ -552,49 +553,40 @@ def get_db():
 
     db = None
     last_err = None
+    selected_name = None
 
     forced = _request_tier.get()
+    # forced を最優先、その後 prefer 順（重複除去）
+    candidates = []
     if forced and forced in _sessions and not _is_quota_blocked(forced):
-        try:
-            candidate = _sessions[forced]()
-            candidate.execute(text("SELECT 1"))
-            _clear_cooldown(forced)
-            db = candidate
-            try:
-                yield db
-            finally:
-                try:
-                    db.close()
-                except Exception:
-                    pass
-            return
-        except Exception as e:
-            last_err = e
-            logger.warning("forced tier %s failed: %s", forced, e)
-            try:
-                _mark_cooldown(forced, e)
-            except Exception:
-                pass
-
+        candidates.append(forced)
     for name in order:
+        if name not in candidates:
+            candidates.append(name)
+
+    for name in candidates:
+        candidate = None
         try:
             factory = _sessions[name]
             candidate = factory()
             candidate.execute(text("SELECT 1"))
-            _switch_to(name)
+            if name != forced:
+                _switch_to(name)
             _clear_cooldown(name)
             db = candidate
+            selected_name = name
             break
         except Exception as e:
             last_err = e
-            if db is not None:
+            if candidate is not None:
                 try:
-                    db.close()
+                    candidate.close()
                 except Exception:
                     pass
-                db = None
-            _mark_cooldown(name, e)
-            # prefer 先頭が失敗した場合のみ次へ。ログは警告に留める
+            try:
+                _mark_cooldown(name, e)
+            except Exception:
+                pass
             logger.warning("database probe failed (%s): %s", name, e)
             continue
 
@@ -606,11 +598,11 @@ def get_db():
     try:
         yield db
     finally:
-        if db is not None:
-            try:
-                db.close()
-            except Exception:
-                pass
+        try:
+            db.close()
+        except Exception:
+            pass
+
 
 
 def init_db():
