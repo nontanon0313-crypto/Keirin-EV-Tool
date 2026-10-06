@@ -166,29 +166,45 @@ class RateLimitExhausted(Exception):
     pass
 
 
+
 def step2_estimate(race_id, max_retries=5):
     """
-    2. 予想: Gemini 2段階分析(展開シミュレーション→勝率推定)。
-
-    Geminiの利用枠(RPM/RPD)を超えると429が返ってくることがある。データが
-    壊れるわけではないので、まず待ってから自動リトライする。それでも
-    max_retries回連続で429が続く場合は「一時的な混雑ではなく、日次上限等に
-    達した可能性が高い」と判断し、RateLimitExhaustedを送出して処理全体を
-    止める(のんの要望により追加。実際の枠はGoogle AI Studio等で要確認、
-    ここでは上限の値は決め打ちしない)。
+    Gemini 2段階予想。失敗時はレスポンス本文を含めて例外を投げ、呼び出し側で停止判断する。
+    「Failed to fetch」はブラウザ用語。ここでは HTTP status と body を必ず出す。
     """
     url = f"{API_BASE}/analyze/estimate/{race_id}"
+    last_err = None
     for attempt in range(max_retries):
-        r = requests.post(url, timeout=120)
-        if r.status_code == 429:
-            wait = min(10 * (2 ** attempt), 120)
-            log(f"   race_id={race_id}: Gemini利用枠の制限(429)。{wait}秒待って再試行します({attempt + 1}/{max_retries})")
+        try:
+            r = requests.post(url, timeout=180)
+            if r.status_code in (429, 502, 503, 504):
+                wait = min(20 * (2 ** attempt), 180)
+                body = (r.text or "")[:400].replace("\n", " ")
+                log(f"   estimate HTTP {r.status_code} → {wait}s 再試行 ({attempt+1}/{max_retries}) body={body}")
+                time.sleep(wait)
+                last_err = RuntimeError(f"estimate HTTP {r.status_code}: {body}")
+                continue
+            if r.status_code >= 400:
+                body = (r.text or "")[:800]
+                # FastAPI detail
+                detail = body
+                try:
+                    j = r.json()
+                    detail = j.get("detail") or j
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"estimate 失敗 race_id={race_id} HTTP {r.status_code} detail={detail}"
+                )
+            return r.json()
+        except RuntimeError:
+            raise
+        except Exception as e:
+            wait = min(15 * (attempt + 1), 90)
+            log(f"   estimate 通信エラー: {type(e).__name__}: {e} → {wait}s ({attempt+1}/{max_retries})")
             time.sleep(wait)
-            continue
-        r.raise_for_status()
-        return r.json()
-    raise RateLimitExhausted(f"race_id={race_id}: 429が{max_retries}回連続しました。利用枠(日次上限等)に達した可能性があります")
-
+            last_err = e
+    raise RuntimeError(f"estimate 最終失敗 race_id={race_id}: {last_err}")
 
 def step3_race_plan(race_id, bankroll):
     """3. 投票プラン作成: EV計算・ステーキング(bankroll未指定なら証拠金残高を自動使用)"""
@@ -295,7 +311,7 @@ def run_one_race(race_json, bankroll, dry_run=False, skip_plan=False):
             log(f"   完了: {est.get('updated_entries', 0)}名分の勝率を推定")
         except Exception as e:
             log(f"   予想に失敗しました: {e}")
-            return {"race_id": race_id, "stage": "estimate_failed", "error": str(e)}
+            raise RuntimeError(f"予想失敗のため停止 race_id={race_id}: {e}")
         log("   --skip-plan のためここで終了(投票プラン作成・投票記録は行いません)")
         return {"race_id": race_id, "stage": "estimated_only"}
 
@@ -342,7 +358,7 @@ def run_predict_and_confirm(race_id, bankroll, actual_result=None):
         log(f"   完了: {est.get('updated_entries', 0)}名分の勝率を推定")
     except Exception as e:
         log(f"   予想に失敗しました: {e}")
-        return {"race_id": race_id, "stage": "estimate_failed", "error": str(e)}
+        raise RuntimeError(f"予想失敗のため停止 race_id={race_id}: {e}")
 
     log("3. 投票プラン作成...")
     plan = step3_race_plan(race_id, bankroll)
@@ -495,6 +511,8 @@ def main():
     progress = load_progress(args.progress_file)
     summary = []
     stopped_for_rate_limit = False
+    consecutive_hard_fail = 0
+    MAX_CONSECUTIVE_HARD_FAIL = int(os.environ.get('KEIRIN_MAX_CONSECUTIVE_FAIL', '3'))
 
     # 成功とみなす("done"扱いにして次回スキップする)ステージ一覧。
     # エラー・レート制限切れは含めない(次回また試すため)。
@@ -506,7 +524,7 @@ def main():
     SUCCESS_STAGES = {"done", "predicted_no_result", "no_entries", "skipped_no_odds", "skipped_empty", "estimated_only"}
 
     def run_with_summary(task_key, task_label, fn):
-        nonlocal stopped_for_rate_limit
+        nonlocal stopped_for_rate_limit, consecutive_hard_fail
         if _stop_event.is_set():
             return
         if progress.get(task_key) == "done":
@@ -518,6 +536,7 @@ def main():
             if not args.dry_run and result.get("stage") in SUCCESS_STAGES:
                 progress[task_key] = "done"
                 save_progress(args.progress_file, progress)
+                consecutive_hard_fail = 0
         except RateLimitExhausted as e:
             log(f"   停止(Gemini利用枠切れ): {e}")
             log("   処理全体を停止します。利用枠が回復してから、同じコマンドをもう一度実行してください(完了済みの分は自動でスキップされます)")
@@ -527,6 +546,12 @@ def main():
         except Exception as e:
             log(f"   エラー({task_label}): {e}")
             summary.append({"file": task_label, "stage": "error", "error": str(e)})
+            consecutive_hard_fail += 1
+            log(f"   連続失敗 {consecutive_hard_fail}/{MAX_CONSECUTIVE_HARD_FAIL}")
+            if consecutive_hard_fail >= MAX_CONSECUTIVE_HARD_FAIL:
+                log(f"   連続{MAX_CONSECUTIVE_HARD_FAIL}回失敗のためパイプライン全体を停止します")
+                log(f"   最後のエラー: {e}")
+                _stop_event.set()
 
     if args.race_ids:
         race_ids = [int(x.strip()) for x in args.race_ids.split(",") if x.strip()]
