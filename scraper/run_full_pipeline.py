@@ -185,7 +185,7 @@ def step2_estimate(race_id, max_retries=5):
     last_err = None
     for attempt in range(max_retries):
         try:
-            r = requests.post(url, timeout=180)
+            r = requests.post(url, headers=_API_HEADERS, timeout=180)
             if r.status_code in (429, 502, 503, 504):
                 wait = min(20 * (2 ** attempt), 180)
                 body = (r.text or "")[:400].replace("\n", " ")
