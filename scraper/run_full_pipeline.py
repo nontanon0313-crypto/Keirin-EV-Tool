@@ -25,6 +25,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock, Event
 
 API_BASE = os.environ.get("KEIRIN_API_BASE", "https://keirin-ev-tool.onrender.com")
+
+# 系統指定（primary / fallback / fallback2）。未設定ならヘッダを付けない（サーバー既定）。
+_DB_TIER = (os.environ.get("KEIRIN_DB_TIER") or "").strip().lower()
+_API_HEADERS = {"X-Keirin-DB-Tier": _DB_TIER} if _DB_TIER else {}
 _log_lock = Lock()
 _post_lock = Lock()  # Render/CloudflareへのPOSTを全体で直列化
 
@@ -43,7 +47,7 @@ def warmup_backend():
     """
     log("バックエンドをウォームアップ中(コールドスタート対策)...")
     try:
-        requests.get(f"{API_BASE}/docs", timeout=90)
+        requests.get(f"{API_BASE}/docs", headers=_API_HEADERS, timeout=90)
         log("  ウォームアップ完了")
     except Exception as e:
         log(f"  ウォームアップ失敗(続行します): {e}")
@@ -84,6 +88,11 @@ def _post_with_retry(url, **kwargs):
                 if wait_for_interval > 0:
                     time.sleep(wait_for_interval)
 
+                # 系統ヘッダを常に付与（呼び出し側で上書き可）
+                headers = dict(_API_HEADERS)
+                if kwargs.get("headers"):
+                    headers.update(kwargs["headers"])
+                kwargs["headers"] = headers
                 r = requests.post(url, **kwargs)
                 _post_with_retry._last_post_time = time.monotonic()
 
@@ -149,13 +158,13 @@ def reset_race(race_id):
     だけを削除する。予想ロジックを変えて再検証したい時、スクレイピングをやり直さずに
     使う(のんの要望により追加)。
     """
-    r = requests.post(f"{API_BASE}/races/{race_id}/reset-for-reanalysis", timeout=90)
+    r = requests.post(f"{API_BASE}/races/{race_id}/reset-for-reanalysis", headers=_API_HEADERS, timeout=90)
     r.raise_for_status()
     return r.json()
 
 
 def get_race(race_id):
-    r = requests.get(f"{API_BASE}/races/{race_id}", timeout=90)
+    r = requests.get(f"{API_BASE}/races/{race_id}", headers=_API_HEADERS, timeout=90)
     r.raise_for_status()
     return r.json()
 
@@ -211,7 +220,7 @@ def step3_race_plan(race_id, bankroll):
     body = {"race_id": race_id}
     if bankroll is not None:
         body["bankroll"] = bankroll
-    r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, timeout=90)
+    r = requests.post(f"{API_BASE}/ev/race-plan/{race_id}", json=body, headers=_API_HEADERS, timeout=90)
     r.raise_for_status()
     return r.json()
 
@@ -236,7 +245,7 @@ def step4_record_purchases(race_id, plan):
             for it in items
         ],
     }
-    r = requests.post(f"{API_BASE}/purchases/bulk", json=body, timeout=90)
+    r = requests.post(f"{API_BASE}/purchases/bulk", json=body, headers=_API_HEADERS, timeout=90)
     r.raise_for_status()
     return {"recorded": len(items), "response": r.json()}
 
@@ -260,7 +269,7 @@ def _extract_actual_result(race_json):
 
 
 def get_current_bankroll():
-    r = requests.get(f"{API_BASE}/bankroll/", timeout=15)
+    r = requests.get(f"{API_BASE}/bankroll/", headers=_API_HEADERS, timeout=15)
     r.raise_for_status()
     data = r.json()
     return data.get("current_balance")
@@ -477,7 +486,7 @@ def warm_calibration():
     """
     log("校正係数をウォームアップ中(race-planの高速化のため)...")
     try:
-        r = requests.post(f"{API_BASE}/purchases/warm-calibration", timeout=120)
+        r = requests.post(f"{API_BASE}/purchases/warm-calibration", headers=_API_HEADERS, timeout=120)
         r.raise_for_status()
         data = r.json()
         log(f"  ウォームアップ完了({data.get('total_seconds')}秒。以降のrace-planはこのキャッシュを使うため速くなるはず)")
