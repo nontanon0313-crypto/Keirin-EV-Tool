@@ -7,6 +7,33 @@ function apiUrl(path) {
   return API_BASE_URL + path;
 }
 
+
+/** 通信・サーバー障害をプログラム英語ではなく日本語で返す */
+function friendlyError(e) {
+  const msg = (e && e.message) ? String(e.message) : String(e || "");
+  const low = msg.toLowerCase();
+  if (
+    low.includes("failed to fetch") ||
+    low.includes("networkerror") ||
+    low.includes("network request failed") ||
+    low.includes("load failed")
+  ) {
+    return "通信に失敗しました。サーバーが起動中か、ネットワーク接続を確認してから再試行してください。";
+  }
+  if (low.includes("timeout") || low.includes("timed out") || low.includes("aborted")) {
+    return "応答がタイムアウトしました。しばらく待ってから再読み込みしてください。";
+  }
+  if (low.includes("cors")) {
+    return "通信設定の問題で取得できませんでした。時間をおいて再試行してください。";
+  }
+  // FastAPI の detail が文字列で入っている場合はそのまま
+  if (msg && !msg.startsWith("Unexpected") && !msg.includes("TypeError")) {
+    return msg;
+  }
+  return "処理に失敗しました。時間をおいて再試行してください。";
+}
+
+
 // 会場名→地区番号(バックエンドの会場コード表app/keirin_data.pyのJO_CODE_TO_VENUEと同じ並び順)
 // 番号の小さい順に並べると「北日本→関東→南関東→中部→近畿→中国→四国→九州」の地区順になる
 const VENUE_SORT_ORDER = {
@@ -38,7 +65,7 @@ document.getElementById("suggestMarginBtn").addEventListener("click", async () =
     document.getElementById("minEvInput").value = data.suggested_margin_pct;
     alert(data.reason);
   } catch (e) {
-    alert("エラー: " + e.message);
+    alert("エラー: " + friendlyError(e));
   }
 });
 
@@ -61,7 +88,7 @@ async function refreshBankrollDisplay() {
     }
     box.textContent = `現在の残高: ${data.current_balance}円 (初期設定額: ${data.initial_balance}円)`;
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = "エラー: " + friendlyError(e);
   }
 }
 
@@ -81,7 +108,7 @@ document.getElementById("bankrollSetBtn").addEventListener("click", async () => 
     if (!res.ok) throw new Error(await res.text());
     await refreshBankrollDisplay();
   } catch (e) {
-    alert("エラー: " + e.message);
+    alert("エラー: " + friendlyError(e));
   }
 });
 
@@ -102,7 +129,7 @@ async function wakeUpBackend(statusCallback) {
         lastError = `HTTPステータス ${res.status}`;
       }
     } catch (e) {
-      lastError = e.message || String(e);
+      lastError = friendlyError(e);
     }
     if (statusCallback) {
       statusCallback(`サーバー起動待ち...(${i + 1}/${maxAttempts})\n無料プランはアクセスが無いとスリープするため、初回は最大1分ほどかかります。${lastError ? "\n直近のエラー: " + lastError : ""}`);
@@ -408,7 +435,7 @@ async function loadFavoritesList(force) {
     bindFavoriteRaceClicks(box);
     raceListCache.favorites = { at: Date.now(), minProb: minProbPct, html, items: data };
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = "エラー: " + friendlyError(e);
   }
 }
 
@@ -435,7 +462,7 @@ document.getElementById("deleteRaceBtn").addEventListener("click", async () => {
     alert("削除しました");
     await loadRaces();
   } catch (e) {
-    alert("削除エラー: " + e.message);
+    alert("削除エラー: " + friendlyError(e));
   }
 });
 
@@ -460,7 +487,7 @@ document.getElementById("deleteAllBtn").addEventListener("click", async () => {
     if (detail) detail.textContent = "";
     await loadRaces();
   } catch (e) {
-    alert("削除エラー: " + e.message);
+    alert("削除エラー: " + friendlyError(e));
   }
 });
 
@@ -546,7 +573,7 @@ async function checkRace() {
       });
     }
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = "エラー: " + friendlyError(e);
   }
 }
 document.getElementById("raceSelect").addEventListener("change", checkRace);
@@ -591,7 +618,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
       await checkRace();
     }
   } catch (e) {
-    resultBox.textContent = "エラー(AI予想): " + e.message;
+    resultBox.textContent = "エラー(AI予想): " + friendlyError(e);
     return;
   }
 
@@ -693,7 +720,7 @@ document.getElementById("racePlanBtn").addEventListener("click", async () => {
       appendRevenuePlanButton();
     }
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -727,7 +754,7 @@ if (_thresholdTableBtn) _thresholdTableBtn.addEventListener("click", async () =>
     html += "</table>";
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -854,7 +881,7 @@ async function loadRevenueStats() {
   } catch (e) {
     box.textContent = e.name === "AbortError"
       ? "エラー: 収益集計の取得がタイムアウトしました"
-      : "エラー: " + e.message;
+      : "エラー: " + friendlyError(e);
   }
 }
 
@@ -884,7 +911,7 @@ async function loadRevenueCompare() {
       `<p>想定回収率: ${pct(p.roi_pct)} / 実績回収率: ${pct(a.roi_pct)}</p>` +
       `<p>想定的中率: ${pct(p.hit_rate_pct)} / 実績的中率: ${pct(a.hit_rate_pct)}</p>`;
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = "エラー: " + friendlyError(e);
   }
 }
 
@@ -1057,7 +1084,7 @@ async function loadRevenueEquity() {
     drawRevenueEquity(data);
   } catch (e) {
     const box = document.getElementById("revenueEquitySummary");
-    if (box) box.textContent = "エラー: " + e.message;
+    if (box) box.textContent = "エラー: " + friendlyError(e);
   }
 }
 
@@ -1274,7 +1301,7 @@ async function loadRevenueList() {
     renderRevenueList(data);
   } catch (e) {
     const box = document.getElementById("revenueListBox");
-    if (box) box.textContent = "エラー: " + e.message;
+    if (box) box.textContent = "エラー: " + friendlyError(e);
   }
 }
 
@@ -1607,7 +1634,7 @@ const planItem = planItems.find(it =>
 
     await refreshBankrollDisplay();
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 })();
@@ -1716,7 +1743,7 @@ document.getElementById("loadPendingBtn").addEventListener("click", async () => 
       });
     });
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -1808,7 +1835,7 @@ document.getElementById("reanalyzeAllBtn").addEventListener("click", async () =>
         log("  → 完了\n");
         doneCount++;
       } catch (e) {
-        log(`  → エラー: ${e.message}\n`);
+        log(`  → エラー: ${friendlyError(e)}\n`);
         errorCount++;
       }
     }
@@ -2099,7 +2126,7 @@ document.getElementById("runSimBtn").addEventListener("click", async () => {
       ` × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>` +
       `<p class="note">この「1レース上限%」を実際の投票プラン作成(画面・日次パイプライン共通)の上限として使いたい場合は、下の「この上限%を実投票の上限として保存する」ボタンを押してください。</p>`;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2156,7 +2183,7 @@ document.getElementById("runSimBootstrapBtn").addEventListener("click", async ()
       (data.trials_capped ? `（計算量上限のため要求より削減）` : ``) +
       ` × ${numRaces}レース・1レース${betsPerRace}点・1レース上限${(racePct * 100).toFixed(1)}%（1点あたり${(stakeFraction * 100).toFixed(3)}%）</p>`;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2219,7 +2246,7 @@ async function runRecommendRacePct(silent) {
       `<p>平均最終資金: ${data["平均最終資金"]}円</p>` +
       `<p class="note">下の「この上限%を実投票の上限として保存する」ボタンを押すまでは反映されません。</p>`;
   } catch (e) {
-    if (!silent) resultBox.textContent = "エラー: " + e.message;
+    if (!silent) resultBox.textContent = "エラー: " + friendlyError(e);
   }
 }
 
@@ -2347,7 +2374,7 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     saveSimInputs();
     runRecommendRacePct(true);
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2420,7 +2447,7 @@ async function loadThresholdPolicyScan(sections, combinedCheck) {
     }
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 }
 
@@ -2451,7 +2478,7 @@ document.getElementById("loadOddsFilterImpactBtn")?.addEventListener("click", as
     html += `<p class="note">${d.note}</p>`;
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2483,7 +2510,7 @@ document.getElementById("loadPurchaseHistoryBtn").addEventListener("click", asyn
     html += `</table>`;
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2513,7 +2540,7 @@ document.getElementById("loadExcludeTopBtn").addEventListener("click", async () 
     if (data.note) html += `<p class="note">${data.note}</p>`;
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2538,7 +2565,7 @@ document.getElementById("loadInvestImpactBtn").addEventListener("click", async (
     if (data.note) html += `<p class="note">${data.note}</p>`;
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2623,7 +2650,7 @@ document.getElementById("loadPipelineBtn").addEventListener("click", async () =>
     if (data.note) html += `<details style="margin-top:10px;"><summary class="note">詳細説明</summary><p class="note">${data.note}</p></details>`;
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2673,7 +2700,7 @@ document.getElementById("loadLineBoostSweepBtn").addEventListener("click", async
 
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2725,7 +2752,7 @@ document.getElementById("loadTrifectaStructureBtn").addEventListener("click", as
 
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2766,7 +2793,7 @@ document.getElementById("loadLineBoostV2Btn").addEventListener("click", async ()
 
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2803,7 +2830,7 @@ document.getElementById("loadPositionMatrixBtn").addEventListener("click", async
 
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2844,7 +2871,7 @@ document.getElementById("loadRaceScoreMethodBtn").addEventListener("click", asyn
 
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -2963,7 +2990,7 @@ const pairs = [];
 
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -3103,7 +3130,7 @@ html += `<table><tr><th>券種</th><th>勝率帯</th><th>試行数</th><th>必�
 
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -3194,7 +3221,7 @@ document.getElementById("loadCalibrationCompareBtn").addEventListener("click", a
       });
     });
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -3275,7 +3302,7 @@ document.getElementById("loadProfitConcentrationBtn").addEventListener("click", 
     html += "</table>";
     box.innerHTML = html;
   } catch (e) {
-    box.textContent = "エラー: " + e.message;
+    box.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -3302,7 +3329,7 @@ document.getElementById("loadCarPickBtn").addEventListener("click", async () => 
     html += "</table>";
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
@@ -3492,7 +3519,7 @@ document.getElementById("loadReadinessBtn").addEventListener("click", async () =
     html += "</table>";
     resultBox.innerHTML = html;
   } catch (e) {
-    resultBox.textContent = "エラー: " + e.message;
+    resultBox.textContent = "エラー: " + friendlyError(e);
   }
 });
 
