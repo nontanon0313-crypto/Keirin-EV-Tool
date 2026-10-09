@@ -5595,25 +5595,46 @@ def _merge_tier_stats(tier_results):
 
 
 def _compute_stats_all_readable_tiers(since_dt):
+    """読める系統を1つずつ集計してから閉じる（同時オープンによるピークメモリを抑える）。"""
     from .. import database as dbmod
-    opened = dbmod.open_readable_sessions()
+    from sqlalchemy import text as sa_text
+
     tier_results = []
-    try:
-        if not opened:
-            return {"message": "読めるDBがありません"}
-        for name, session in opened:
+    # open_readable_sessions は全系統を同時に開くため使わない
+    for name in dbmod._TIER_ORDER:
+        if name not in dbmod._sessions:
+            continue
+        if dbmod._is_quota_blocked(name):
+            continue
+        session = None
+        try:
+            session = dbmod._sessions[name]()
+            session.execute(sa_text("SELECT 1"))
+            try:
+                dbmod._clear_cooldown(name)
+            except Exception:
+                pass
             try:
                 r = _compute_purchase_stats(session, since_dt)
                 tier_results.append((name, r))
             except Exception as e:
                 tier_results.append((name, {"message": "%s: %s" % (type(e).__name__, e)}))
-        return _merge_tier_stats(tier_results)
-    finally:
-        for _, session in opened:
+        except Exception as e:
+            tier_results.append((name, {"message": "%s: %s" % (type(e).__name__, e)}))
             try:
-                session.close()
+                dbmod._mark_cooldown(name, e)
             except Exception:
                 pass
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
+    if not tier_results:
+        return {"message": "読めるDBがありません"}
+    return _merge_tier_stats(tier_results)
 
 
 def _schedule_stats_refresh(since: str, since_dt):
