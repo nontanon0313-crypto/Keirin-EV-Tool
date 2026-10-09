@@ -5595,13 +5595,23 @@ def _merge_tier_stats(tier_results):
 
 
 def _compute_stats_all_readable_tiers(since_dt):
-    """読める系統を1つずつ集計してから閉じる（同時オープンによるピークメモリを抑える）。"""
+    """読める系統を1つずつ集計してから閉じる（同時オープンによるピークメモリを抑える）。
+    X-Keirin-DB-Tier 指定時はその系統のみ（合算しない・省メモリ）。
+    """
     from .. import database as dbmod
     from sqlalchemy import text as sa_text
 
     tier_results = []
-    # open_readable_sessions は全系統を同時に開くため使わない
-    for name in dbmod._TIER_ORDER:
+    forced = None
+    try:
+        forced = dbmod.get_request_tier()
+    except Exception:
+        forced = None
+    names = list(dbmod._TIER_ORDER)
+    if forced and forced in dbmod._sessions:
+        names = [forced]
+
+    for name in names:
         if name not in dbmod._sessions:
             continue
         if dbmod._is_quota_blocked(name):
@@ -5617,6 +5627,8 @@ def _compute_stats_all_readable_tiers(since_dt):
             try:
                 r = _compute_purchase_stats(session, since_dt)
                 tier_results.append((name, r))
+                # 大きな結果を次の系統の前に解放
+                r = None
             except Exception as e:
                 tier_results.append((name, {"message": "%s: %s" % (type(e).__name__, e)}))
         except Exception as e:
@@ -5631,6 +5643,11 @@ def _compute_stats_all_readable_tiers(since_dt):
                     session.close()
                 except Exception:
                     pass
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
 
     if not tier_results:
         return {"message": "読めるDBがありません"}
@@ -5638,33 +5655,12 @@ def _compute_stats_all_readable_tiers(since_dt):
 
 
 def _schedule_stats_refresh(since: str, since_dt):
-    global _purchase_stats_refreshing
-    import threading
-    import time as _time
+    """メモリ不足対策: 裏スレッドでの全系統集計は行わない。
 
-    with _purchase_stats_refresh_lock:
-        if _purchase_stats_refreshing:
-            return
-        _purchase_stats_refreshing = True
-
-    def _job():
-        global _purchase_stats_refreshing
-        try:
-            result = _compute_stats_all_readable_tiers(since_dt)
-            if isinstance(result, dict) and "message" not in result:
-                result["since"] = since
-                result["since_resolved"] = since_dt.isoformat() if since_dt else None
-                result["merged_tiers"] = True
-                _purchase_stats_cache["value"] = result
-                _purchase_stats_cache["computed_at"] = _time.time()
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("background stats refresh failed: %s", e)
-        finally:
-            with _purchase_stats_refresh_lock:
-                _purchase_stats_refreshing = False
-
-    threading.Thread(target=_job, daemon=True).start()
+    以前は stale キャッシュ返却時に Thread で全DB集計しており、
+    パイプライン処理と重なると Render のメモリ上限で再起動していた。
+    """
+    return
 
 
 @router.get("/stats")
