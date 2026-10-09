@@ -2289,10 +2289,28 @@ function renderBucketTable(title, bucketObj) {
 }
 
 document.getElementById("loadStatsBtn").addEventListener("click", async () => {
+  const btn = document.getElementById("loadStatsBtn");
   const resultBox = document.getElementById("statsResult");
+  if (btn.disabled) return;
+  btn.disabled = true;
   resultBox.textContent = "読み込み中...";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
   try {
-    const res = await fetch(apiUrl("/purchases/stats?since=calibration_switch"));
+    const res = await fetch(apiUrl("/purchases/stats?since=calibration_switch"), {
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const errBody = await res.json();
+        detail = errBody.detail || JSON.stringify(errBody);
+      } catch (_) {
+        detail = await res.text();
+      }
+      throw new Error(detail || ("サーバーエラー(" + res.status + ")"));
+    }
     const data = await res.json();
     if (data.message) {
       resultBox.textContent = data.message;
@@ -2375,6 +2393,9 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
     runRecommendRacePct(true);
   } catch (e) {
     resultBox.textContent = "エラー: " + friendlyError(e);
+  } finally {
+    clearTimeout(timer);
+    btn.disabled = false;
   }
 });
 
