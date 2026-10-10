@@ -864,8 +864,10 @@ async function loadRevenueStats() {
 
   box.textContent = "集計中...";
   try {
+    await wakeUpBackend((msg) => { box.textContent = msg; });
+    box.textContent = "集計中...";
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
       res = await fetch(apiUrl("/revenue/stats"), {
@@ -891,7 +893,7 @@ async function loadRevenueCompare() {
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
       res = await fetch(apiUrl("/revenue/stats"), {
@@ -1069,7 +1071,7 @@ function drawRevenueEquity(data) {
 async function loadRevenueEquity() {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
       res = await fetch(apiUrl("/revenue/equity-curve"), {
