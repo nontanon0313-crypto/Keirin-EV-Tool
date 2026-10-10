@@ -533,9 +533,11 @@ def list_live_bets(
     days: int = Query(14, ge=1, le=365, description="直近何日分(既定14。過去記録表示用)"),
     db: Session = Depends(get_db),
 ):
-    """収益一覧。JSTで今日と昨日のみ(2日前以前は非表示)。"""
+    """収益一覧。読める全系統の LiveBet を合算して返す。"""
     from datetime import datetime, timedelta, timezone
-    from sqlalchemy import or_, and_
+    from sqlalchemy import or_, and_, text as sa_text
+    from .. import database as dbmod
+    import gc
 
     jst = timezone(timedelta(hours=9))
     now_jst = datetime.now(jst)
@@ -543,24 +545,64 @@ def list_live_bets(
     start_utc = start_jst.astimezone(timezone.utc).replace(tzinfo=None)
     start_date_naive = start_jst.replace(tzinfo=None)
 
-    q = db.query(models.LiveBet)
-    if race_id is not None:
-        q = q.filter(models.LiveBet.race_id == race_id)
-    q = q.filter(
-        or_(
-            and_(models.LiveBet.race_date.isnot(None), models.LiveBet.race_date >= start_date_naive),
-            and_(models.LiveBet.created_at.isnot(None), models.LiveBet.created_at >= start_utc),
+    all_rows: List[models.LiveBet] = []
+    for name in dbmod._TIER_ORDER:
+        if name not in dbmod._sessions:
+            continue
+        if dbmod._is_quota_blocked(name):
+            continue
+        session = None
+        try:
+            session = dbmod._sessions[name]()
+            session.execute(sa_text("SELECT 1"))
+            try:
+                dbmod._clear_cooldown(name)
+            except Exception:
+                pass
+            q = session.query(models.LiveBet)
+            if race_id is not None:
+                q = q.filter(models.LiveBet.race_id == race_id)
+            q = q.filter(
+                or_(
+                    and_(models.LiveBet.race_date.isnot(None), models.LiveBet.race_date >= start_date_naive),
+                    and_(models.LiveBet.created_at.isnot(None), models.LiveBet.created_at >= start_utc),
+                )
+            )
+            rows = q.order_by(
+                models.LiveBet.created_at.desc().nullslast(),
+                models.LiveBet.id.desc(),
+            ).limit(limit).all()
+            for r in rows:
+                session.expunge(r)
+                try:
+                    r._tier_name = name  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            all_rows.extend(rows)
+        except Exception:
+            pass
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            gc.collect()
+
+    all_rows.sort(
+        key=lambda r: (
+            r.created_at is None,
+            -(r.created_at.timestamp() if r.created_at else 0),
+            -(r.id or 0),
         )
     )
-    rows = q.order_by(
-        models.LiveBet.created_at.desc().nullslast(),
-        models.LiveBet.id.desc(),
-    ).limit(limit).all()
+    all_rows = all_rows[:limit]
     return {
-        "count": len(rows),
+        "count": len(all_rows),
         "days": days,
         "since_jst": start_jst.isoformat(),
-        "items": [_row_to_dict(r) for r in rows],
+        "items": [_row_to_dict(r) for r in all_rows],
+        "merged_tiers": True,
     }
 
 
@@ -573,13 +615,81 @@ def _iter_sorted(db: Session) -> List[models.LiveBet]:
     )
 
 
+def _iter_sorted_all_readable_tiers() -> List[models.LiveBet]:
+    """読める系統を1つずつ開き LiveBet を合算（同時オープンしない・OOM対策）。
+
+    同一内容が複数系統に複製されている場合は件数が増える点に注意。
+    収益の正本を1DBに寄せる運用が望ましい。
+    """
+    from .. import database as dbmod
+    from sqlalchemy import text as sa_text
+    import gc
+
+    all_rows: List[models.LiveBet] = []
+    for name in dbmod._TIER_ORDER:
+        if name not in dbmod._sessions:
+            continue
+        if dbmod._is_quota_blocked(name):
+            continue
+        session = None
+        try:
+            session = dbmod._sessions[name]()
+            session.execute(sa_text("SELECT 1"))
+            try:
+                dbmod._clear_cooldown(name)
+            except Exception:
+                pass
+            rows = (
+                session.query(models.LiveBet)
+                .order_by(
+                    models.LiveBet.race_date.asc().nullslast(),
+                    models.LiveBet.created_at.asc(),
+                    models.LiveBet.id.asc(),
+                )
+                .all()
+            )
+            # セッションclose後も属性を読めるよう expunge
+            for r in rows:
+                session.expunge(r)
+                # 系統名を後から参照できるよう印を付ける
+                try:
+                    r._tier_name = name  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            all_rows.extend(rows)
+        except Exception:
+            try:
+                if session is not None:
+                    dbmod._mark_cooldown(name, Exception("revenue tier open failed"))
+            except Exception:
+                pass
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            gc.collect()
+
+    all_rows.sort(
+        key=lambda r: (
+            r.race_date is None,
+            r.race_date or 0,
+            r.created_at or 0,
+            r.id or 0,
+        )
+    )
+    return all_rows
+
+
 @router.get("/stats")
 def revenue_stats(db: Session = Depends(get_db)):
     """
     収益タブの集計。
     投資額は実投資額を唯一の基準とする。
+    読める全系統の LiveBet を合算する。
     """
-    rows = _iter_sorted(db)
+    rows = _iter_sorted_all_readable_tiers()
 
     expected_profit_sum = 0.0
     expected_hit_prob_sum = 0.0
@@ -739,8 +849,9 @@ def equity_curve(db: Session = Depends(get_db)):
     投資額の基準は実投資額(actual_stake)のみとし、
     想定系列も同じ実投資額を横軸にして、購入時の想定勝率・オッズから
     想定損益を累積する。
+    読める全系統の LiveBet を合算する。
     """
-    rows = _iter_sorted(db)
+    rows = _iter_sorted_all_readable_tiers()
 
     points_actual = [
         {
