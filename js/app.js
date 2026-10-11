@@ -10,13 +10,13 @@ function apiUrl(path) {
 const KEIRIN_DB_TIER = "fallback2";
 const _origFetch = window.fetch.bind(window);
 window.fetch = function(input, init) {
-  init = init || {};
+  init = init ? Object.assign({}, init) : {};
   var url = typeof input === "string" ? input : (input && input.url) || "";
   if (typeof url === "string" && url.indexOf(API_BASE_URL) === 0) {
-    var headers = Object.assign({}, init.headers || {});
-      headers["X-Keirin-DB-Tier"] = KEIRIN_DB_TIER;
+    var h = new Headers(init.headers || {});
+      h.set("X-Keirin-DB-Tier", KEIRIN_DB_TIER);
     }
-    init.headers = headers;
+    init.headers = h;
   }
   return _origFetch(input, init);
 };
