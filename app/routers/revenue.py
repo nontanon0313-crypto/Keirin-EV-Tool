@@ -960,8 +960,10 @@ def migrate_live_bets_to_fallback2(
     from sqlalchemy import text as sa_text
     from .. import database as dbmod
 
-    expected = (os.environ.get("ADMIN_SYNC_TOKEN") or os.environ.get("ADMIN_TOKEN") or "").strip()
-    if not expected or token != expected:
+    expected = (os.environ.get("ADMIN_SYNC_SECRET") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="ADMIN_SYNC_SECRET が未設定です")
+    if token != expected:
         raise HTTPException(status_code=403, detail="トークンが違います")
 
     def biz_key(r):
