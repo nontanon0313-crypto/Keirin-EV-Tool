@@ -14,6 +14,7 @@ window.fetch = function(input, init) {
   var url = typeof input === "string" ? input : (input && input.url) || "";
   if (typeof url === "string" && url.indexOf(API_BASE_URL) === 0) {
     var h = new Headers(init.headers || {});
+    if (!h.has("X-Keirin-DB-Tier")) {
       h.set("X-Keirin-DB-Tier", KEIRIN_DB_TIER);
     }
     init.headers = h;
@@ -21,8 +22,6 @@ window.fetch = function(input, init) {
   return _origFetch(input, init);
 };
 
-
-/** 通信・サーバー障害をプログラム英語ではなく日本語で返す */
 function friendlyError(e) {
   const msg = (e && e.message) ? String(e.message) : String(e || "");
   const low = msg.toLowerCase();
