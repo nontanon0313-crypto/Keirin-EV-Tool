@@ -7,6 +7,20 @@ function apiUrl(path) {
   return API_BASE_URL + path;
 }
 
+const KEIRIN_DB_TIER = "fallback2";
+const _origFetch = window.fetch.bind(window);
+window.fetch = function(input, init) {
+  init = init || {};
+  var url = typeof input === "string" ? input : (input && input.url) || "";
+  if (typeof url === "string" && url.indexOf(API_BASE_URL) === 0) {
+    var headers = Object.assign({}, init.headers || {});
+      headers["X-Keirin-DB-Tier"] = KEIRIN_DB_TIER;
+    }
+    init.headers = headers;
+  }
+  return _origFetch(input, init);
+};
+
 
 /** 通信・サーバー障害をプログラム英語ではなく日本語で返す */
 function friendlyError(e) {

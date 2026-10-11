@@ -16,6 +16,17 @@ from .. import models, schemas
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 
+def _force_revenue_tier():
+    from .. import database as dbmod
+    try:
+        dbmod.set_request_tier("fallback2")
+    except Exception:
+        try:
+            dbmod._request_tier.set("fallback2")
+        except Exception:
+            pass
+
+
 
 def _race_meta(db: Session, race_id: int) -> dict:
     race = db.query(models.Race).filter(models.Race.id == race_id).first()
@@ -533,6 +544,7 @@ def list_live_bets(
     days: int = Query(14, ge=1, le=365, description="直近何日分(既定14。過去記録表示用)"),
     db: Session = Depends(get_db),
 ):
+    _force_revenue_tier()
     """収益一覧。読める全系統の LiveBet を合算して返す。"""
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import or_, and_, text as sa_text
@@ -684,12 +696,13 @@ def _iter_sorted_all_readable_tiers() -> List[models.LiveBet]:
 
 @router.get("/stats")
 def revenue_stats(db: Session = Depends(get_db)):
+    _force_revenue_tier()
     """
     収益タブの集計。
     投資額は実投資額を唯一の基準とする。
     読める全系統の LiveBet を合算する。
     """
-    rows = _iter_sorted_all_readable_tiers()
+    rows = _iter_sorted(db)
 
     expected_profit_sum = 0.0
     expected_hit_prob_sum = 0.0
@@ -844,6 +857,7 @@ def revenue_stats(db: Session = Depends(get_db)):
 
 @router.get("/equity-curve")
 def equity_curve(db: Session = Depends(get_db)):
+    _force_revenue_tier()
     """
     収益タブ用の資産推移。
     投資額の基準は実投資額(actual_stake)のみとし、
@@ -851,7 +865,7 @@ def equity_curve(db: Session = Depends(get_db)):
     想定損益を累積する。
     読める全系統の LiveBet を合算する。
     """
-    rows = _iter_sorted_all_readable_tiers()
+    rows = _iter_sorted(db)
 
     points_actual = [
         {
