@@ -948,3 +948,147 @@ def equity_curve(db: Session = Depends(get_db)):
         "final_assets": round(cum_pnl, 0),
     }
 
+
+@router.post("/admin/migrate-to-fallback2")
+def migrate_live_bets_to_fallback2(
+    dry_run: bool = True,
+    token: str = "",
+):
+    """primary/fallback の live_bets を fallback2 に集約。Render 上でのみ実行。"""
+    import os
+    from datetime import datetime, timedelta
+    from sqlalchemy import text as sa_text
+    from .. import database as dbmod
+
+    expected = (os.environ.get("ADMIN_SYNC_TOKEN") or os.environ.get("ADMIN_TOKEN") or "").strip()
+    if not expected or token != expected:
+        raise HTTPException(status_code=403, detail="トークンが違います")
+
+    def biz_key(r):
+        rd = r.race_date.isoformat() if r.race_date else ""
+        return (
+            (r.venue_name or "").strip(),
+            int(r.race_number or 0),
+            rd,
+            (r.bet_type or "").strip(),
+            (r.combination or "").strip(),
+            (r.vote_status or "").strip(),
+            (r.actual_result or "").strip(),
+            round(float(r.actual_stake or 0.0), 2),
+            round(float(r.planned_stake or 0.0), 2),
+            (r.source or "").strip(),
+            round(float(r.planned_odds or 0.0), 4),
+            round(float(r.planned_win_prob or 0.0), 6),
+        )
+
+    def open_tier(name):
+        if name not in dbmod._sessions:
+            return None
+        s = dbmod._sessions[name]()
+        s.execute(sa_text("SELECT 1"))
+        return s
+
+    def stats(rows):
+        voted = [r for r in rows if r.vote_status == "voted"]
+        hits = [r for r in voted if r.actual_result == "win"]
+        stake = sum(float(r.actual_stake or 0) for r in voted)
+        payout = sum(float(r.actual_payout or 0) for r in voted)
+        exp = 0.0
+        for r in voted:
+            st = float(r.actual_stake or 0)
+            if st > 0 and r.planned_win_prob is not None and r.planned_odds is not None:
+                exp += st * (float(r.planned_win_prob) * float(r.planned_odds) - 1.0)
+        return {
+            "n": len(rows),
+            "voted": len(voted),
+            "hits": len(hits),
+            "hit_rate_pct": round(len(hits) / len(voted) * 100, 2) if voted else None,
+            "stake": round(stake, 0),
+            "payout": round(payout, 0),
+            "pnl": round(payout - stake, 0),
+            "expected_profit": round(exp, 0),
+        }
+
+    def find_race_id(session, row):
+        if not row.venue_name or row.race_number is None:
+            return None
+        q = session.query(models.Race).filter(
+            models.Race.venue_name == row.venue_name,
+            models.Race.race_number == row.race_number,
+        )
+        if row.race_date is not None:
+            d0 = row.race_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            q = q.filter(models.Race.race_date >= d0)
+            q = q.filter(models.Race.race_date < d0 + timedelta(days=1))
+        hit = q.first()
+        return hit.id if hit else None
+
+    dst = open_tier("fallback2")
+    if dst is None:
+        raise HTTPException(500, "fallback2 に接続できません")
+    sources_info = {}
+    to_add = []
+    try:
+        existing = dst.query(models.LiveBet).all()
+        keys = {biz_key(r) for r in existing}
+        before = stats(existing)
+        for name in ("primary", "fallback"):
+            s = open_tier(name)
+            if s is None:
+                sources_info[name] = {"error": "no session"}
+                continue
+            try:
+                rows = s.query(models.LiveBet).all()
+                sources_info[name] = stats(rows)
+                for r in rows:
+                    k = biz_key(r)
+                    if k in keys:
+                        continue
+                    keys.add(k)
+                    to_add.append(r)
+            finally:
+                s.close()
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "before_fallback2": before,
+                "sources": sources_info,
+                "to_insert": len(to_add),
+            }
+
+        for r in to_add:
+            nb = models.LiveBet(
+                race_id=find_race_id(dst, r),
+                race_date=r.race_date,
+                venue_name=r.venue_name,
+                race_number=r.race_number,
+                bet_type=r.bet_type,
+                combination=r.combination,
+                planned_stake=r.planned_stake,
+                planned_win_prob=r.planned_win_prob,
+                planned_odds=r.planned_odds,
+                planned_ev_pct=r.planned_ev_pct,
+                planned_expected_profit=r.planned_expected_profit,
+                vote_status=r.vote_status,
+                actual_stake=r.actual_stake,
+                actual_result=r.actual_result,
+                actual_payout=r.actual_payout if r.actual_payout is not None else 0.0,
+                memo=r.memo,
+                source=r.source,
+                created_at=r.created_at or datetime.utcnow(),
+                updated_at=r.updated_at or datetime.utcnow(),
+            )
+            dst.add(nb)
+        dst.commit()
+        after_rows = dst.query(models.LiveBet).all()
+        return {
+            "dry_run": False,
+            "before_fallback2": before,
+            "sources": sources_info,
+            "inserted": len(to_add),
+            "after_fallback2": stats(after_rows),
+        }
+    finally:
+        dst.close()
+
