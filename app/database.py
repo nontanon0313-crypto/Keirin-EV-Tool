@@ -65,6 +65,7 @@ def _make_engine(url: str):
         pool_size=1,
         max_overflow=0,
         pool_recycle=300,
+        connect_args=connect_args,
     )
 
 
