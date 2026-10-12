@@ -62,8 +62,9 @@ def _make_engine(url: str):
     return create_engine(
         url,
         pool_pre_ping=True,
+        pool_size=1,
+        max_overflow=0,
         pool_recycle=300,
-        connect_args=connect_args,
     )
 
 
