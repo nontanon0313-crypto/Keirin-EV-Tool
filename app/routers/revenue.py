@@ -16,6 +16,35 @@ from .. import models, schemas
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 
+
+def get_revenue_db():
+    """収益は fallback2 固定。get_db より前に系統を決める。"""
+    from .. import database as dbmod
+    token = None
+    try:
+        token = dbmod.set_request_tier("fallback2")
+    except Exception:
+        try:
+            dbmod._request_tier.set("fallback2")
+        except Exception:
+            pass
+    try:
+        gen = dbmod.get_db()
+        db = next(gen)
+        try:
+            yield db
+        finally:
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+    finally:
+        if token is not None:
+            try:
+                dbmod.reset_request_tier(token)
+            except Exception:
+                pass
+
 def _force_revenue_tier():
     from .. import database as dbmod
     try:
@@ -148,7 +177,7 @@ def _row_to_dict(row: models.LiveBet) -> dict:
     }
 
 @router.post("/from-plan")
-def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Depends(get_db)):
+def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Depends(get_revenue_db)):
     """
     投票プランを収益管理へ記録。
     mark_as_voted=True(既定): プラン通り購入前提で実額=予定額・voted。
@@ -205,7 +234,7 @@ def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Dep
 @router.post("/mark-pending-lose")
 def mark_pending_lose(
     race_id: Optional[int] = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_revenue_db),
 ):
     """pending の投票済み行を一括 lose(払戻0)。的中入力後の残り処理用。"""
     q = db.query(models.LiveBet).filter(
@@ -228,7 +257,7 @@ def mark_pending_lose(
 
 
 @router.post("/{live_bet_id}/win")
-def mark_win(live_bet_id: int, payload: schemas.LiveBetWinUpdate, db: Session = Depends(get_db)):
+def mark_win(live_bet_id: int, payload: schemas.LiveBetWinUpdate, db: Session = Depends(get_revenue_db)):
     """的中1件。払戻だけ書いて win。実額未設定なら予定額。"""
     row = db.query(models.LiveBet).filter(models.LiveBet.id == live_bet_id).first()
     if not row:
@@ -250,7 +279,7 @@ def mark_win(live_bet_id: int, payload: schemas.LiveBetWinUpdate, db: Session = 
 
 
 @router.post("/manual")
-def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(get_db)):
+def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(get_revenue_db)):
     """プランにない買い目を実績として追加する。"""
     race_date = payload.race_date
     venue_name = payload.venue_name
@@ -329,7 +358,7 @@ def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(ge
 
 
 @router.put("/{live_bet_id}")
-def update_live_bet(live_bet_id: int, payload: schemas.LiveBetUpdate, db: Session = Depends(get_db)):
+def update_live_bet(live_bet_id: int, payload: schemas.LiveBetUpdate, db: Session = Depends(get_revenue_db)):
     row = db.query(models.LiveBet).filter(models.LiveBet.id == live_bet_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="live_bet not found")
@@ -374,7 +403,7 @@ def update_live_bet(live_bet_id: int, payload: schemas.LiveBetUpdate, db: Sessio
 
 
 @router.delete("/{live_bet_id}")
-def delete_live_bet(live_bet_id: int, db: Session = Depends(get_db)):
+def delete_live_bet(live_bet_id: int, db: Session = Depends(get_revenue_db)):
     row = db.query(models.LiveBet).filter(models.LiveBet.id == live_bet_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="live_bet not found")
@@ -398,7 +427,7 @@ def _normalize_combo(comb: str):
     return out
 
 @router.post("/backfill-planned")
-def backfill_planned(dry_run: bool = True, db: Session = Depends(get_db)):
+def backfill_planned(dry_run: bool = True, db: Session = Depends(get_revenue_db)):
     """planned_* 欠損を Purchase から埋める。値が入っている Purchase を優先。"""
     from datetime import datetime
 
@@ -542,7 +571,7 @@ def list_live_bets(
     race_id: Optional[int] = None,
     limit: int = Query(200, ge=1, le=1000),
     days: int = Query(14, ge=1, le=365, description="直近何日分(既定14。過去記録表示用)"),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_revenue_db),
 ):
     _force_revenue_tier()
     """収益一覧。読める全系統の LiveBet を合算して返す。"""
@@ -695,7 +724,7 @@ def _iter_sorted_all_readable_tiers() -> List[models.LiveBet]:
 
 
 @router.get("/stats")
-def revenue_stats(db: Session = Depends(get_db)):
+def revenue_stats(db: Session = Depends(get_revenue_db)):
     _force_revenue_tier()
     """
     収益タブの集計。
@@ -856,7 +885,7 @@ def revenue_stats(db: Session = Depends(get_db)):
     }
 
 @router.get("/equity-curve")
-def equity_curve(db: Session = Depends(get_db)):
+def equity_curve(db: Session = Depends(get_revenue_db)):
     _force_revenue_tier()
     """
     収益タブ用の資産推移。

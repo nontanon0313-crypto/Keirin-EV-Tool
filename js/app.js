@@ -832,6 +832,18 @@ function formatPurchaseTime(value) {
   });
 }
 
+
+function renderRevenueCompare(data) {
+  const box = document.getElementById("revenueCompareBox");
+  if (!box) return;
+  const p = data.planned || {};
+  const a = data.actual || {};
+  box.innerHTML =
+    `<p>想定損益: ${yen(p.expected_profit)} / 実績損益: ${yen(a.pnl)}</p>` +
+    `<p>想定回収率: ${pct(p.roi_pct)} / 実績回収率: ${pct(a.roi_pct)}</p>` +
+    `<p>想定的中率: ${pct(p.hit_rate_pct)} / 実績的中率: ${pct(a.hit_rate_pct)}</p>`;
+}
+
 function renderRevenueStats(data) {
   const box = document.getElementById("revenueStatsBox");
   if (!box) return;
@@ -889,31 +901,8 @@ async function loadRevenueStats() {
 }
 
 async function loadRevenueCompare() {
-  const box = document.getElementById("revenueCompareBox");
-  if (!box) return;
-
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
-    let res;
-    try {
-      res = await fetch(apiUrl("/revenue/stats"), { headers: revenueHeaders(), cache: "no-store",
-        signal: controller.signal, });
-    } finally {
-      clearTimeout(timer);
-    }
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
-
-    const p = data.planned || {};
-    const a = data.actual || {};
-    box.innerHTML =
-      `<p>想定損益: ${yen(p.expected_profit)} / 実績損益: ${yen(a.pnl)}</p>` +
-      `<p>想定回収率: ${pct(p.roi_pct)} / 実績回収率: ${pct(a.roi_pct)}</p>` +
-      `<p>想定的中率: ${pct(p.hit_rate_pct)} / 実績的中率: ${pct(a.hit_rate_pct)}</p>`;
-  } catch (e) {
-    box.textContent = "エラー: " + friendlyError(e);
-  }
+  // 系統ずれ防止: stats と同一リクエスト・同一 data を使う
+  return loadRevenueStats();
 }
 
 function drawRevenueEquity(data) {
