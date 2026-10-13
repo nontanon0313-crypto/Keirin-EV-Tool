@@ -1178,7 +1178,7 @@ function renderRevenueList(data) {
       if (!Number.isFinite(payout) || payout < 0) return;
 
       try {
-        const res = await fetch(apiUrl(`/revenue/${id}/win`), {
+        const res = await fetch(apiUrl(`/revenue/${id}/win`), { headers: revenueHeaders(), 
           method: "POST",
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({actual_payout: payout}),
@@ -1196,7 +1196,7 @@ function renderRevenueList(data) {
     btn.addEventListener("click", async () => {
       if (!confirm("この収益記録を削除しますか？")) return;
       try {
-        const res = await fetch(apiUrl(`/revenue/${btn.dataset.id}`), {
+        const res = await fetch(apiUrl(`/revenue/${btn.dataset.id}`), { headers: revenueHeaders(), 
           method: "DELETE",
         });
         const data = await res.json();
@@ -1261,7 +1261,7 @@ function renderRevenueList(data) {
       )) return;
 
       try {
-        const res = await fetch(apiUrl("/revenue/" + id), {
+        const res = await fetch(apiUrl("/revenue/" + id), { headers: revenueHeaders(), 
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1288,7 +1288,7 @@ async function loadRevenueList() {
     const timer = setTimeout(() => controller.abort(), 15000);
     let res;
     try {
-      res = await fetch(apiUrl("/revenue/list?limit=1000&days=14"), {
+      res = await fetch(apiUrl("/revenue/list?limit=1000&days=14"), { headers: revenueHeaders(), 
         cache: "no-store",
         signal: controller.signal,
       });
@@ -1331,7 +1331,7 @@ async function addManualRevenue() {
   }
 
   try {
-    const res = await fetch(apiUrl("/revenue/manual"), {
+    const res = await fetch(apiUrl("/revenue/manual"), { headers: revenueHeaders(), 
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
@@ -1393,7 +1393,7 @@ async function registerLastPlanToRevenue() {
     });
 
   try {
-    const res = await fetch(apiUrl("/revenue/from-plan"), {
+    const res = await fetch(apiUrl("/revenue/from-plan"), { headers: revenueHeaders(), 
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
@@ -1594,7 +1594,7 @@ const planItem = planItems.find(it =>
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    const revenueRes = await fetch(apiUrl("/revenue/manual"), {
+    const revenueRes = await fetch(apiUrl("/revenue/manual"), { headers: revenueHeaders(), 
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
