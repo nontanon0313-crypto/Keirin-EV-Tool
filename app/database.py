@@ -86,18 +86,42 @@ PREFER = (os.environ.get("DATABASE_PREFER", "primary") or "primary").strip().low
 if PREFER not in _TIER_ORDER:
     PREFER = "primary"
 
-for _name in _TIER_ORDER:
-    _url = _TIER_URLS[_name]
-    if _url:
-        _engines[_name] = _make_engine(_url)
-        _sessions[_name] = sessionmaker(autocommit=False, autoflush=False, bind=_engines[_name])
+def _ensure_tier(name: str) -> bool:
+    """系統の engine を必要時だけ作る。通常は Primary のみ。"""
+    if name in _sessions:
+        return True
+    url = _TIER_URLS.get(name) or ""
+    if not url:
+        return False
+    eng = _make_engine(url)
+    if eng is None:
+        return False
+    _engines[name] = eng
+    _sessions[name] = sessionmaker(autocommit=False, autoflush=False, bind=eng)
+    logger.info("database engine created on demand: %s", name)
+    return True
 
-# Primaryへのprobeより前に、永続化されたquota停止状態を復元する。
 
-_default_order = [n for n in _TIER_ORDER if n in _engines]
+def _tier_available(name: str) -> bool:
+    return bool(_TIER_URLS.get(name))
+
+
+# 起動時は PREFER（既定 primary）のみ開く。他系統は failover / 収益指定時に開く。
+if not _ensure_tier(PREFER):
+    for _name in _TIER_ORDER:
+        if _ensure_tier(_name):
+            break
+
+# Primaryへのprobeより前に、永続化されたquota停止状態 を復元する。
+
+_default_order = [n for n in _TIER_ORDER if _tier_available(n)]
 if PREFER in _default_order:
     _default_order = [PREFER] + [n for n in _default_order if n != PREFER]
-_active_name = _default_order[0] if _default_order else "primary"
+_active_name = "primary"
+for _name in _default_order:
+    if _name in _sessions:
+        _active_name = _name
+        break
 
 engine = _engines.get(_active_name)
 SessionLocal = _sessions.get(_active_name)
@@ -560,8 +584,10 @@ def get_db():
     forced = _request_tier.get()
     # forced を最優先、その後 prefer 順（重複除去）
     candidates = []
-    if forced and forced in _sessions and not _is_quota_blocked(forced):
-        candidates.append(forced)
+    if forced and _tier_available(forced) and not _is_quota_blocked(forced):
+        _ensure_tier(forced)
+        if forced in _sessions:
+            candidates.append(forced)
     for name in order:
         if name not in candidates:
             candidates.append(name)
@@ -569,6 +595,9 @@ def get_db():
     for name in candidates:
         candidate = None
         try:
+            if name not in _sessions:
+                if not _ensure_tier(name):
+                    continue
             factory = _sessions[name]
             candidate = factory()
             candidate.execute(text("SELECT 1"))
