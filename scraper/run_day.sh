@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-export KEIRIN_DB_TIER="${KEIRIN_DB_TIER:-fallback2}"
 set -euo pipefail
 cd "$(dirname "$0")"
 if command -v python3 >/dev/null 2>&1; then PY=python3

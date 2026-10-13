@@ -7,20 +7,10 @@ function apiUrl(path) {
   return API_BASE_URL + path;
 }
 
-const KEIRIN_DB_TIER = "fallback2";
-const _origFetch = window.fetch.bind(window);
-window.fetch = function(input, init) {
-  init = init ? Object.assign({}, init) : {};
-  var url = typeof input === "string" ? input : (input && input.url) || "";
-  if (typeof url === "string" && url.indexOf(API_BASE_URL) === 0) {
-    var h = new Headers(init.headers || {});
-    if (!h.has("X-Keirin-DB-Tier")) {
-      h.set("X-Keirin-DB-Tier", KEIRIN_DB_TIER);
-    }
-    init.headers = h;
-  }
-  return _origFetch(input, init);
-};
+function revenueHeaders(extra) {
+  var h = Object.assign({ "X-Keirin-DB-Tier": "fallback2" }, extra || {});
+  return h;
+}
 
 function friendlyError(e) {
   const msg = (e && e.message) ? String(e.message) : String(e || "");
@@ -883,10 +873,8 @@ async function loadRevenueStats() {
     const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
-      res = await fetch(apiUrl("/revenue/stats"), {
-        cache: "no-store",
-        signal: controller.signal,
-      });
+      res = await fetch(apiUrl("/revenue/stats"), { headers: revenueHeaders(), cache: "no-store",
+        signal: controller.signal, });
     } finally {
       clearTimeout(timer);
     }
@@ -909,10 +897,8 @@ async function loadRevenueCompare() {
     const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
-      res = await fetch(apiUrl("/revenue/stats"), {
-        cache: "no-store",
-        signal: controller.signal,
-      });
+      res = await fetch(apiUrl("/revenue/stats"), { headers: revenueHeaders(), cache: "no-store",
+        signal: controller.signal, });
     } finally {
       clearTimeout(timer);
     }
@@ -1087,10 +1073,8 @@ async function loadRevenueEquity() {
     const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
-      res = await fetch(apiUrl("/revenue/equity-curve"), {
-        cache: "no-store",
-        signal: controller.signal,
-      });
+      res = await fetch(apiUrl("/revenue/equity-curve"), { headers: revenueHeaders(), cache: "no-store",
+        signal: controller.signal, });
     } finally {
       clearTimeout(timer);
     }
@@ -1322,9 +1306,7 @@ async function loadRevenueList() {
 
 async function markRevenuePendingLose() {
   try {
-    const res = await fetch(apiUrl("/revenue/mark-pending-lose"), {
-      method: "POST",
-    });
+    const res = await fetch(apiUrl("/revenue/mark-pending-lose"), { headers: revenueHeaders(), method: "POST", });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     await loadRevenue();
