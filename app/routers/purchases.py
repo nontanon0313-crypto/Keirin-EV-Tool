@@ -1028,18 +1028,24 @@ def warm_calibration(db: Session = Depends(get_db)):
     がPurchase全件を毎回フルスキャンしておりキャッシュされていなかったことが判明。
     校正係数と同様にキャッシュを追加した上で、ここでもウォームアップする。
     """
+    import gc
     t0 = _time.time()
-    retro = get_calibration_factors_retroactive(db, use_cache=False)
+    retro = get_calibration_factors_retroactive(db, use_cache=True)
+    gc.collect()
     t1 = _time.time()
-    purchase_set = get_purchase_set_calibration_factors(db, use_cache=False)
+    purchase_set = get_purchase_set_calibration_factors(db, use_cache=True)
+    gc.collect()
     t2 = _time.time()
-    stage_exp = get_stage_expectancy_map(db, min_samples=50, use_cache=False)
+    stage_exp = get_stage_expectancy_map(db, min_samples=50, use_cache=True)
+    gc.collect()
     t3 = _time.time()
-    bet_type_exp = get_bet_type_expectancy_map(db, min_samples=50, use_cache=False)
+    bet_type_exp = get_bet_type_expectancy_map(db, min_samples=50, use_cache=True)
+    gc.collect()
     t4 = _time.time()
-    bt_odds_exp = get_bet_type_odds_band_expectancy_map(db, min_samples=30, use_cache=False)
+    bt_odds_exp = get_bet_type_odds_band_expectancy_map(db, min_samples=30, use_cache=True)
+    gc.collect()
     t5 = _time.time()
-    high_odds = get_high_odds_residual_factors(db, use_cache=False)
+    high_odds = get_high_odds_residual_factors(db, use_cache=True)
     t6 = _time.time()
     overall = (retro or {}).get("overall") or {}
     ps = (purchase_set or {}).get("overall") or {}
