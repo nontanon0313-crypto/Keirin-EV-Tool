@@ -216,67 +216,72 @@ def get_calibration_factors_retroactive(db: Session, use_cache: bool = True, as_
         if cached is not None and (now - _retroactive_calibration_cache["computed_at"]) < RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS:
             return cached
 
-    # レースとオッズを一括取得（レースごとのN+1クエリを避ける）
-    races = (
-        db.query(models.Race)
-        .filter(models.Race.actual_result.isnot(None))
-        .options(joinedload(models.Race.entries))
-        .all()
-    )
-    if as_of_dt is not None:
-        races = [r for r in races if _race_is_before_as_of(r, as_of_dt)]
+    # メモリ対策: バッチごとに Race/Odds を読む
+    import gc
     from collections import defaultdict
-    odds_by_race = defaultdict(list)
-    race_ids = [r.id for r in races]
-    if race_ids:
-        # 大きすぎるIN句を避けるためチャンク
-        CHUNK = 500
-        for i in range(0, len(race_ids), CHUNK):
-            chunk = race_ids[i:i + CHUNK]
-            for o in db.query(models.Odds).filter(models.Odds.race_id.in_(chunk)).all():
-                odds_by_race[o.race_id].append(o)
 
+    race_ids = [
+        r[0] for r in db.query(models.Race.id).filter(models.Race.actual_result.isnot(None)).all()
+    ]
     records = []
-    for race in races:
-        win_probs = calc.build_win_probs_from_entries(race.entries)
-        if not win_probs:
-            continue
-        odds_rows = odds_by_race.get(race.id) or []
-        if not odds_rows:
-            continue
-        try:
-            parsed_result = calc.parse_actual_result(race.actual_result)
-        except Exception:
-            continue
-        line_map, line_boost = calc.line_map_from_race(race)
-        car_numbers_all = sorted(win_probs.keys())
-        norm_mass = {}
-        for arity in (2, 3):
-            if len(car_numbers_all) >= arity:
-                mass = calc.total_ordered_mass(
-                    win_probs, car_numbers_all, arity, line_map=line_map, line_boost=line_boost,
-                )
-                norm_mass[arity] = mass if mass > 1e-9 else 1.0
-            else:
-                norm_mass[arity] = 1.0
-        for o in odds_rows:
-            if o.bet_type not in TARGET_BET_TYPES:
+    BATCH = 40
+    for i in range(0, len(race_ids), BATCH):
+        batch_ids = race_ids[i:i + BATCH]
+        races = (
+            db.query(models.Race)
+            .filter(models.Race.id.in_(batch_ids))
+            .options(joinedload(models.Race.entries))
+            .all()
+        )
+        if as_of_dt is not None:
+            races = [r for r in races if _race_is_before_as_of(r, as_of_dt)]
+        odds_by_race = defaultdict(list)
+        for o in db.query(models.Odds).filter(models.Odds.race_id.in_(batch_ids)).all():
+            odds_by_race[o.race_id].append(o)
+        for race in races:
+            win_probs = calc.build_win_probs_from_entries(race.entries)
+            if not win_probs:
+                continue
+            odds_rows = odds_by_race.get(race.id) or []
+            if not odds_rows:
                 continue
             try:
-                cars = tuple(int(x) for x in o.combination.split("-"))
-            except (ValueError, AttributeError):
-                continue
-            try:
-                prob_raw = calc.estimate_prob_for_bet(
-                    win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost,
-                )
-                arity = calc.BET_TYPE_ARITY.get(o.bet_type)
-                if arity in norm_mass:
-                    prob_raw = prob_raw / norm_mass[arity]
+                parsed_result = calc.parse_actual_result(race.actual_result)
             except Exception:
                 continue
-            won = calc.judge_purchase_result(o.bet_type, o.combination, parsed_result)
-            records.append((prob_raw, won, "retroactive", o.bet_type))
+            line_map, line_boost = calc.line_map_from_race(race)
+            car_numbers_all = sorted(win_probs.keys())
+            norm_mass = {}
+            for arity in (2, 3):
+                if len(car_numbers_all) >= arity:
+                    mass = calc.total_ordered_mass(
+                        win_probs, car_numbers_all, arity, line_map=line_map, line_boost=line_boost,
+                    )
+                    norm_mass[arity] = mass if mass > 1e-9 else 1.0
+                else:
+                    norm_mass[arity] = 1.0
+            for o in odds_rows:
+                if o.bet_type not in TARGET_BET_TYPES:
+                    continue
+                try:
+                    cars = tuple(int(x) for x in o.combination.split("-"))
+                except (ValueError, AttributeError):
+                    continue
+                try:
+                    prob_raw = calc.estimate_prob_for_bet(
+                        win_probs, o.bet_type, cars, line_map=line_map, line_boost=line_boost,
+                    )
+                    arity = calc.BET_TYPE_ARITY.get(o.bet_type)
+                    if arity in norm_mass:
+                        prob_raw = prob_raw / norm_mass[arity]
+                except Exception:
+                    continue
+                won = calc.judge_purchase_result(o.bet_type, o.combination, parsed_result)
+                records.append((prob_raw, won, "retroactive", o.bet_type))
+
+        del races, odds_by_race
+        gc.collect()
+        db.expire_all()
 
     result = _compute_calibration_factors_from_records(records)
     if as_of_dt is None:
