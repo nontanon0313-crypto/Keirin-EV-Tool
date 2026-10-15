@@ -901,8 +901,8 @@ async function loadRevenueStats() {
 }
 
 async function loadRevenueCompare() {
-  // 系統ずれ防止: stats と同一リクエスト・同一 data を使う
-  return loadRevenueStats();
+  // loadRevenueStats が同一 data で描画する。二重 fetch しない。
+  return;
 }
 
 function drawRevenueEquity(data) {
@@ -1274,7 +1274,7 @@ function renderRevenueList(data) {
 async function loadRevenueList() {
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
       res = await fetch(apiUrl("/revenue/list?limit=1000&days=14"), { headers: revenueHeaders(), 
@@ -1402,12 +1402,10 @@ async function registerLastPlanToRevenue() {
 }
 
 async function loadRevenue() {
-  await Promise.all([
-    loadRevenueStats(),
-    loadRevenueCompare(),
-    loadRevenueEquity(),
-    loadRevenueList(),
-  ]);
+  // 同時多発で単一ワーカーが詰まるのを避ける。compare は stats 内で描画。
+  await loadRevenueStats();
+  await loadRevenueEquity();
+  await loadRevenueList();
 }
 
 document.getElementById("revenueRefreshBtn")?.addEventListener(
