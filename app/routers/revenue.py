@@ -570,15 +570,12 @@ def backfill_planned(dry_run: bool = True, db: Session = Depends(get_revenue_db)
 def list_live_bets(
     race_id: Optional[int] = None,
     limit: int = Query(200, ge=1, le=1000),
-    days: int = Query(2, ge=1, le=365, description="直近何日分(既定14。過去記録表示用)"),
+    days: int = Query(2, ge=1, le=365, description="直近何日分(既定2。当日・前日)"),
     db: Session = Depends(get_revenue_db),
 ):
-    _force_revenue_tier()
-    """収益一覧。読める全系統の LiveBet を合算して返す。"""
+    """収益一覧。fallback2 のみ。"""
     from datetime import datetime, timedelta, timezone
-    from sqlalchemy import or_, and_, text as sa_text
-    from .. import database as dbmod
-    import gc
+    from sqlalchemy import or_, and_
 
     jst = timezone(timedelta(hours=9))
     now_jst = datetime.now(jst)
@@ -586,64 +583,25 @@ def list_live_bets(
     start_utc = start_jst.astimezone(timezone.utc).replace(tzinfo=None)
     start_date_naive = start_jst.replace(tzinfo=None)
 
-    all_rows: List[models.LiveBet] = []
-    for name in dbmod._TIER_ORDER:
-        if name not in dbmod._sessions:
-            continue
-        if dbmod._is_quota_blocked(name):
-            continue
-        session = None
-        try:
-            session = dbmod._sessions[name]()
-            session.execute(sa_text("SELECT 1"))
-            try:
-                dbmod._clear_cooldown(name)
-            except Exception:
-                pass
-            q = session.query(models.LiveBet)
-            if race_id is not None:
-                q = q.filter(models.LiveBet.race_id == race_id)
-            q = q.filter(
-                or_(
-                    and_(models.LiveBet.race_date.isnot(None), models.LiveBet.race_date >= start_date_naive),
-                    and_(models.LiveBet.created_at.isnot(None), models.LiveBet.created_at >= start_utc),
-                )
-            )
-            rows = q.order_by(
-                models.LiveBet.created_at.desc().nullslast(),
-                models.LiveBet.id.desc(),
-            ).limit(limit).all()
-            for r in rows:
-                session.expunge(r)
-                try:
-                    r._tier_name = name  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-            all_rows.extend(rows)
-        except Exception:
-            pass
-        finally:
-            if session is not None:
-                try:
-                    session.close()
-                except Exception:
-                    pass
-            gc.collect()
-
-    all_rows.sort(
-        key=lambda r: (
-            r.created_at is None,
-            -(r.created_at.timestamp() if r.created_at else 0),
-            -(r.id or 0),
+    q = db.query(models.LiveBet)
+    if race_id is not None:
+        q = q.filter(models.LiveBet.race_id == race_id)
+    q = q.filter(
+        or_(
+            and_(models.LiveBet.race_date.isnot(None), models.LiveBet.race_date >= start_date_naive),
+            and_(models.LiveBet.created_at.isnot(None), models.LiveBet.created_at >= start_utc),
         )
     )
-    all_rows = all_rows[:limit]
+    rows = q.order_by(
+        models.LiveBet.created_at.desc().nullslast(),
+        models.LiveBet.id.desc(),
+    ).limit(limit).all()
     return {
-        "count": len(all_rows),
+        "count": len(rows),
         "days": days,
         "since_jst": start_jst.isoformat(),
-        "items": [_row_to_dict(r) for r in all_rows],
-        "merged_tiers": True,
+        "items": [_row_to_dict(r) for r in rows],
+        "merged_tiers": False,
     }
 
 
