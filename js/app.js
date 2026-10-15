@@ -1277,7 +1277,7 @@ async function loadRevenueList() {
     const timer = setTimeout(() => controller.abort(), 60000);
     let res;
     try {
-      res = await fetch(apiUrl("/revenue/list?limit=1000&days=14"), { headers: revenueHeaders(), 
+      res = await fetch(apiUrl("/revenue/list?limit=1000&days=2"), { headers: revenueHeaders(), 
         cache: "no-store",
         signal: controller.signal,
       });
