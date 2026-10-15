@@ -486,10 +486,31 @@ def warm_calibration():
     """
     log("校正係数をウォームアップ中(race-planの高速化のため)...")
     try:
-        r = requests.post(f"{API_BASE}/purchases/warm-calibration", headers=_API_HEADERS, timeout=120)
-        r.raise_for_status()
-        data = r.json()
-        log(f"  ウォームアップ完了({data.get('total_seconds')}秒。以降のrace-planはこのキャッシュを使うため速くなるはず)")
+        # サーバーは1回1段だけ埋める。done まで最大8回。
+        last_msg = ""
+        for attempt in range(1, 9):
+            r = requests.post(
+                f"{API_BASE}/purchases/warm-calibration",
+                headers=_API_HEADERS,
+                timeout=180,
+            )
+            if r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            data = {}
+            try:
+                data = r.json()
+            except Exception:
+                pass
+            filled = data.get("filled", "")
+            done = bool(data.get("done"))
+            sec = data.get("total_seconds", "")
+            last_msg = data.get("message") or filled or r.text[:120]
+            log(f"  校正ウォーム {attempt}/8 filled={filled or '-'} done={done} {sec}s")
+            if done:
+                log(f"  ウォームアップ完了({last_msg})")
+                break
+        else:
+            log(f"  ウォームアップ未完了のまま続行: {last_msg}")
     except Exception as e:
         log(f"  ウォームアップ失敗(続行します。race-plan側で都度計算されるため遅くなる可能性あり): {e}")
 

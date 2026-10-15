@@ -1025,63 +1025,74 @@ def source_weights(db: Session = Depends(get_db)):
 @router.post("/warm-calibration")
 def warm_calibration(db: Session = Depends(get_db)):
     """
-    遡及校正・購入集合校正・ステージ/券種ゲート集計を先に計算してキャッシュする。
-    race-plan / replay の初回が Render のタイムアウト(約150s)に当たらないようにする。
-
-    2026-09-03: race-planが1レースあたり約50秒かかる件を調査した結果、
-    ステージ/券種ゲート用の集計(get_stage_expectancy_map/get_bet_type_expectancy_map)
-    がPurchase全件を毎回フルスキャンしておりキャッシュされていなかったことが判明。
-    校正係数と同様にキャッシュを追加した上で、ここでもウォームアップする。
+    校正・ゲート用キャッシュを温める。
+    1リクエストで重い処理を1段だけ進め、すぐ返す。
+    日次pipeline側は done=true になるまで再呼び出しする。
     """
     import gc
     t0 = _time.time()
-    retro = get_calibration_factors_retroactive(db, use_cache=True)
+
+    # 各 get_* は use_cache=True なら既存キャッシュを返す。
+    # ここでは「空なら1つだけ use_cache=False で埋める」。
+    if _retroactive_calibration_cache.get("value") is None:
+        get_calibration_factors_retroactive(db, use_cache=False)
+        gc.collect()
+        return {
+            "ok": True,
+            "done": False,
+            "filled": "retroactive",
+            "total_seconds": round(_time.time() - t0, 2),
+            "message": "retroactive をキャッシュ。再実行で次へ。",
+        }
+
+    if _purchase_set_calibration_cache.get("value") is None:
+        get_purchase_set_calibration_factors(db, use_cache=False)
+        gc.collect()
+        return {
+            "ok": True,
+            "done": False,
+            "filled": "purchase_set",
+            "total_seconds": round(_time.time() - t0, 2),
+            "message": "purchase_set をキャッシュ。再実行で次へ。",
+        }
+
+    if _stage_expectancy_cache.get("value") is None:
+        get_stage_expectancy_map(db, min_samples=50, use_cache=False)
+        gc.collect()
+        return {
+            "ok": True,
+            "done": False,
+            "filled": "stage_expectancy",
+            "total_seconds": round(_time.time() - t0, 2),
+            "message": "stage_expectancy をキャッシュ。再実行で次へ。",
+        }
+
+    if _bet_type_expectancy_cache.get("value") is None:
+        get_bet_type_expectancy_map(db, min_samples=50, use_cache=False)
+        gc.collect()
+        return {
+            "ok": True,
+            "done": False,
+            "filled": "bet_type_expectancy",
+            "total_seconds": round(_time.time() - t0, 2),
+            "message": "bet_type_expectancy をキャッシュ。再実行で次へ。",
+        }
+
+    # 残りは軽い想定。まとめて埋めて完了
+    get_bet_type_odds_band_expectancy_map(db, min_samples=30, use_cache=True)
     gc.collect()
-    t1 = _time.time()
-    purchase_set = get_purchase_set_calibration_factors(db, use_cache=True)
+    get_high_odds_residual_factors(db, use_cache=True)
     gc.collect()
-    t2 = _time.time()
-    stage_exp = get_stage_expectancy_map(db, min_samples=50, use_cache=True)
-    gc.collect()
-    t3 = _time.time()
-    bet_type_exp = get_bet_type_expectancy_map(db, min_samples=50, use_cache=True)
-    gc.collect()
-    t4 = _time.time()
-    bt_odds_exp = get_bet_type_odds_band_expectancy_map(db, min_samples=30, use_cache=True)
-    gc.collect()
-    t5 = _time.time()
-    high_odds = get_high_odds_residual_factors(db, use_cache=True)
-    t6 = _time.time()
-    overall = (retro or {}).get("overall") or {}
-    ps = (purchase_set or {}).get("overall") or {}
     return {
         "ok": True,
-        "retroactive_seconds": round(t1 - t0, 2),
-        "purchase_set_seconds": round(t2 - t1, 2),
-        "stage_expectancy_seconds": round(t3 - t2, 2),
-        "bet_type_expectancy_seconds": round(t4 - t3, 2),
-        "bet_type_odds_band_expectancy_seconds": round(t5 - t4, 2),
-        "high_odds_residual_seconds": round(t6 - t5, 2),
-        "total_seconds": round(t6 - t0, 2),
-        "retroactive_overall_factor": overall.get("calibration_factor"),
-        "retroactive_sample_count": overall.get("sample_count"),
-        "purchase_set_factor": ps.get("factor"),
-        "purchase_set_n": ps.get("n"),
-        "stage_expectancy_stage_count": len(stage_exp),
-        "bet_type_expectancy_count": len(bet_type_exp),
-        "bet_type_odds_band_expectancy_count": len(bt_odds_exp),
-        "bet_type_expectancy": bet_type_exp,
-        "bet_type_odds_band_expectancy": bt_odds_exp,
-        "bet_type_odds_band_negative": {
-            k: v for k, v in sorted(bt_odds_exp.items())
-            if (v.get("expectancy_pct") is not None and v["expectancy_pct"] < 0)
-        },
-        "high_odds_residual": high_odds,
-        "cache_ttl_seconds": RETROACTIVE_CALIBRATION_CACHE_TTL_SECONDS,
+        "done": True,
+        "filled": "all",
+        "total_seconds": round(_time.time() - t0, 2),
+        "message": "キャッシュ済み。",
         "process_pid": _PROCESS_PID,
         "process_uptime_seconds": round(_time.time() - _PROCESS_STARTED_AT, 1),
-        "message": "キャッシュ済み。続けて replay / race-plan を実行してください。",
     }
+
 
 
 @router.get("/investment-readiness")
