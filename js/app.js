@@ -893,6 +893,7 @@ async function loadRevenueStats() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     renderRevenueStats(data);
+    renderRevenueCompare(data);
   } catch (e) {
     box.textContent = e.name === "AbortError"
       ? "エラー: 収益集計の取得がタイムアウトしました"
