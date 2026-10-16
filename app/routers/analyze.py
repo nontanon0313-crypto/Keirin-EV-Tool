@@ -366,6 +366,14 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
             "lead_advantage_score": bank.lead_advantage_score,
         }
 
+    # Gemini呼び出し(数十秒〜数分)の間はDB接続を握らない。
+    # 接続プールは1本のため、握ったままだと他のAPI(取り込み・repair等)が待たされて500になる。
+    race_lines_data = race.lines_data
+    race_stage_value = race.race_stage
+    race_grade_value = race.grade
+    prev_development = race.development_simulation
+    db.rollback()  # 読み取りトランザクションを終了して接続をプールへ返す
+
     def _raise_gemini_error(stage: str, e: Exception):
         """利用枠切れは429、それ以外は502で detail を必ず返す。"""
         msg = str(e)
@@ -392,24 +400,26 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
     # 1段階目: 展開予想を先に生成する
     try:
         development = simulate_race_development(
-            entries_payload, lines=race.lines_data, bank_info=bank_info,
-            race_stage=race.race_stage, grade=race.grade,
+            entries_payload, lines=race_lines_data, bank_info=bank_info,
+            race_stage=race_stage_value, grade=race_grade_value,
             weather_info=weather_info,
         )
-        race.development_simulation = development
-        db.commit()
+        _race_row = db.query(models.Race).get(race_id)
+        _race_row.development_simulation = development
+        db.commit()  # コミットで接続をプールへ返す
     except HTTPException:
         raise
     except Exception as e:
-        development = race.development_simulation  # 失敗時は前回分があればそれを使う
+        db.rollback()
+        development = prev_development  # 失敗時は前回分があればそれを使う
         if development is None:
             _raise_gemini_error("展開予想の生成", e)
 
     # 2段階目: 展開予想を踏まえて勝率を推定する
     try:
         ai_probs = estimate_ai_win_probabilities(
-            entries_payload, lines=race.lines_data, bank_info=bank_info,
-            race_stage=race.race_stage, grade=race.grade,
+            entries_payload, lines=race_lines_data, bank_info=bank_info,
+            race_stage=race_stage_value, grade=race_grade_value,
             development_simulation=development,
             weather_info=weather_info,
         )
@@ -419,6 +429,7 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
         _raise_gemini_error("AI勝率推定", e)
 
     # tipstarとの重み付け合成は廃止。最終勝率はAI単独。
+    entries = db.query(models.Entry).filter(models.Entry.race_id == race_id).all()  # Gemini待ちの間に接続を手放したので取り直す
     updated_count = 0
     for e in entries:
         ai_p = ai_probs.get(e.car_number)
@@ -432,5 +443,5 @@ def run_ai_estimation(race_id: int, db: Session = Depends(get_db)):
     return {
         "race_id": race_id,
         "updated_entries": updated_count,
-        "development_simulation": race.development_simulation,
+        "development_simulation": development,
     }

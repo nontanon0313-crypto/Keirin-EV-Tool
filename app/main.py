@@ -15,6 +15,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as SATimeoutError
+
+
+@app.exception_handler(SATimeoutError)
+async def db_pool_timeout_handler(request: Request, exc: SATimeoutError):
+    """DB接続プールの待ちが切れた場合は500ではなく503(再試行可)を返す。クライアントは503を自動再試行する。"""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "DB接続が混み合っています。しばらくして再試行してください"},
+        headers={"Retry-After": "10"},
+    )
+
+
 @app.middleware("http")
 async def keirin_db_tier_middleware(request: Request, call_next):
     from . import database as dbmod
