@@ -58,7 +58,25 @@ def _force_revenue_tier():
 
 
 def _race_meta(db: Session, race_id: int) -> dict:
+    """レースは日次登録先(Primary)から読む。LiveBet保存先(fallback2)とは分離。"""
+    from .. import database as dbmod
+
+    # まず渡された session（収益DB）で試し、無ければ Primary
     race = db.query(models.Race).filter(models.Race.id == race_id).first()
+    if race is None:
+        primary = None
+        try:
+            primary = None
+            if dbmod._ensure_tier("primary"):
+                primary = dbmod._sessions["primary"]()
+            if primary is not None:
+                race = primary.query(models.Race).filter(models.Race.id == race_id).first()
+        finally:
+            if primary is not None:
+                try:
+                    primary.close()
+                except Exception:
+                    pass
     if not race:
         raise HTTPException(status_code=404, detail=f"race_id={race_id} not found")
     return {
@@ -293,11 +311,33 @@ def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(ge
     # 購入履歴に紐付いている場合、購入時点の想定値をサーバー側で補完する。
     # フロント側のlastRacePlanだけに依存せず、Purchaseを正本として扱う。
     if payload.purchase_id:
-        purchase = (
-            db.query(models.Purchase)
-            .filter(models.Purchase.id == payload.purchase_id)
-            .first()
-        )
+        from .. import database as dbmod
+        purchase = None
+        primary = None
+        try:
+            primary = None
+            if dbmod._ensure_tier("primary"):
+                primary = dbmod._sessions["primary"]()
+            if primary is not None:
+                purchase = (
+                    primary.query(models.Purchase)
+                    .filter(models.Purchase.id == payload.purchase_id)
+                    .first()
+                )
+                if purchase and payload.planned_stake is None and purchase.ev_result_id:
+                    ev_row = (
+                        primary.query(models.EvResult)
+                        .filter(models.EvResult.id == purchase.ev_result_id)
+                        .first()
+                    )
+                    if ev_row and ev_row.recommended_stake is not None:
+                        payload.planned_stake = ev_row.recommended_stake
+        finally:
+            if primary is not None:
+                try:
+                    primary.close()
+                except Exception:
+                    pass
         if purchase:
             if payload.planned_win_prob is None:
                 payload.planned_win_prob = purchase.win_prob_at_purchase
@@ -305,17 +345,6 @@ def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(ge
                 payload.planned_odds = purchase.odds_at_purchase
             if payload.planned_ev_pct is None:
                 payload.planned_ev_pct = purchase.ev_pct_at_purchase
-
-            # 投資予定額は実投資額(Purchase.stake_amount)ではなく、
-            # EV計算時の推奨投資額(EvResult.recommended_stake)を使用する。
-            if payload.planned_stake is None and purchase.ev_result_id:
-                ev_row = (
-                    db.query(models.EvResult)
-                    .filter(models.EvResult.id == purchase.ev_result_id)
-                    .first()
-                )
-                if ev_row and ev_row.recommended_stake is not None:
-                    payload.planned_stake = ev_row.recommended_stake
 
     # 想定利益は「プラン上の予定投資額」ではなく、
     # 実際に投票した金額(actual_stake)を基準に算出する。

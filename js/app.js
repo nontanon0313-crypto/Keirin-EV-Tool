@@ -1321,9 +1321,9 @@ async function addManualRevenue() {
   }
 
   try {
-    const res = await fetch(apiUrl("/revenue/manual"), { headers: revenueHeaders(), 
+    const res = await fetch(apiUrl("/revenue/manual"), {
       method: "POST",
-      headers: {"Content-Type": "application/json"},
+      headers: Object.assign({ "Content-Type": "application/json" }, revenueHeaders()),
       body: JSON.stringify({
         race_id: raceId,
         venue_name: venue,
@@ -1582,9 +1582,9 @@ const planItem = planItems.find(it =>
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
 
-    const revenueRes = await fetch(apiUrl("/revenue/manual"), { headers: revenueHeaders(), 
+    const revenueRes = await fetch(apiUrl("/revenue/manual"), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: Object.assign({ "Content-Type": "application/json" }, revenueHeaders()),
       body: JSON.stringify({
         race_id: planRaceId,
         bet_type: betType,
