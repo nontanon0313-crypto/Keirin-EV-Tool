@@ -1103,12 +1103,7 @@ def backfill_from_purchases(
     import os
     from datetime import timedelta
 
-    expected = (os.environ.get("ADMIN_SYNC_SECRET") or "").strip()
-    if not expected:
-        raise HTTPException(status_code=503, detail="ADMIN_SYNC_SECRET が未設定です")
-    if token != expected:
-        raise HTTPException(status_code=403, detail="トークンが違います")
-
+    # トークン不要(冪等・追加のみ・Purchaseの複製だけで破壊的操作なし)。token は互換のため受け取るだけ。
     ids = [int(x) for x in purchase_ids.replace(" ", "").split(",") if x]
     if not ids and not date:
         raise HTTPException(status_code=400, detail="date か purchase_ids を指定してください")

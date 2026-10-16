@@ -1093,20 +1093,11 @@ function renderRevenueList(data) {
     const pending = r.actual_result === "pending";
     let boughtAt = "-";
     {
+      // created_at はUTCのnaive文字列。formatPurchaseTime で Z を補ってJST表示する
       const raw = r.created_at || r.race_date;
       if (raw) {
-        const d = new Date(raw);
-        boughtAt = Number.isNaN(d.getTime())
-          ? String(raw).slice(0, 19)
-          : d.toLocaleString("ja-JP", {
-              timeZone: "Asia/Tokyo",
-              year: "numeric",
-              month: "2-digit",
-              day: "2-digit",
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            });
+        const t = formatPurchaseTime(raw);
+        boughtAt = t === "-" ? String(raw).slice(0, 19) : t;
       }
     }
     // planned_win_prob は 0-1。無ければ planned から再計算表示しない
