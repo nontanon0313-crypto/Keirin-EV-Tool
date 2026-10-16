@@ -82,12 +82,19 @@ def progress(jobs):
     STATUS.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     return info
 
+def _no_result_args(day: str):
+    """当日・未来の開催日は結果が無いので取得しない。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo("Asia/Tokyo")).strftime("%Y%m%d")
+    return ["--no-result"] if day >= today else []
+
 def run_one(day: str, jo: str, rn: int) -> int:
     flog(f"START {day} jo={jo} R{rn}")
     env = {**os.environ, "KEIRIN_DATA_DIR": str(OUT)}
     try:
         r = subprocess.run(
-            [sys.executable, "-u", "run_keirin.py", "--date", day, "--jo", jo, "--race", str(rn)],
+            [sys.executable, "-u", "run_keirin.py", "--date", day, "--jo", jo, "--race", str(rn)] + _no_result_args(day),
             cwd=str(SCRAPER), env=env, capture_output=True, text=True, timeout=RACE_TIMEOUT,
         )
         if r.stdout:

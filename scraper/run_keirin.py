@@ -43,14 +43,14 @@ def already_done(date: str, jo: str, race: int) -> bool:
     return os.path.exists(path) and os.path.getsize(path) > 1000
 
 
-def run_one(date: str, jo: str, race: int, skip_done: bool) -> bool:
+def run_one(date: str, jo: str, race: int, skip_done: bool, fetch_result: bool = True) -> bool:
     if skip_done and already_done(date, jo, race):
         log(f"SKIP {date} jo={jo} R{race:02d}")
         return True
     log(f">>> {date} jo={jo} R{race:02d}")
     t0 = time.time()
     try:
-        data = scrape_one_race(jo, date, race)
+        data = scrape_one_race(jo, date, race, fetch_result=fetch_result)
         m = data.get("odds", {}).get("3連単", {}).get("matrix_count", 0)
         riders = len(data.get("entry", {}).get("riders", []))
         log(f"OK  {date} jo={jo} R{race:02d} {time.time()-t0:.0f}s matrix={m} riders={riders}")
@@ -69,6 +69,7 @@ def main() -> int:
     p.add_argument("--all", action="store_true", help="1〜12R すべて")
     p.add_argument("--skip-done", action="store_true", help="取得済みJSONをスキップ")
     p.add_argument("--races", help="レース番号をカンマ区切り（例: 1,2,12）")
+    p.add_argument("--no-result", action="store_true", help="着順(結果)を取得しない(当日・未来レース用)")
     args = p.parse_args()
 
     dates: list[str] = []
@@ -94,7 +95,7 @@ def main() -> int:
     ok = fail = 0
     for d in dates:
         for rn in races:
-            if run_one(d, args.jo, rn, args.skip_done):
+            if run_one(d, args.jo, rn, args.skip_done, fetch_result=not args.no_result):
                 ok += 1
             else:
                 fail += 1

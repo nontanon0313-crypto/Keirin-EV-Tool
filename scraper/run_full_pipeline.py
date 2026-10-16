@@ -303,7 +303,7 @@ def run_one_race(race_json, bankroll, dry_run=False, skip_plan=False):
         log("   出走表データが無いため予想をスキップします")
         return {"race_id": race_id, "stage": "no_entries"}
 
-    log("   (--dry-run無し: このまま予想〜結果確定まで実行します)")
+    log("   (--dry-run無し: 予想まで実行します)" if skip_plan else "   (--dry-run無し: このまま予想〜結果確定まで実行します)")
     # バグ修正: 以前はここでスクレイパーJSON内の着順を一切見ておらず、
     # 新規データの通常経路(--dir/--file)では結果が取れていても常に
     # 「未確定」のままになっていた(のんの指摘により修正)。
@@ -665,7 +665,7 @@ def main():
                 fp = futs[fut]
                 run_with_summary(f"file:{fp}", fp, lambda fut=fut: fut.result())
 
-    if not args.dry_run:
+    if not args.dry_run and not args.skip_plan:  # 日次(--skip-plan)は未来レースのみで結果確認不要
         log("--- 結果確定スイープ(再予想なしで、結果が出ているレースだけ確定) ---")
         _lightweight_confirm_sweep(files, progress=progress)
 

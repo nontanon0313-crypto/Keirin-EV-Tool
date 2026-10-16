@@ -63,7 +63,7 @@ def main():
         print(f">>> jo={jo} R{rn}")
         t0 = time.time()
         try:
-            data = scrape_one_race(jo, today, rn)
+            data = scrape_one_race(jo, today, rn, fetch_result=False)
             ep = entry_dir / f"{today}_{jo}_{rn:02d}_entry.json"
             if ep.is_file():
                 ed = json.loads(ep.read_text(encoding="utf-8"))

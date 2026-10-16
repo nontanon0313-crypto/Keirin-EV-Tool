@@ -294,12 +294,16 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
     odds_payload = payload.get("odds") or {}
     if odds_payload:
         for bet_type, info in odds_payload.items():
+            # 取得をスキップした券種(skipped)と、3連単以外の未取得は通信エラーではないので無視する
+            if info.get("skipped"):
+                continue
             if not info.get("is_complete"):
-                odds_skipped_bet_types.append({
-                    "bet_type": bet_type,
-                    "got": info.get("matrix_count"),
-                    "expected": info.get("expected_count"),
-                })
+                if bet_type == "3連単":
+                    odds_skipped_bet_types.append({
+                        "bet_type": bet_type,
+                        "got": info.get("matrix_count"),
+                        "expected": info.get("expected_count"),
+                    })
                 continue
 
             # 完全取得できた券種だけ、同一レース・同一券種の既存オッズを洗い替える
@@ -338,7 +342,11 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
         except Exception:
             warnings.append("結果の着順データの形式が想定外でした。手動でご確認ください")
     else:
-        warnings.append("結果データが空でした(レース未確定、またはresult_errorが出ていないか確認してください)")
+        # 当日・未来のレースは結果が空で当然。過去日のレースだけ警告する
+        from datetime import timedelta as _td, timezone as _tz
+        _today_jst = datetime.now(_tz(_td(hours=9))).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+        if race_date is not None and race_date < _today_jst:
+            warnings.append("結果データが空でした(レース未確定、またはresult_errorが出ていないか確認してください)")
 
     db.commit()
     db.refresh(race)

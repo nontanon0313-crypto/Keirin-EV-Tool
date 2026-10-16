@@ -851,7 +851,7 @@ def parse_result(jo_code, kaisai_bi, race_no):
         payouts.append({"賭式": label, "払戻金": yen, "人気": pop})
     return {"results": sorted(results, key=lambda x: int(x["着順"])), "payouts": payouts}
 
-def scrape_one_race(jo_code, kaisai_bi, race_no):
+def scrape_one_race(jo_code, kaisai_bi, race_no, fetch_result=True):
     data = {
         "jo_code": jo_code, "kaisai_bi": kaisai_bi, "race_no": race_no,
         "scraped_at": datetime.now().isoformat(),
@@ -904,7 +904,9 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
         except Exception as e:
             data["odds"][name] = {"error": str(e), "matrix_count": 0, "matrix": [], "is_complete": False}
 
-    for attempt in range(2):
+    # 日次運用(当日の未来レース)は結果が出ていないため fetch_result=False で取得自体をしない
+    data["result"] = {"results": [], "payouts": []}
+    for attempt in range(2 if fetch_result else 0):
         try:
             data["result"] = parse_result(jo_code, kaisai_bi, race_no)
             data.pop("result_error", None)
@@ -921,7 +923,7 @@ def scrape_one_race(jo_code, kaisai_bi, race_no):
     except Exception:
         pass
 
-    odds_complete = {bt: info.get("is_complete", False) for bt, info in data["odds"].items()}
+    odds_complete = {bt: info.get("is_complete", False) for bt, info in data["odds"].items() if not info.get("skipped")}
     data["data_quality"] = {
         "entry_ok": bool(data.get("entry", {}).get("riders")),
         "result_ok": bool(data.get("result", {}).get("results")),
