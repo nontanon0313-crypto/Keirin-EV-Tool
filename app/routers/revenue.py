@@ -5,6 +5,7 @@ Purchase / SkippedBet / 検証タブの集計とは完全に分離する。
 投票プランの想定値と、実際に投票した結果を別フィールドで保持し、
 実績データのみを基準に集計・資産推移を返す。
 """
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, List
 
@@ -18,32 +19,64 @@ router = APIRouter(prefix="/revenue", tags=["revenue"])
 
 
 def get_revenue_db():
-    """収益は fallback2 固定。get_db より前に系統を決める。"""
+    """収益(LiveBet)は fallback2 固定。接続できない場合は他系統へ逃がさず 503 を返す。"""  # [fix-20261016]
+    from sqlalchemy import text as sa_text
     from .. import database as dbmod
-    token = None
+    if not dbmod._ensure_tier("fallback2"):
+        raise HTTPException(status_code=503, detail="fallback2(収益DB)が未設定です")
+    db = dbmod._sessions["fallback2"]()
     try:
-        token = dbmod.set_request_tier("fallback2")
-    except Exception:
+        db.execute(sa_text("SELECT 1"))
+    except Exception as e:
         try:
-            dbmod._request_tier.set("fallback2")
+            db.close()
         except Exception:
             pass
+        raise HTTPException(
+            status_code=503,
+            detail=f"fallback2(収益DB)に接続できません: {type(e).__name__}",
+        )
     try:
-        gen = dbmod.get_db()
-        db = next(gen)
-        try:
-            yield db
-        finally:
-            try:
-                next(gen)
-            except StopIteration:
-                pass
+        yield db
     finally:
-        if token is not None:
-            try:
-                dbmod.reset_request_tier(token)
-            except Exception:
-                pass
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _open_tier_session(name: str):
+    """指定系統の session を開く(未作成なら _ensure_tier で作成)。失敗時は None。"""
+    from sqlalchemy import text as sa_text
+    from .. import database as dbmod
+    if not dbmod._ensure_tier(name):
+        return None
+    s = dbmod._sessions[name]()
+    try:
+        s.execute(sa_text("SELECT 1"))
+    except Exception:
+        try:
+            s.close()
+        except Exception:
+            pass
+        return None
+    return s
+
+
+@contextmanager
+def _primary_session():
+    """レース・購入履歴(Primary)の session。接続不可なら 503。"""
+    s = _open_tier_session("primary")
+    if s is None:
+        raise HTTPException(status_code=503, detail="primary(レース・購入DB)に接続できません")
+    try:
+        yield s
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
 
 def _force_revenue_tier():
     from .. import database as dbmod
@@ -58,33 +91,17 @@ def _force_revenue_tier():
 
 
 def _race_meta(db: Session, race_id: int) -> dict:
-    """レースは日次登録先(Primary)から読む。LiveBet保存先(fallback2)とは分離。"""
-    from .. import database as dbmod
-
-    # まず渡された session（収益DB）で試し、無ければ Primary
-    race = db.query(models.Race).filter(models.Race.id == race_id).first()
-    if race is None:
-        primary = None
-        try:
-            primary = None
-            if dbmod._ensure_tier("primary"):
-                primary = dbmod._sessions["primary"]()
-            if primary is not None:
-                race = primary.query(models.Race).filter(models.Race.id == race_id).first()
-        finally:
-            if primary is not None:
-                try:
-                    primary.close()
-                except Exception:
-                    pass
-    if not race:
-        raise HTTPException(status_code=404, detail=f"race_id={race_id} not found")
-    return {
-        "race_id": race.id,
-        "race_date": race.race_date,
-        "venue_name": race.venue_name,
-        "race_number": race.race_number,
-    }
+    """race_id は Primary(日次登録先)の ID 空間。fallback2 の races は参照しない(ID衝突防止)。"""
+    with _primary_session() as primary:
+        race = primary.query(models.Race).filter(models.Race.id == race_id).first()
+        if not race:
+            raise HTTPException(status_code=404, detail=f"race_id={race_id} not found (primary)")
+        return {
+            "race_id": race.id,
+            "race_date": race.race_date,
+            "venue_name": race.venue_name,
+            "race_number": race.race_number,
+        }
 
 
 def _calc_planned_expected_profit(row: models.LiveBet) -> Optional[float]:
@@ -217,7 +234,7 @@ def register_from_plan(payload: schemas.LiveBetFromPlanCreate, db: Session = Dep
         if planned_exp is None and p_stake and p_wp is not None and p_odds is not None:
             planned_exp = float(p_stake) * (float(p_wp) * float(p_odds) - 1.0)
         row = models.LiveBet(
-            race_id=meta["race_id"],
+            race_id=None,  # Primary の ID 空間のため fallback2 には保存しない
             race_date=meta["race_date"],
             venue_name=meta["venue_name"],
             race_number=meta["race_number"],
@@ -298,78 +315,88 @@ def mark_win(live_bet_id: int, payload: schemas.LiveBetWinUpdate, db: Session = 
 
 @router.post("/manual")
 def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(get_revenue_db)):
-    """プランにない買い目を実績として追加する。"""
+    """投票タブ「購入記録」(または手入力)を実績として fallback2 の LiveBet に保存する。
+
+    race / purchase は Primary から読む。LiveBet.race_id には Primary の ID を保存しない。
+    """
+    marker = f"購入#{payload.purchase_id}" if payload.purchase_id else None
+    if marker:
+        dup = db.query(models.LiveBet).filter(models.LiveBet.memo.like(f"%{marker}%")).first()
+        if dup is not None:
+            return _row_to_dict(dup)  # 二重送信は同じ行を返す
+
     race_date = payload.race_date
     venue_name = payload.venue_name
     race_number = payload.race_number
-    if payload.race_id:
-        meta = _race_meta(db, payload.race_id)
+    purchase = None
+    ev_stake = None
+    if payload.purchase_id:
+        with _primary_session() as primary:
+            purchase = (
+                primary.query(models.Purchase)
+                .filter(models.Purchase.id == payload.purchase_id)
+                .first()
+            )
+            if purchase is None:
+                raise HTTPException(status_code=404, detail=f"purchase_id={payload.purchase_id} not found (primary)")
+            if purchase.ev_result_id:
+                ev_row = (
+                    primary.query(models.EvResult)
+                    .filter(models.EvResult.id == purchase.ev_result_id)
+                    .first()
+                )
+                if ev_row is not None:
+                    ev_stake = ev_row.recommended_stake
+            # purchase を session 外で参照するため値を確定
+            p_race_id = purchase.race_id
+            p_wp = purchase.win_prob_at_purchase
+            p_odds = purchase.odds_at_purchase
+            p_ev = purchase.ev_pct_at_purchase
+        if payload.race_id and int(payload.race_id) != int(p_race_id):
+            raise HTTPException(status_code=400, detail="race_id と purchase_id のレースが一致しません")
+        meta_race_id = payload.race_id or p_race_id
+        if payload.planned_stake is None and ev_stake is not None:
+            payload.planned_stake = ev_stake
+        if payload.planned_win_prob is None:
+            payload.planned_win_prob = p_wp
+        if payload.planned_odds is None:
+            payload.planned_odds = p_odds
+        if payload.planned_ev_pct is None:
+            payload.planned_ev_pct = p_ev
+    else:
+        meta_race_id = payload.race_id
+
+    if meta_race_id:
+        meta = _race_meta(db, meta_race_id)
         race_date = race_date or meta["race_date"]
         venue_name = venue_name or meta["venue_name"]
         race_number = race_number if race_number is not None else meta["race_number"]
 
-    # 購入履歴に紐付いている場合、購入時点の想定値をサーバー側で補完する。
-    # フロント側のlastRacePlanだけに依存せず、Purchaseを正本として扱う。
-    if payload.purchase_id:
-        from .. import database as dbmod
-        purchase = None
-        primary = None
-        try:
-            primary = None
-            if dbmod._ensure_tier("primary"):
-                primary = dbmod._sessions["primary"]()
-            if primary is not None:
-                purchase = (
-                    primary.query(models.Purchase)
-                    .filter(models.Purchase.id == payload.purchase_id)
-                    .first()
-                )
-                if purchase and payload.planned_stake is None and purchase.ev_result_id:
-                    ev_row = (
-                        primary.query(models.EvResult)
-                        .filter(models.EvResult.id == purchase.ev_result_id)
-                        .first()
-                    )
-                    if ev_row and ev_row.recommended_stake is not None:
-                        payload.planned_stake = ev_row.recommended_stake
-        finally:
-            if primary is not None:
-                try:
-                    primary.close()
-                except Exception:
-                    pass
-        if purchase:
-            if payload.planned_win_prob is None:
-                payload.planned_win_prob = purchase.win_prob_at_purchase
-            if payload.planned_odds is None:
-                payload.planned_odds = purchase.odds_at_purchase
-            if payload.planned_ev_pct is None:
-                payload.planned_ev_pct = purchase.ev_pct_at_purchase
-
-    # 想定利益は「プラン上の予定投資額」ではなく、
-    # 実際に投票した金額(actual_stake)を基準に算出する。
-    # planned_expected_profit はフロントから送信されても、
-    # サーバー側で実投資額を基準に再計算して整合性を保証する。
+    wp = payload.planned_win_prob
+    if wp is not None and float(wp) > 1.0:
+        wp = float(wp) / 100.0
     planned_exp = None
     if (
         payload.actual_stake is not None
         and payload.actual_stake > 0
-        and payload.planned_win_prob is not None
+        and wp is not None
         and payload.planned_odds is not None
     ):
-        planned_exp = payload.actual_stake * (
-            payload.planned_win_prob * payload.planned_odds - 1.0
-        )
+        planned_exp = payload.actual_stake * (float(wp) * float(payload.planned_odds) - 1.0)
+
+    memo = payload.memo
+    if marker:
+        memo = f"{memo} / {marker}" if memo else marker
 
     row = models.LiveBet(
-        race_id=payload.race_id,
+        race_id=None,  # Primary の race_id は fallback2 の races と ID 空間が異なる(FK/取り違え防止)
         race_date=race_date,
         venue_name=venue_name,
         race_number=race_number,
         bet_type=payload.bet_type,
         combination=payload.combination,
         planned_stake=payload.planned_stake,
-        planned_win_prob=payload.planned_win_prob,
+        planned_win_prob=wp,
         planned_odds=payload.planned_odds,
         planned_ev_pct=payload.planned_ev_pct,
         planned_expected_profit=planned_exp,
@@ -377,7 +404,7 @@ def create_manual(payload: schemas.LiveBetManualCreate, db: Session = Depends(ge
         actual_stake=payload.actual_stake,
         actual_result=payload.actual_result or "pending",
         actual_payout=payload.actual_payout or 0.0,
-        memo=payload.memo,
+        memo=memo,
         source="manual",
     )
     db.add(row)
@@ -457,131 +484,96 @@ def _normalize_combo(comb: str):
 
 @router.post("/backfill-planned")
 def backfill_planned(dry_run: bool = True, db: Session = Depends(get_revenue_db)):
-    """planned_* 欠損を Purchase から埋める。値が入っている Purchase を優先。"""
-    from datetime import datetime
+    """planned_* 欠損を Primary の Purchase から埋める(LiveBet は fallback2)。"""
+    from datetime import datetime, timedelta
 
     def norm_combos(comb: str):
-        if not comb:
-            return set()
-        c = str(comb).strip()
-        out = {c}
-        if "-" in c:
-            out.add(c.replace("-", ""))
-        elif c.isdigit() and len(c) >= 3:
-            out.add("-".join(list(c)))
-        return out
-
-    def pick_purchase(race_ids, bet_type, combos):
-        if not race_ids or not combos:
-            return None
-        q = (
-            db.query(models.Purchase)
-            .filter(
-                models.Purchase.race_id.in_(list(race_ids)),
-                models.Purchase.combination.in_(list(combos)),
-            )
-        )
-        if bet_type:
-            q = q.filter(models.Purchase.bet_type == bet_type)
-        rows = q.order_by(models.Purchase.id.desc()).all()
-        # 勝率・オッズが両方あるものを最優先
-        for r in rows:
-            if r.win_prob_at_purchase is not None and r.odds_at_purchase is not None:
-                return r
-        for r in rows:
-            if r.win_prob_at_purchase is not None or r.odds_at_purchase is not None:
-                return r
-        return rows[0] if rows else None
+        return _normalize_combo(comb)
 
     rows = db.query(models.LiveBet).filter(models.LiveBet.vote_status == "voted").all()
-    updated, skipped = [], []
-    for lb in rows:
-        if (
+    targets = [
+        lb for lb in rows
+        if not (
             lb.planned_win_prob is not None
             and lb.planned_odds is not None
             and lb.planned_expected_profit is not None
-        ):
-            continue
-        combos = norm_combos(lb.combination)
-        race_ids = set()
-        if lb.race_id:
-            race_ids.add(int(lb.race_id))
-        if lb.venue_name and lb.race_number is not None:
-            for race in (
-                db.query(models.Race)
-                .filter(
+        )
+    ]
+    updated, skipped = [], []
+    with _primary_session() as pdb:
+        def pick_purchase(race_ids, bet_type, combos):
+            if not race_ids or not combos:
+                return None
+            q = pdb.query(models.Purchase).filter(
+                models.Purchase.race_id.in_(list(race_ids)),
+                models.Purchase.combination.in_(list(combos)),
+            )
+            if bet_type:
+                q = q.filter(models.Purchase.bet_type == bet_type)
+            found = q.order_by(models.Purchase.id.desc()).all()
+            for r in found:
+                if r.win_prob_at_purchase is not None and r.odds_at_purchase is not None:
+                    return r
+            for r in found:
+                if r.win_prob_at_purchase is not None or r.odds_at_purchase is not None:
+                    return r
+            return found[0] if found else None
+
+        for lb in targets:
+            combos = norm_combos(lb.combination)
+            race_ids = set()
+            if lb.venue_name and lb.race_number is not None:
+                rq = pdb.query(models.Race).filter(
                     models.Race.venue_name == lb.venue_name,
                     models.Race.race_number == int(lb.race_number),
                 )
-                .all()
-            ):
-                race_ids.add(int(race.id))
-        puch = pick_purchase(race_ids, lb.bet_type, combos)
-        if puch is None:
-            skipped.append({
-                "id": lb.id,
-                "venue": lb.venue_name,
-                "R": lb.race_number,
-                "combination": lb.combination,
-                "reason": "no_purchase",
-            })
-            continue
-        before = {
-            "wp": lb.planned_win_prob,
-            "odds": lb.planned_odds,
-            "exp": lb.planned_expected_profit,
-        }
-        wp = puch.win_prob_at_purchase
-        # 履歴APIは%表示。DBが 0-100 なら 0-1 に正規化
-        if wp is not None:
-            wp = float(wp)
-            if wp > 1.0:
-                wp = wp / 100.0
-            lb.planned_win_prob = wp
-        if puch.odds_at_purchase is not None:
-            lb.planned_odds = float(puch.odds_at_purchase)
-        stake = lb.actual_stake if lb.actual_stake is not None else lb.planned_stake
-        if lb.planned_stake is None and stake is not None:
-            lb.planned_stake = float(stake)
-        if (
-            lb.planned_win_prob is not None
-            and lb.planned_odds is not None
-            and stake
-        ):
-            lb.planned_expected_profit = float(stake) * (
-                float(lb.planned_win_prob) * float(lb.planned_odds) - 1.0
-            )
-        if lb.combination and "-" not in str(lb.combination) and str(lb.combination).isdigit():
-            lb.combination = "-".join(list(str(lb.combination)))
-        if lb.race_id is None and puch.race_id is not None:
-            lb.race_id = int(puch.race_id)
-        lb.updated_at = datetime.utcnow()
-        # 実際に埋まったものだけ updated
-        if (
-            lb.planned_win_prob is not None
-            or lb.planned_odds is not None
-            or lb.planned_expected_profit is not None
-        ) and (
-            before["wp"] != lb.planned_win_prob
-            or before["odds"] != lb.planned_odds
-            or before["exp"] != lb.planned_expected_profit
-        ):
-            updated.append({
-                "id": lb.id,
-                "combination": lb.combination,
-                "planned_win_prob": lb.planned_win_prob,
-                "planned_odds": lb.planned_odds,
-                "planned_expected_profit": lb.planned_expected_profit,
-                "from_purchase_id": puch.id,
-                "from_race_id": puch.race_id,
-            })
-        else:
-            skipped.append({
-                "id": lb.id,
-                "combination": lb.combination,
-                "reason": "purchase_found_but_empty_fields",
-                "purchase_id": puch.id,
-            })
+                if lb.race_date is not None:
+                    d0 = lb.race_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                    rq = rq.filter(models.Race.race_date >= d0, models.Race.race_date < d0 + timedelta(days=1))
+                for race in rq.all():
+                    race_ids.add(int(race.id))
+            puch = pick_purchase(race_ids, lb.bet_type, combos)
+            if puch is None:
+                skipped.append({
+                    "id": lb.id, "venue": lb.venue_name, "R": lb.race_number,
+                    "combination": lb.combination, "reason": "no_purchase",
+                })
+                continue
+            before = (lb.planned_win_prob, lb.planned_odds, lb.planned_expected_profit)
+            wp = puch.win_prob_at_purchase
+            if wp is not None:
+                wp = float(wp)
+                if wp > 1.0:
+                    wp = wp / 100.0
+                lb.planned_win_prob = wp
+            if puch.odds_at_purchase is not None:
+                lb.planned_odds = float(puch.odds_at_purchase)
+            stake = lb.actual_stake if lb.actual_stake is not None else lb.planned_stake
+            if lb.planned_stake is None and stake is not None:
+                lb.planned_stake = float(stake)
+            if lb.planned_win_prob is not None and lb.planned_odds is not None and stake:
+                lb.planned_expected_profit = float(stake) * (
+                    float(lb.planned_win_prob) * float(lb.planned_odds) - 1.0
+                )
+            if lb.combination and "-" not in str(lb.combination) and str(lb.combination).isdigit():
+                lb.combination = "-".join(list(str(lb.combination)))
+            lb.updated_at = datetime.utcnow()
+            after = (lb.planned_win_prob, lb.planned_odds, lb.planned_expected_profit)
+            if after != before:
+                updated.append({
+                    "id": lb.id,
+                    "combination": lb.combination,
+                    "planned_win_prob": lb.planned_win_prob,
+                    "planned_odds": lb.planned_odds,
+                    "planned_expected_profit": lb.planned_expected_profit,
+                    "from_purchase_id": puch.id,
+                    "from_race_id": puch.race_id,
+                })
+            else:
+                skipped.append({
+                    "id": lb.id, "combination": lb.combination,
+                    "reason": "purchase_found_but_empty_fields", "purchase_id": puch.id,
+                })
     if dry_run:
         db.rollback()
     else:
@@ -1000,11 +992,7 @@ def migrate_live_bets_to_fallback2(
         )
 
     def open_tier(name):
-        if name not in dbmod._sessions:
-            return None
-        s = dbmod._sessions[name]()
-        s.execute(sa_text("SELECT 1"))
-        return s
+        return _open_tier_session(name)  # _ensure_tier + _sessions[name]()
 
     def stats(rows):
         voted = [r for r in rows if r.vote_status == "voted"]
@@ -1026,20 +1014,6 @@ def migrate_live_bets_to_fallback2(
             "pnl": round(payout - stake, 0),
             "expected_profit": round(exp, 0),
         }
-
-    def find_race_id(session, row):
-        if not row.venue_name or row.race_number is None:
-            return None
-        q = session.query(models.Race).filter(
-            models.Race.venue_name == row.venue_name,
-            models.Race.race_number == row.race_number,
-        )
-        if row.race_date is not None:
-            d0 = row.race_date.replace(hour=0, minute=0, second=0, microsecond=0)
-            q = q.filter(models.Race.race_date >= d0)
-            q = q.filter(models.Race.race_date < d0 + timedelta(days=1))
-        hit = q.first()
-        return hit.id if hit else None
 
     dst = open_tier("fallback2")
     if dst is None:
@@ -1077,7 +1051,7 @@ def migrate_live_bets_to_fallback2(
 
         for r in to_add:
             nb = models.LiveBet(
-                race_id=find_race_id(dst, r),
+                race_id=None,
                 race_date=r.race_date,
                 venue_name=r.venue_name,
                 race_number=r.race_number,
@@ -1110,3 +1084,149 @@ def migrate_live_bets_to_fallback2(
     finally:
         dst.close()
 
+
+@router.post("/admin/backfill-from-purchases")
+def backfill_from_purchases(
+    date: Optional[str] = Query(None, description="購入日(JST) YYYY-MM-DD"),
+    hour_from: int = Query(0, ge=0, le=23, description="JST開始時(含む)"),
+    hour_to: int = Query(24, ge=1, le=24, description="JST終了時(含まない)"),
+    purchase_ids: str = Query("", description="カンマ区切りの購入ID。指定時は日時窓より優先"),
+    dry_run: bool = True,
+    token: str = "",
+    db: Session = Depends(get_revenue_db),
+):
+    """Primary の Purchase を fallback2 の LiveBet に載せ直す(再購入不要)。  # [fix-20261016]
+
+    日次スクリプト由来の Purchase と投票タブ由来を自動判別できないため、
+    必ず dry_run で候補を確認し、purchase_ids または日時窓で対象を絞ること。
+    """
+    import os
+    from datetime import timedelta
+
+    expected = (os.environ.get("ADMIN_SYNC_SECRET") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail="ADMIN_SYNC_SECRET が未設定です")
+    if token != expected:
+        raise HTTPException(status_code=403, detail="トークンが違います")
+
+    ids = [int(x) for x in purchase_ids.replace(" ", "").split(",") if x]
+    if not ids and not date:
+        raise HTTPException(status_code=400, detail="date か purchase_ids を指定してください")
+
+    def combo_key(c):
+        return "".join(ch for ch in str(c or "") if ch.isdigit())
+
+    cands = []
+    with _primary_session() as pdb:
+        q = pdb.query(models.Purchase)
+        if ids:
+            q = q.filter(models.Purchase.id.in_(ids))
+        else:
+            try:
+                d0 = datetime.strptime(date, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="date は YYYY-MM-DD")
+            jst_start = d0 + timedelta(hours=hour_from)
+            jst_end = d0 + timedelta(hours=hour_to)
+            q = q.filter(
+                models.Purchase.purchased_at >= jst_start - timedelta(hours=9),
+                models.Purchase.purchased_at < jst_end - timedelta(hours=9),
+            )
+        for p in q.order_by(models.Purchase.id.asc()).all():
+            race = pdb.query(models.Race).filter(models.Race.id == p.race_id).first()
+            ev_stake = None
+            if p.ev_result_id:
+                ev_row = pdb.query(models.EvResult).filter(models.EvResult.id == p.ev_result_id).first()
+                if ev_row is not None:
+                    ev_stake = ev_row.recommended_stake
+            cands.append({
+                "purchase_id": p.id,
+                "purchased_at": p.purchased_at,
+                "race_date": race.race_date if race else None,
+                "venue_name": race.venue_name if race else None,
+                "race_number": race.race_number if race else None,
+                "bet_type": p.bet_type,
+                "combination": p.combination,
+                "stake": p.stake_amount,
+                "odds": p.odds_at_purchase,
+                "wp": p.win_prob_at_purchase,
+                "ev_pct": p.ev_pct_at_purchase,
+                "ev_stake": ev_stake,
+                "result": p.result or "pending",
+                "payout": p.payout_amount or 0.0,
+            })
+
+    existing = db.query(models.LiveBet).all()
+    memo_hit = set()
+    fuzzy = set()
+    for lb in existing:
+        for c in cands:
+            if lb.memo and f"購入#{c['purchase_id']}" in lb.memo:
+                memo_hit.add(c["purchase_id"])
+        if lb.race_date is not None:
+            fuzzy.add((
+                (lb.venue_name or "").strip(), int(lb.race_number or 0), lb.race_date.date(),
+                (lb.bet_type or "").strip(), combo_key(lb.combination), round(float(lb.actual_stake or 0)),
+            ))
+
+    report, to_add = [], []
+    for c in cands:
+        fk = None
+        if c["race_date"] is not None:
+            fk = (
+                (c["venue_name"] or "").strip(), int(c["race_number"] or 0), c["race_date"].date(),
+                (c["bet_type"] or "").strip(), combo_key(c["combination"]), round(float(c["stake"] or 0)),
+            )
+        if c["purchase_id"] in memo_hit:
+            status = "already(memo)"
+        elif fk is not None and fk in fuzzy:
+            status = "already(same_bet)"
+        elif c["race_date"] is None:
+            status = "skip(race_not_found)"
+        else:
+            status = "to_insert"
+            to_add.append(c)
+        report.append({
+            "purchase_id": c["purchase_id"],
+            "purchased_at_jst": (c["purchased_at"] + timedelta(hours=9)).isoformat() if c["purchased_at"] else None,
+            "race": f'{c["race_date"].date() if c["race_date"] else "?"} {c["venue_name"]} {c["race_number"]}R',
+            "bet": f'{c["bet_type"]} {c["combination"]}',
+            "stake": c["stake"],
+            "result": c["result"],
+            "status": status,
+        })
+
+    if dry_run:
+        return {"dry_run": True, "found": len(cands), "to_insert": len(to_add), "items": report}
+
+    for c in to_add:
+        wp = c["wp"]
+        if wp is not None and float(wp) > 1.0:
+            wp = float(wp) / 100.0
+        exp = None
+        if c["stake"] and wp is not None and c["odds"] is not None:
+            exp = float(c["stake"]) * (float(wp) * float(c["odds"]) - 1.0)
+        res = c["result"] if c["result"] in ("pending", "win", "lose") else "pending"
+        db.add(models.LiveBet(
+            race_id=None,
+            race_date=c["race_date"],
+            venue_name=c["venue_name"],
+            race_number=c["race_number"],
+            bet_type=c["bet_type"],
+            combination=c["combination"],
+            planned_stake=c["ev_stake"],
+            planned_win_prob=wp,
+            planned_odds=c["odds"],
+            planned_ev_pct=c["ev_pct"],
+            planned_expected_profit=exp,
+            vote_status="voted",
+            actual_stake=c["stake"],
+            actual_result=res,
+            actual_payout=float(c["payout"]) if res == "win" else 0.0,
+            memo=f"購入#{c['purchase_id']}",
+            source="manual",
+            created_at=c["purchased_at"] or datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        ))
+    db.commit()
+    return {"dry_run": False, "found": len(cands), "inserted": len(to_add), "items": report}
