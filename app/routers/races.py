@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from datetime import datetime, timedelta
+from typing import Optional
 import time as _time
 
 from ..database import get_db
@@ -1017,23 +1018,96 @@ def replay_settled_one(
 
 
 
+def _parse_race_date_param(value: Optional[str]):
+    """YYYY-MM-DD / YYYY-MM / ISO。失敗時は None。"""
+    if not value or value in ("all", "*", ""):
+        return None
+    try:
+        raw = value.strip().replace("Z", "+00:00")
+        if len(raw) == 7 and raw[4] == "-":
+            return datetime.strptime(raw + "-01", "%Y-%m-%d")
+        if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-":
+            return datetime.strptime(raw[:10], "%Y-%m-%d")
+        dt = datetime.fromisoformat(raw)
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+    except ValueError:
+        return None
+
+
+@router.get("/coverage-by-month")
+def coverage_by_month(db: Session = Depends(get_db)):
+    """月別 Race 充足。1-7月が投票に載らない原因切り分け用。"""
+    from sqlalchemy import exists, or_, func, case
+    from . import purchases as purchases_router
+
+    switch_at = purchases_router.CALIBRATION_SWITCH_AT
+    M = models
+    has_ai = exists().where(
+        (M.Entry.race_id == M.Race.id)
+        & or_(M.Entry.blended_win_prob.isnot(None), M.Entry.ai_win_prob.isnot(None))
+    )
+    has_odds = exists().where((M.Odds.race_id == M.Race.id) & (M.Odds.bet_type == "3連単"))
+    has_purchase = exists().where(M.Purchase.race_id == M.Race.id)
+    has_skipped = exists().where(M.SkippedBet.race_id == M.Race.id)
+    has_purchase_after_switch = exists().where(
+        (M.Purchase.race_id == M.Race.id) & (M.Purchase.purchased_at >= switch_at)
+    )
+    has_skipped_after_switch = exists().where(
+        (M.SkippedBet.race_id == M.Race.id) & (M.SkippedBet.created_at >= switch_at)
+    )
+    month_expr = func.to_char(M.Race.race_date, "YYYY-MM")
+    rows = (
+        db.query(
+            month_expr.label("ym"),
+            func.count(M.Race.id).label("total"),
+            func.sum(case((M.Race.actual_result.isnot(None), 1), else_=0)).label("settled"),
+            func.sum(case((M.Race.actual_result.is_(None), 1), else_=0)).label("unsettled"),
+            func.sum(case((has_ai, 1), else_=0)).label("has_ai"),
+            func.sum(case((has_odds, 1), else_=0)).label("has_trifecta_odds"),
+            func.sum(case((has_purchase, 1), else_=0)).label("has_purchase"),
+            func.sum(case((has_skipped, 1), else_=0)).label("has_skipped"),
+            func.sum(case((
+                (M.Race.actual_result.is_(None)) & has_ai & has_odds & \~has_purchase & \~has_skipped,
+                1,
+            ), else_=0)).label("missing_plan_eligible"),
+            func.sum(case((
+                (M.Race.actual_result.isnot(None)) & has_ai & \~has_purchase_after_switch & \~has_skipped_after_switch,
+                1,
+            ), else_=0)).label("replay_eligible"),
+        )
+        .filter(M.Race.race_date.isnot(None))
+        .group_by(month_expr)
+        .order_by(month_expr.asc())
+        .all()
+    )
+    months = [{
+        "month": r.ym,
+        "total": int(r.total or 0),
+        "settled": int(r.settled or 0),
+        "unsettled": int(r.unsettled or 0),
+        "has_ai": int(r.has_ai or 0),
+        "has_trifecta_odds": int(r.has_trifecta_odds or 0),
+        "has_purchase": int(r.has_purchase or 0),
+        "has_skipped": int(r.has_skipped or 0),
+        "missing_plan_eligible": int(r.missing_plan_eligible or 0),
+        "replay_eligible": int(r.replay_eligible or 0),
+    } for r in rows]
+    return {
+        "calibration_switch_at": switch_at.isoformat() if switch_at else None,
+        "months": months,
+    }
+
+
 @router.get("/replay-settled/targets")
 def replay_settled_targets(
     since: str = None,
+    until: str = None,
     limit: int = 5000,
     after_race_id: int = None,
     exclude_already_replayed: bool = True,
     db: Session = Depends(get_db),
 ):
-    """
-    再投票対象のrace_id一覧（進捗付きクライアント用）。
-
-    exclude_already_replayed=True(既定): そのレースに現行基準
-    (purchases.CALIBRATION_SWITCH_AT)以降のPurchase/SkippedBetが既にあれば
-    「現行ロジックで再投票済み」とみなして自動的に除外する。
-    これにより、after_race_idを手動で覚えて指定しなくても、同じコマンドを
-    繰り返し実行するだけで未処理の旧レースだけが順番に対象になる。
-    """
+    """再投票対象。until で race_date 上限(YYYY-MM / YYYY-MM-DD)を指定可。"""
     from . import purchases as purchases_router
     from sqlalchemy import exists, or_
 
@@ -1042,10 +1116,18 @@ def replay_settled_targets(
         since_out = "all"
     else:
         since_dt = purchases_router._parse_since_param(since)
+        if since_dt is None:
+            since_dt = _parse_race_date_param(since)
         since_out = since
 
-    # Race + Entry をJOINして、勝率のあるsettled raceだけをDB側で抽出。
-    # 旧実装のraceごとのEntry問い合わせ（N+1）を解消する。
+    until_dt = _parse_race_date_param(until)
+    until_exclusive = None
+    if until_dt is not None and until and len(until.strip()) == 7:
+        y, m = until_dt.year, until_dt.month
+        until_exclusive = datetime(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+    elif until_dt is not None:
+        until_exclusive = until_dt + timedelta(days=1)
+
     q = (
         db.query(models.Race.id)
         .filter(models.Race.actual_result.isnot(None))
@@ -1060,18 +1142,12 @@ def replay_settled_targets(
         )
         .order_by(models.Race.id.asc())
     )
-
     if since_dt is not None:
-        q = q.filter(
-            or_(
-                models.Race.race_date >= since_dt,
-                models.Race.race_date.is_(None),
-            )
-        )
-
+        q = q.filter(or_(models.Race.race_date >= since_dt, models.Race.race_date.is_(None)))
+    if until_exclusive is not None:
+        q = q.filter(models.Race.race_date.isnot(None)).filter(models.Race.race_date < until_exclusive)
     if after_race_id is not None:
         q = q.filter(models.Race.id > after_race_id)
-
     if exclude_already_replayed:
         switch_at = purchases_router.CALIBRATION_SWITCH_AT
         already_purchased = (
@@ -1084,15 +1160,14 @@ def replay_settled_targets(
             .filter(models.SkippedBet.race_id == models.Race.id)
             .filter(models.SkippedBet.created_at >= switch_at)
         )
-        q = q.filter(~already_purchased.exists()).filter(~already_skipped.exists())
+        q = q.filter(\~already_purchased.exists()).filter(\~already_skipped.exists())
 
-    # total は limit に依存しない真の残件数。race_ids だけ limit で切る。
     all_ids = [row[0] for row in q.all()]
     total = len(all_ids)
     ids = all_ids[: max(0, int(limit or 0))]
-
     return {
         "since": since_out,
+        "until": until,
         "after_race_id": after_race_id,
         "exclude_already_replayed": exclude_already_replayed,
         "total": total,
@@ -1316,12 +1391,26 @@ def delete_race(race_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/missing-plan/targets")
-def missing_plan_targets(limit: int = 100, include_today: bool = False, db: Session = Depends(get_db)):
-    """投票プラン未作成の「結果未確定・過去日」レース(AI予想・3連単オッズあり)。軽量(列のみ・EXISTS)。
-    当日・未来のレースは既定で対象外(日次運用が扱うため)。"""
+def missing_plan_targets(
+    limit: int = 100,
+    include_today: bool = False,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """投票プラン未作成の未確定・過去日(AI・3連単あり)。date_from/date_to で月指定可。"""
     from sqlalchemy import exists, or_
 
     today = _jst_now_naive().replace(hour=0, minute=0, second=0, microsecond=0)
+    from_dt = _parse_race_date_param(date_from)
+    to_dt = _parse_race_date_param(date_to)
+    to_exclusive = None
+    if to_dt is not None and date_to and len(date_to.strip()) == 7:
+        y, m = to_dt.year, to_dt.month
+        to_exclusive = datetime(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+    elif to_dt is not None:
+        to_exclusive = to_dt + timedelta(days=1)
+
     M = models
     q = (
         db.query(M.Race.id, M.Race.venue_name, M.Race.race_number, M.Race.race_date)
@@ -1331,19 +1420,27 @@ def missing_plan_targets(limit: int = 100, include_today: bool = False, db: Sess
             & or_(M.Entry.blended_win_prob.isnot(None), M.Entry.ai_win_prob.isnot(None))
         ))
         .filter(exists().where((M.Odds.race_id == M.Race.id) & (M.Odds.bet_type == "3連単")))
-        .filter(~exists().where(M.Purchase.race_id == M.Race.id))
-        .filter(~exists().where(M.SkippedBet.race_id == M.Race.id))
+        .filter(\~exists().where(M.Purchase.race_id == M.Race.id))
+        .filter(\~exists().where(M.SkippedBet.race_id == M.Race.id))
     )
     if not include_today:
         q = q.filter(M.Race.race_date.isnot(None)).filter(M.Race.race_date < today)
+    if from_dt is not None:
+        q = q.filter(M.Race.race_date.isnot(None)).filter(M.Race.race_date >= from_dt)
+    if to_exclusive is not None:
+        q = q.filter(M.Race.race_date.isnot(None)).filter(M.Race.race_date < to_exclusive)
     total = q.count()
     rows = q.order_by(M.Race.id.asc()).limit(max(0, min(int(limit or 0), 1000))).all()
     return {
         "total": total,
         "include_today": include_today,
+        "date_from": date_from,
+        "date_to": date_to,
         "races": [
             {"id": rid, "venue_name": v, "race_number": n,
              "race_date": d.strftime("%Y-%m-%d") if d else None}
             for rid, v, n, d in rows
         ],
     }
+
+
