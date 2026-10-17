@@ -5,6 +5,7 @@ race_eval   : レース単位でAIの1着確率と市場(3連単オッズ)の1�
 build_hints : 結果から改善の手がかりを日本語で列挙
 """
 import math
+import random
 
 _EPS = 1e-6
 
@@ -261,4 +262,85 @@ def build_hints(ticket, race):
         add("注意", "AIと市場の比較に使えるレースが50件未満です(結果確定済み・AI予想あり・3連単オッズありのレースが必要)。過去レース収集が進むと精度が上がります。")
     if not h:
         add("注意", "評価できるデータがまだありません。")
+    return h
+
+
+def _roi_group(rows, boots=1000, seed=7):
+    """rows: (cluster, stake, payout, win)。clusterはレース。レース単位ブートストラップでROIの幅を出す。"""
+    n = len(rows)
+    if n == 0:
+        return {"n": 0}
+    stake = sum(r[1] for r in rows)
+    payout = sum(r[2] for r in rows)
+    wins = sorted((r[2] for r in rows if r[3]), reverse=True)
+    out = {
+        "n": n, "wins": len(wins), "stake": round(stake), "payout": round(payout),
+        "roi_pct": round(payout / stake * 100, 1) if stake else None,
+    }
+    for k in (1, 3, 5):
+        if wins and stake:
+            out[f"roi_excl_top{k}_pct"] = round((payout - sum(wins[:k])) / stake * 100, 1)
+    out["top1_share_pct"] = round(wins[0] / payout * 100, 1) if wins and payout else None
+    # レース単位ブートストラップ
+    by = {}
+    for c, st, po, w in rows:
+        a = by.setdefault(c, [0.0, 0.0])
+        a[0] += st
+        a[1] += po
+    cl = list(by.values())
+    if len(cl) >= 20 and stake:
+        rnd = random.Random(seed)
+        m = len(cl)
+        rois = []
+        for _ in range(boots):
+            st = po = 0.0
+            for _ in range(m):
+                a = cl[rnd.randrange(m)]
+                st += a[0]
+                po += a[1]
+            if st > 0:
+                rois.append(po / st * 100)
+        rois.sort()
+        if rois:
+            out["boot_roi_p05"] = round(rois[int(len(rois) * 0.05)], 1)
+            out["boot_roi_p50"] = round(rois[int(len(rois) * 0.50)], 1)
+            out["boot_roi_p95"] = round(rois[min(len(rois) - 1, int(len(rois) * 0.95))], 1)
+            out["boot_p_roi_over_100_pct"] = round(sum(1 for x in rois if x > 100) / len(rois) * 100, 1)
+    return out
+
+
+def roi_report(rows, min_p=0.02, min_odds=125.0):
+    """rows: (cluster, stake, payout, win, timing, p, odds)  timing: live | replay | unknown
+    live=発走前に記録(実運用)、replay=結果確定後の再投票(バックテスト)。"""
+    def sel(f):
+        return [(r[0], r[1], r[2], r[3]) for r in rows if f(r)]
+    cond = lambda r: r[5] is not None and r[6] is not None and r[5] >= min_p and r[6] >= min_odds
+    groups = {
+        "全購入": sel(lambda r: True),
+        "全購入・実運用(発走前)": sel(lambda r: r[4] == "live"),
+        "全購入・再投票(結果確定後)": sel(lambda r: r[4] == "replay"),
+        f"運用条件(予想{min_p*100:g}%以上かつ{min_odds:g}倍以上)": sel(cond),
+        "運用条件・実運用(発走前)": sel(lambda r: cond(r) and r[4] == "live"),
+        "運用条件・再投票(結果確定後)": sel(lambda r: cond(r) and r[4] == "replay"),
+    }
+    return {k: _roi_group(v) for k, v in groups.items()}
+
+
+def roi_hints(rep):
+    h = []
+    live = rep.get("運用条件・実運用(発走前)", {})
+    rpl = rep.get("運用条件・再投票(結果確定後)", {})
+    allc = [v for k, v in rep.items() if k.startswith("運用条件(")]
+    allc = allc[0] if allc else {}
+    if live.get("n", 0) and live.get("wins", 0) < 30:
+        h.append({"level": "注意", "text": f"実運用(発走前)の運用条件は的中{live.get('wins', 0)}件のみで、収益構造の検証には不足です(目安: 的中100件以上)。"})
+    if live.get("roi_pct") is not None and rpl.get("roi_pct") is not None and rpl["roi_pct"] > 2 * max(live["roi_pct"], 1):
+        h.append({"level": "要改善", "text": f"再投票(バックテスト)の回収率{rpl['roi_pct']}%に対し、実運用は{live['roi_pct']}%です。再投票の数字は楽観的で、実運用の根拠にできません。"})
+    if allc.get("boot_roi_p05") is not None:
+        if allc["boot_roi_p05"] < 100:
+            h.append({"level": "注意", "text": f"運用条件の回収率は、レースを入れ替えて再集計すると下側5%点が{allc['boot_roi_p05']}%(100%未満)です。黒字と断定できる水準ではありません(黒字になる確率{allc['boot_p_roi_over_100_pct']}%)。"})
+        else:
+            h.append({"level": "良好", "text": f"運用条件の回収率は、下側5%点でも{allc['boot_roi_p05']}%と100%を超えています(黒字になる確率{allc['boot_p_roi_over_100_pct']}%)。"})
+    if allc.get("roi_excl_top3_pct") is not None and allc["roi_excl_top3_pct"] < 100 <= (allc.get("roi_pct") or 0):
+        h.append({"level": "要改善", "text": f"上位3的中を除くと回収率が{allc['roi_excl_top3_pct']}%に落ちます。利益が少数の超高配当に依存しています。"})
     return h

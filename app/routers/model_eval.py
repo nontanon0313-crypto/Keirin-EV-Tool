@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import exists, func, text as sa_text
 
 from .. import models
-from ..model_eval_calc import build_hints, race_eval, ticket_eval
+from ..model_eval_calc import build_hints, race_eval, roi_hints, roi_report, ticket_eval
 
 router = APIRouter(prefix="/model-eval", tags=["model-eval"])
 
@@ -52,6 +52,29 @@ def _ticket_rows(s, since_dt):
     if since_dt is not None:
         sq = sq.filter(S.created_at >= since_dt)
     rows += [(wp, 1 if res == "win" else 0, 0.0, 0.0, None, ev) for wp, res, ev in sq.all()]
+    return rows
+
+
+def _roi_rows(s, since_dt, tier):
+    """実購入の1件ごと: (cluster, stake, payout, win, timing, p, odds)。timing は購入が発走前(live)か結果確定後(replay)か。"""
+    from datetime import timedelta
+    P, R = models.Purchase, models.Race
+    q = (
+        s.query(P.race_id, P.stake_amount, P.payout_amount, P.result, P.win_prob_at_purchase,
+                P.odds_at_purchase, P.purchased_at, R.post_time, R.race_date)
+        .join(R, R.id == P.race_id)
+        .filter(P.result != "pending", P.stake_amount > 0)
+    )
+    if since_dt is not None:
+        q = q.filter(P.purchased_at >= since_dt)
+    rows = []
+    for rid, st, po, res, wp, od, pat, post, rdate in q.all():
+        ref = post or (rdate + timedelta(days=1) if rdate else None)
+        if pat is None or ref is None:
+            timing = "unknown"
+        else:
+            timing = "live" if (pat + timedelta(hours=9)) < ref else "replay"
+        rows.append(((tier, rid), float(st or 0), float(po or 0), res == "win", timing, wp, od))
     return rows
 
 
@@ -149,7 +172,7 @@ def model_eval_summary(
 
     since_dt = _parse_since_param(since) if since != "all" else None
     t0 = time.time()
-    trows, rrows, used, errors = [], [], [], []
+    trows, rrows, used, errors, roirows = [], [], [], [], []
     for name in _tier_names(tiers):
         s, err = _open_tier(name)
         if s is None:
@@ -159,6 +182,7 @@ def model_eval_summary(
         try:
             tr = _ticket_rows(s, since_dt)
             rr = _race_rows(s, races, prob)
+            roirows += _roi_rows(s, since_dt, name)
             trows += tr
             rrows += rr
             used.append({"name": name, "ticket_rows": len(tr), "race_rows": len(rr)})
@@ -174,7 +198,10 @@ def model_eval_summary(
     t1 = time.time()
     ticket = ticket_eval(trows)
     race = race_eval(rrows)
+    roi = roi_report(roirows)
+    hints = build_hints(ticket, race) + roi_hints(roi)
     out = {
+        "roi_check": roi,
         "tiers_used": [u["name"] for u in used],
         "tiers": used,
         "tier_errors": errors,
@@ -184,8 +211,10 @@ def model_eval_summary(
         "prob_source": prob,
         "ticket": ticket,
         "race": race,
-        "hints": build_hints(ticket, race),
+        "hints": hints,
         "caveats": [
+            "実運用(発走前)=購入の記録時刻が発走時刻より前。再投票(結果確定後)=過去レースを現行ロジックでやり直した分で、閾値をこのデータに合わせて決めた場合は楽観的になります。",
+            "回収率の払戻は『保存済みオッズ×金額』で計算されており、公式の払戻金ではありません(早い時刻のオッズは大穴ほど高く出やすい)。",
             "全DB合算の集計です(系統ごとにrace_idが別番号のため、レースは系統内で評価して合算しています)。",
             "買い目単位は同一レースの複数買い目が相関するため、見かけより有意性が低くなります。",
             "補正係数・混合比率は同じデータで求めた参考値です。反映前に別期間で確認してください。",
