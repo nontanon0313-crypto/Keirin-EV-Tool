@@ -249,3 +249,49 @@ def missing_wins():
         finally:
             s.close()
     return {"tiers": out, "tier_errors": errors}
+
+
+@router.get("/audit-wins")
+def audit_wins(limit: int = 30):
+    """的中(3連単)ごとに、公式オッズと、DBに保存された各オッズ項目を並べる(読み取りのみ)。"""
+    P, R, O = models.Purchase, models.Race, models.Odds
+    out, errors = [], []
+    for name in _tier_names():
+        s, err = _open_tier(name)
+        if s is None:
+            if err != "not_configured":
+                errors.append({"name": name, "message": err})
+            continue
+        try:
+            rows = (
+                s.query(P.id, P.race_id, P.combination, P.stake_amount, P.payout_amount,
+                        P.odds_at_purchase, P.final_odds, R.payout_3t, R.external_ref)
+                .join(R, R.id == P.race_id)
+                .filter(P.result == "win", P.bet_type == "3連単", R.payout_3t.isnot(None))
+                .all()
+            )
+            ids = sorted({r[1] for r in rows})
+            tbl = {}
+            if ids:
+                for rid, comb, val in s.query(O.race_id, O.combination, O.odds_value).filter(
+                    O.race_id.in_(ids), O.bet_type == "3連単"
+                ).all():
+                    tbl[(rid, comb)] = val
+            for pid, rid, comb, stake, pay, oap, fo, off3, ref in rows:
+                off = (off3 or 0) / 100.0
+                tv = tbl.get((rid, comb))
+                out.append({
+                    "tier": name, "race_id": rid, "ref": ref, "combo": comb, "stake": stake,
+                    "official_odds": off, "odds_table": tv, "odds_at_purchase": oap, "final_odds": fo,
+                    "payout_saved": pay,
+                    "ratio_table": round(tv / off, 2) if (tv and off) else None,
+                    "ratio_at_purchase": round(oap / off, 2) if (oap and off) else None,
+                    "ratio_final": round(fo / off, 2) if (fo and off) else None,
+                })
+        except Exception as e:
+            s.rollback()
+            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
+        finally:
+            s.close()
+    out.sort(key=lambda x: -(max(x["ratio_table"] or 0, x["ratio_at_purchase"] or 0, x["ratio_final"] or 0)))
+    return {"n": len(out), "items": out[:max(1, min(limit, 200))], "tier_errors": errors}
