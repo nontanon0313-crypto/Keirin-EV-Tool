@@ -1067,11 +1067,11 @@ def coverage_by_month(db: Session = Depends(get_db)):
             func.sum(case((has_purchase, 1), else_=0)).label("has_purchase"),
             func.sum(case((has_skipped, 1), else_=0)).label("has_skipped"),
             func.sum(case((
-                (M.Race.actual_result.is_(None)) & has_ai & has_odds & \~has_purchase & \~has_skipped,
+                (M.Race.actual_result.is_(None)) & has_ai & has_odds & ~has_purchase & ~has_skipped,
                 1,
             ), else_=0)).label("missing_plan_eligible"),
             func.sum(case((
-                (M.Race.actual_result.isnot(None)) & has_ai & \~has_purchase_after_switch & \~has_skipped_after_switch,
+                (M.Race.actual_result.isnot(None)) & has_ai & ~has_purchase_after_switch & ~has_skipped_after_switch,
                 1,
             ), else_=0)).label("replay_eligible"),
         )
@@ -1160,7 +1160,7 @@ def replay_settled_targets(
             .filter(models.SkippedBet.race_id == models.Race.id)
             .filter(models.SkippedBet.created_at >= switch_at)
         )
-        q = q.filter(\~already_purchased.exists()).filter(\~already_skipped.exists())
+        q = q.filter(~already_purchased.exists()).filter(~already_skipped.exists())
 
     all_ids = [row[0] for row in q.all()]
     total = len(all_ids)
@@ -1420,8 +1420,8 @@ def missing_plan_targets(
             & or_(M.Entry.blended_win_prob.isnot(None), M.Entry.ai_win_prob.isnot(None))
         ))
         .filter(exists().where((M.Odds.race_id == M.Race.id) & (M.Odds.bet_type == "3連単")))
-        .filter(\~exists().where(M.Purchase.race_id == M.Race.id))
-        .filter(\~exists().where(M.SkippedBet.race_id == M.Race.id))
+        .filter(~exists().where(M.Purchase.race_id == M.Race.id))
+        .filter(~exists().where(M.SkippedBet.race_id == M.Race.id))
     )
     if not include_today:
         q = q.filter(M.Race.race_date.isnot(None)).filter(M.Race.race_date < today)
