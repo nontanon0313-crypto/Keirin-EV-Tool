@@ -5635,7 +5635,7 @@ def _compute_stats_all_readable_tiers(since_dt, tiers: str = "all"):
     if forced and forced in dbmod._sessions:
         names = [forced]
     elif tiers == "primary":
-        names = ["primary"]  # 投票・日次の Purchase/Race は Primary のみ(仕様)。全系統合算は ?tiers=all
+        names = ["primary"]  # 調査用(?tiers=primary)。既定は全DB合算(仕様)
 
     for name in names:
         try:
@@ -5694,15 +5694,16 @@ def _schedule_stats_refresh(since: str, since_dt):
 
 
 @router.get("/stats")
-def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_switch", tiers: str = "primary"):
+def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_switch", tiers: str = "all"):
     """
     複数DB合算集計。キャッシュがあれば即返す（期限切れでもSTALE期間は即時+裏更新）。
     """
     import time as _time
 
     since = since or "calibration_switch"
-    tiers = "all" if tiers == "all" else "primary"
-    use_cache = since == "calibration_switch" and tiers == "primary"
+    # 仕様: 検証集計は既定で全DB合算(サンプル件数を減らさないため)。?tiers=primary は調査用。
+    tiers = "primary" if tiers == "primary" else "all"
+    use_cache = since == "calibration_switch" and tiers == "all"
     since_dt = _parse_since_param(since) if since != "all" else None
 
     if use_cache and not refresh:

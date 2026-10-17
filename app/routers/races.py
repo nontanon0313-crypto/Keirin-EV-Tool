@@ -356,24 +356,39 @@ def list_races_for_reanalysis(db: Session = Depends(get_db), limit: int = 100):
     結果確定済み・出走表のみのレースも含め、出走表があるレース全てを対象にする
     (画面から手でコマンドを打たずに再予想できるようにするため、のんの要望により追加)。
     """
+    # 以前は Race を丸ごと読み r.entries / r.odds_list を遅延読込(全オッズ行を転送・N+1)していて、
+    # limit=3000 でタイムアウト/メモリ不足(502/503)になっていた。件数だけをSQLで集計する。
+    from sqlalchemy import func as _func
     races = (
-        db.query(models.Race)
+        db.query(
+            models.Race.id, models.Race.venue_name, models.Race.race_number,
+            models.Race.race_date, models.Race.actual_result,
+        )
         .order_by(models.Race.id.desc())
         .limit(limit)
         .all()
     )
+    ids = [r[0] for r in races]
+    ent = dict(
+        db.query(models.Entry.race_id, _func.count(models.Entry.id))
+        .filter(models.Entry.race_id.in_(ids)).group_by(models.Entry.race_id).all()
+    ) if ids else {}
+    odd = dict(
+        db.query(models.Odds.race_id, _func.count(models.Odds.id))
+        .filter(models.Odds.race_id.in_(ids)).group_by(models.Odds.race_id).all()
+    ) if ids else {}
     return [
         {
-            "id": r.id,
-            "venue_name": r.venue_name,
-            "race_number": r.race_number,
-            "race_date": r.race_date.strftime("%m/%d") if r.race_date else None,
-            "entry_count": len(r.entries),
-            "odds_count": len(r.odds_list),
-            "actual_result": r.actual_result,
+            "id": rid,
+            "venue_name": venue,
+            "race_number": rno,
+            "race_date": rdate.strftime("%m/%d") if rdate else None,
+            "entry_count": int(ent.get(rid, 0)),
+            "odds_count": int(odd.get(rid, 0)),
+            "actual_result": ares,
         }
-        for r in races
-        if len(r.entries) > 0
+        for rid, venue, rno, rdate, ares in races
+        if ent.get(rid, 0) > 0
     ]
 
 
@@ -1012,7 +1027,7 @@ def replay_settled_targets(
     繰り返し実行するだけで未処理の旧レースだけが順番に対象になる。
     """
     from . import purchases as purchases_router
-    from sqlalchemy import or_
+    from sqlalchemy import exists, or_
 
     if since in (None, "", "all", "*"):
         since_dt = None
@@ -1025,15 +1040,16 @@ def replay_settled_targets(
     # 旧実装のraceごとのEntry問い合わせ（N+1）を解消する。
     q = (
         db.query(models.Race.id)
-        .join(models.Entry, models.Entry.race_id == models.Race.id)
         .filter(models.Race.actual_result.isnot(None))
         .filter(
-            or_(
-                models.Entry.blended_win_prob.isnot(None),
-                models.Entry.ai_win_prob.isnot(None),
+            exists().where(
+                (models.Entry.race_id == models.Race.id)
+                & or_(
+                    models.Entry.blended_win_prob.isnot(None),
+                    models.Entry.ai_win_prob.isnot(None),
+                )
             )
         )
-        .distinct()
         .order_by(models.Race.id.asc())
     )
 
@@ -1290,3 +1306,36 @@ def delete_race(race_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"deleted": True, "race_id": race_id}
 
+
+@router.get("/missing-plan/targets")
+def missing_plan_targets(limit: int = 100, include_today: bool = False, db: Session = Depends(get_db)):
+    """投票プラン未作成の「結果未確定・過去日」レース(AI予想・3連単オッズあり)。軽量(列のみ・EXISTS)。
+    当日・未来のレースは既定で対象外(日次運用が扱うため)。"""
+    from sqlalchemy import exists, or_
+
+    today = _jst_now_naive().replace(hour=0, minute=0, second=0, microsecond=0)
+    M = models
+    q = (
+        db.query(M.Race.id, M.Race.venue_name, M.Race.race_number, M.Race.race_date)
+        .filter(M.Race.actual_result.is_(None))
+        .filter(exists().where(
+            (M.Entry.race_id == M.Race.id)
+            & or_(M.Entry.blended_win_prob.isnot(None), M.Entry.ai_win_prob.isnot(None))
+        ))
+        .filter(exists().where((M.Odds.race_id == M.Race.id) & (M.Odds.bet_type == "3連単")))
+        .filter(~exists().where(M.Purchase.race_id == M.Race.id))
+        .filter(~exists().where(M.SkippedBet.race_id == M.Race.id))
+    )
+    if not include_today:
+        q = q.filter(M.Race.race_date.isnot(None)).filter(M.Race.race_date < today)
+    total = q.count()
+    rows = q.order_by(M.Race.id.asc()).limit(max(0, min(int(limit or 0), 1000))).all()
+    return {
+        "total": total,
+        "include_today": include_today,
+        "races": [
+            {"id": rid, "venue_name": v, "race_number": n,
+             "race_date": d.strftime("%Y-%m-%d") if d else None}
+            for rid, v, n, d in rows
+        ],
+    }

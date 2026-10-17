@@ -3782,7 +3782,7 @@ document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
     `<div style="overflow-x:auto;"><table><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr>${rows.join("")}</table></div>`;
 
   function render(d) {
-    let h = `<p><strong>🧪 モデル評価(Primary・${esc(d.since)}以降${d.cache_hit ? "・キャッシュ" : ""})</strong>
+    let h = `<p><strong>🧪 モデル評価(${esc((d.tiers_used || []).join("+") || "全DB合算")}・${esc(d.since)}以降${d.cache_hit ? "・キャッシュ" : ""})</strong>
       <button type="button" id="modelEvalRefreshBtn" style="width:auto;padding:3px 10px;font-size:12px;">最新に更新</button></p>`;
     h += `<p><strong>💡 改善ヒント</strong></p>`;
     for (const x of d.hints || []) {
@@ -3828,7 +3828,7 @@ document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
     } else {
       h += `<p class="note">比較できるレースがありません(結果確定済み・AI予想あり・3連単オッズありが必要)。</p>`;
     }
-    h += `<p class="note" style="margin-top:10px;">${(d.caveats || []).map(esc).join("<br>")}<br>処理時間: 買い目${esc(d.timing_ms && d.timing_ms.tickets)}ms / レース${esc(d.timing_ms && d.timing_ms.races)}ms</p>`;
+    h += `<p class="note" style="margin-top:10px;">${(d.caveats || []).map(esc).join("<br>")}<br>処理時間: ${esc(d.timing_ms && d.timing_ms.total)}ms</p>`;
     box.innerHTML = h;
     const rb = document.getElementById("modelEvalRefreshBtn");
     if (rb) rb.addEventListener("click", () => load(true));

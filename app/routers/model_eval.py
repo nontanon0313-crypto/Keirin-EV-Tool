@@ -93,20 +93,55 @@ def _race_rows(s, n_races: int, prob: str):
     return list(races.values())
 
 
+def _tier_names(tiers: str):
+    from .. import database as dbmod
+    if tiers == "primary":
+        return ["primary"]
+    return list(dbmod._TIER_ORDER)
+
+
+def _open_tier(name: str):
+    """系統の session を開く。使えない系統は None(理由つき)。"""
+    from .. import database as dbmod
+    try:
+        if dbmod._is_quota_blocked(name):
+            return None, "quota_blocked"
+    except Exception:
+        pass
+    try:
+        if not dbmod._ensure_tier(name):
+            return None, "not_configured"
+    except Exception as e:
+        return None, f"{type(e).__name__}"
+    s = dbmod._sessions[name]()
+    try:
+        s.execute(sa_text("SELECT 1"))
+    except Exception as e:
+        try:
+            s.close()
+        except Exception:
+            pass
+        return None, f"{type(e).__name__}"
+    return s, None
+
+
 @router.get("/summary")
 def model_eval_summary(
     since: Optional[str] = "calibration_switch",
     races: int = 800,
     prob: str = "ai",
+    tiers: str = "all",
     refresh: bool = False,
 ):
-    """races: レース単位評価に使う直近レース数(上限3000)。prob: ai | blended"""
+    """仕様: 検証系の集計は既定で全DB合算(サンプル数確保)。tiers=primary は調査用。
+    races: レース単位評価に使う直近レース数(系統ごと・上限3000)。prob: ai | blended"""
     from .purchases import _parse_since_param
 
     races = max(50, min(int(races), 3000))
     prob = "blended" if prob == "blended" else "ai"
+    tiers = "primary" if tiers == "primary" else "all"
     since = since or "calibration_switch"
-    key = (since, races, prob)
+    key = (since, races, prob, tiers)
     now = time.time()
     hit = _CACHE.get(key)
     if hit and not refresh and now - hit[0] < _CACHE_TTL:
@@ -114,34 +149,49 @@ def model_eval_summary(
 
     since_dt = _parse_since_param(since) if since != "all" else None
     t0 = time.time()
-    s = _primary_session()
-    try:
-        trows = _ticket_rows(s, since_dt)
-        t1 = time.time()
-        rrows = _race_rows(s, races, prob)
-        t2 = time.time()
-    finally:
+    trows, rrows, used, errors = [], [], [], []
+    for name in _tier_names(tiers):
+        s, err = _open_tier(name)
+        if s is None:
+            if err != "not_configured":
+                errors.append({"name": name, "message": err})
+            continue
         try:
-            s.close()
-        except Exception:
-            pass
+            tr = _ticket_rows(s, since_dt)
+            rr = _race_rows(s, races, prob)
+            trows += tr
+            rrows += rr
+            used.append({"name": name, "ticket_rows": len(tr), "race_rows": len(rr)})
+        except Exception as e:
+            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:120]}"})
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+    if not used:
+        raise HTTPException(status_code=503, detail=f"読めるDBがありません: {errors}")
+    t1 = time.time()
     ticket = ticket_eval(trows)
     race = race_eval(rrows)
     out = {
-        "tier": "primary",
+        "tiers_used": [u["name"] for u in used],
+        "tiers": used,
+        "tier_errors": errors,
         "since": since,
         "since_resolved": since_dt.isoformat() if since_dt else None,
-        "race_sample": races,
+        "race_sample_per_tier": races,
         "prob_source": prob,
         "ticket": ticket,
         "race": race,
         "hints": build_hints(ticket, race),
         "caveats": [
+            "全DB合算の集計です(系統ごとにrace_idが別番号のため、レースは系統内で評価して合算しています)。",
             "買い目単位は同一レースの複数買い目が相関するため、見かけより有意性が低くなります。",
             "補正係数・混合比率は同じデータで求めた参考値です。反映前に別期間で確認してください。",
-            "市場確率は取得済みの3連単オッズから1着車ごとの1/オッズを合計し正規化した値です(控除率の影響は正規化で除去)。",
+            "市場確率は取得済みの3連単オッズから1着車ごとの1/オッズを合計し正規化した値です。",
         ],
-        "timing_ms": {"tickets": round((t1 - t0) * 1000), "races": round((t2 - t1) * 1000)},
+        "timing_ms": {"total": round((t1 - t0) * 1000)},
         "cache_hit": False,
     }
     _CACHE[key] = (now, out)
@@ -158,19 +208,25 @@ _INDEXES = [
 
 
 @router.post("/ensure-indexes")
-def ensure_indexes():
+def ensure_indexes(tiers: str = "all"):
     """集計を速くするインデックスを作成(既にあれば何もしない)。稼働中でも書き込みを止めない。"""
     from .. import database as dbmod
-    if not dbmod._ensure_tier("primary"):
-        raise HTTPException(status_code=503, detail="primary が未設定です")
-    eng = dbmod._engines["primary"]
     done, errors = [], []
-    for name, table, cols in _INDEXES:
+    for name in _tier_names("primary" if tiers == "primary" else "all"):
         try:
-            with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
-                c.execute(sa_text("SET statement_timeout = 0"))
-                c.execute(sa_text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} ON {table} {cols}"))
-            done.append(name)
-        except Exception as e:
-            errors.append({"index": name, "error": f"{type(e).__name__}: {str(e)[:200]}"})
+            if not dbmod._ensure_tier(name):
+                continue
+        except Exception:
+            continue
+        eng = dbmod._engines.get(name)
+        if eng is None:
+            continue
+        for ix, table, cols in _INDEXES:
+            try:
+                with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
+                    c.execute(sa_text("SET statement_timeout = 0"))
+                    c.execute(sa_text(f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {ix} ON {table} {cols}"))
+                done.append(f"{name}:{ix}")
+            except Exception as e:
+                errors.append({"tier": name, "index": ix, "error": f"{type(e).__name__}: {str(e)[:160]}"})
     return {"ok": not errors, "created_or_existing": done, "errors": errors}

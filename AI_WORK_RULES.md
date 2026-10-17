@@ -12,3 +12,11 @@
 - 推測によるソース修正。
 - 現行ソース未確認で修正コマンドを作ること。
 - ユーザーが求めていない git diff 本文の提示。
+
+## 仕様(固定・変更禁止)
+- 検証系の集計(/purchases/stats、/model-eval/summary)は**全DB合算**が既定。サンプル件数を減らさないため。
+  Primary のみにしたい調査時だけ ?tiers=primary を付ける。既定を変えない。
+- 収益ページに載るのは投票タブ「購入記録」した分だけ(LiveBet = fallback2)。日次スクリプト結果は載せない。
+- 投票・日次の Race / Purchase は Primary。LiveBet.race_id には Primary のIDを保存しない(別ID空間)。
+- 日次運用は当日・未来のレースのみ取得し、3連単のみ取得する。結果取得・結果確認はしない。
+- 過去レースの投票プラン作成は scraper/make_missing_plans.py(同じコマンドで再開可)。
