@@ -1432,7 +1432,9 @@ def calibration_compare(since: Optional[str] = "calibration_switch", db: Session
     } if race_ids else {}
     entries_by_race = {}
     if race_ids:
-        for e in db.query(models.Entry).filter(models.Entry.race_id.in_(race_ids)).all():
+        for e in db.query(
+            models.Entry.race_id, models.Entry.car_number, models.Entry.leg_style, models.Entry.race_score,
+        ).filter(models.Entry.race_id.in_(race_ids)).all():
             entries_by_race.setdefault(e.race_id, []).append(e)
 
     class Rec:
@@ -5616,7 +5618,7 @@ def _merge_tier_stats(tier_results):
     return merged
 
 
-def _compute_stats_all_readable_tiers(since_dt):
+def _compute_stats_all_readable_tiers(since_dt, tiers: str = "all"):
     """読める系統を1つずつ集計してから閉じる（同時オープンによるピークメモリを抑える）。
     X-Keirin-DB-Tier 指定時はその系統のみ（合算しない・省メモリ）。
     """
@@ -5632,8 +5634,14 @@ def _compute_stats_all_readable_tiers(since_dt):
     names = list(dbmod._TIER_ORDER)
     if forced and forced in dbmod._sessions:
         names = [forced]
+    elif tiers == "primary":
+        names = ["primary"]  # 投票・日次の Purchase/Race は Primary のみ(仕様)。全系統合算は ?tiers=all
 
     for name in names:
+        try:
+            dbmod._ensure_tier(name)
+        except Exception:
+            pass
         if name not in dbmod._sessions:
             continue
         if dbmod._is_quota_blocked(name):
@@ -5686,14 +5694,15 @@ def _schedule_stats_refresh(since: str, since_dt):
 
 
 @router.get("/stats")
-def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_switch", db: Session = Depends(get_db)):
+def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_switch", tiers: str = "primary"):
     """
     複数DB合算集計。キャッシュがあれば即返す（期限切れでもSTALE期間は即時+裏更新）。
     """
     import time as _time
 
     since = since or "calibration_switch"
-    use_cache = since == "calibration_switch"
+    tiers = "all" if tiers == "all" else "primary"
+    use_cache = since == "calibration_switch" and tiers == "primary"
     since_dt = _parse_since_param(since) if since != "all" else None
 
     if use_cache and not refresh:
@@ -5717,7 +5726,7 @@ def purchase_stats(refresh: bool = False, since: Optional[str] = "calibration_sw
             "cached_at": _purchase_stats_cache["computed_at"],
         }
 
-    result = _compute_stats_all_readable_tiers(since_dt)
+    result = _compute_stats_all_readable_tiers(since_dt, tiers)
     if "message" not in result:
         result["since"] = since
         result["since_resolved"] = since_dt.isoformat() if since_dt else None
@@ -5945,10 +5954,17 @@ def purchase_history(since: Optional[str] = "calibration_switch", sort: str = "w
 
 
 def _compute_purchase_stats(db: Session, since_dt=None):
+    from sqlalchemy.orm import load_only as _load_only  # [fix5]
     pq = db.query(models.Purchase).filter(models.Purchase.result != "pending")
     if since_dt is not None:
         pq = pq.filter(models.Purchase.purchased_at >= since_dt)
-    purchases_only = pq.all()
+    # 列だけ読む(ORMオブジェクト生成を避けて速く・軽くする)。この関数が参照する列のみ。
+    purchases_only = pq.with_entities(
+        models.Purchase.race_id, models.Purchase.bet_type, models.Purchase.combination,
+        models.Purchase.stake_amount, models.Purchase.payout_amount, models.Purchase.result,
+        models.Purchase.win_prob_at_purchase, models.Purchase.ev_pct_at_purchase,
+        models.Purchase.odds_at_purchase, models.Purchase.final_odds,
+    ).all()
     class _SkippedAsPurchase:
         __slots__ = (
             "race_id", "bet_type", "combination", "stake_amount", "payout_amount",
@@ -5973,7 +5989,11 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     sq = db.query(models.SkippedBet).filter(models.SkippedBet.actual_result.isnot(None))
     if since_dt is not None:
         sq = sq.filter(models.SkippedBet.created_at >= since_dt)
-    skipped_eval = sq.all()
+    skipped_eval = sq.with_entities(
+        models.SkippedBet.race_id, models.SkippedBet.bet_type, models.SkippedBet.combination,
+        models.SkippedBet.actual_result, models.SkippedBet.win_prob_estimated,
+        models.SkippedBet.ev_pct_estimated,
+    ).all()
     purchases = list(purchases_only) + [_SkippedAsPurchase(s) for s in skipped_eval]
     if not purchases:
         pending_n = db.query(models.Purchase).filter(models.Purchase.result == "pending").count()
@@ -6013,7 +6033,13 @@ def _compute_purchase_stats(db: Session, since_dt=None):
     races_by_id = {
         r.id: r
         for r in db.query(models.Race)
-        .options(joinedload(models.Race.bank))
+        .options(
+            _load_only(
+                models.Race.id, models.Race.venue_name, models.Race.grade, models.Race.race_stage,
+                models.Race.season, models.Race.lines_data, models.Race.bank_id,
+            ),
+            joinedload(models.Race.bank),
+        )
         .filter(models.Race.id.in_(race_ids))
         .all()
     }
@@ -6455,13 +6481,13 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         real_purchase_records = [
             p for p in purchases if not getattr(p, "is_skipped_record", False)
         ]
-        race_ids_with_purchase = sorted({p.race_id for p in real_purchase_records})
-        race_level_results = []
-        for rid in race_ids_with_purchase:
-            race_purchases = [p for p in real_purchase_records if p.race_id == rid]
-            race_stake = sum(p.stake_amount for p in race_purchases)
-            race_payout = sum(p.payout_amount for p in race_purchases)
-            race_level_results.append(1 if race_payout >= race_stake else 0)
+        # レース単位の黒字判定。以前はレースごとに購入全件を走査していた(件数の掛け算で遅い)ため1回の集計に変更。
+        _race_sums = {}
+        for p in real_purchase_records:
+            _acc = _race_sums.setdefault(p.race_id, [0.0, 0.0])
+            _acc[0] += p.stake_amount
+            _acc[1] += p.payout_amount
+        race_level_results = [1 if _v[1] >= _v[0] else 0 for _, _v in sorted(_race_sums.items())]
         n_races = len(race_level_results)
         profit_races = sum(race_level_results)
 

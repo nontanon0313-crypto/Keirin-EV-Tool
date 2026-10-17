@@ -2311,7 +2311,7 @@ document.getElementById("loadStatsBtn").addEventListener("click", async () => {
       html += `<p class="note">上の実績・的中率は、下の系統を合算した値です。active だけではありません。</p>`;
       html += `<table><tr><th>系統</th><th>評価件数</th><th>実購入</th><th>的中率</th><th>回収率</th><th>損益</th></tr>`;
       for (const tr of (data.tiers || [])) {
-        html += `<tr><td>\( {tr.name ?? "-"}</td><td> \){tr.total_bets ?? "-"}</td><td>\( {tr.real_purchase_count ?? "-"}</td><td> \){tr.overall_win_rate_pct ?? "-"}\( {tr.overall_win_rate_pct != null ? "%" : ""}</td><td> \){tr.overall_roi_pct ?? "-"}\( {tr.overall_roi_pct != null ? "%" : ""}</td><td> \){tr.overall_profit_total ?? "-"}</td></tr>`;
+        html += `<tr><td>${tr.name ?? "-"}</td><td>${tr.total_bets ?? "-"}</td><td>${tr.real_purchase_count ?? "-"}</td><td>${tr.overall_win_rate_pct ?? "-"}${tr.overall_win_rate_pct != null ? "%" : ""}</td><td>${tr.overall_roi_pct ?? "-"}${tr.overall_roi_pct != null ? "%" : ""}</td><td>${tr.overall_profit_total ?? "-"}</td></tr>`;
       }
       html += `</table>`;
       if (data.tier_errors && data.tier_errors.length) {
@@ -3767,4 +3767,106 @@ document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
   input.addEventListener("input", updatePurchaseStakePreview);
   input.addEventListener("change", updatePurchaseStakePreview);
   updatePurchaseStakePreview();
+})();
+
+// ---------- 🧪 モデル評価・改善ヒント(検証タブ) ----------
+(function () {
+  const btn = document.getElementById("loadModelEvalBtn");
+  const box = document.getElementById("modelEvalResult");
+  if (!btn || !box) return;
+  const esc = (v) => String(v ?? "-").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const pc = (v) => (v == null ? "-" : esc(v) + "%");
+  const levelColor = { "要改善": "#ef4444", "改善案": "#f59e0b", "良好": "#22c55e", "注意": "#eab308", "参考": "#94a3b8" };
+  const verdictColor = { "過大評価": "#ef4444", "過小評価": "#f59e0b", "概ね一致": "#22c55e", "サンプル少": "#94a3b8" };
+  const tbl = (head, rows) =>
+    `<div style="overflow-x:auto;"><table><tr>${head.map((h) => `<th>${h}</th>`).join("")}</tr>${rows.join("")}</table></div>`;
+
+  function render(d) {
+    let h = `<p><strong>🧪 モデル評価(Primary・${esc(d.since)}以降${d.cache_hit ? "・キャッシュ" : ""})</strong>
+      <button type="button" id="modelEvalRefreshBtn" style="width:auto;padding:3px 10px;font-size:12px;">最新に更新</button></p>`;
+    h += `<p><strong>💡 改善ヒント</strong></p>`;
+    for (const x of d.hints || []) {
+      h += `<p style="margin:4px 0;"><span style="color:${levelColor[x.level] || "#94a3b8"};font-weight:bold;">[${esc(x.level)}]</span> ${esc(x.text)}</p>`;
+    }
+    const t = d.ticket || {};
+    if (t.overall) {
+      const o = t.overall;
+      h += `<p style="margin-top:12px;"><strong>① 買い目単位: 予想勝率は当たっているか</strong></p>`;
+      h += `<p class="note">${o.n}件(実購入+見送り評価)・的中${o.wins}件。予想平均${pc(o.mean_pred_pct)} / 実的中${pc(o.hit_pct)} / 実/予想=${esc(o.calibration_ratio)} / Brier=${esc(o.brier)}(定数予想比スキル ${esc(o.brier_skill_vs_const)}) / logloss=${esc(o.logloss)}(定数 ${esc(o.logloss_const)})</p>`;
+      if (t.purchased) {
+        const p = t.purchased;
+        h += `<p class="note">実購入のみ: ${p.n}件 / 的中${p.wins} / 投資${esc(p.stake)}円 / 払戻${esc(p.payout)}円 / 実績回収率${pc(p.roi_pct)}(想定${pc(p.expected_roi_pct)})</p>`;
+      }
+      h += tbl(["予想勝率帯", "件数", "予想", "実績", "実/予想", "95%区間", "判定", "補正係数案", "購入回収率"],
+        (t.by_pred_band || []).map((b) => `<tr><td>${esc(b.band)}</td><td>${b.n}</td><td>${pc(b.mean_pred_pct)}</td><td>${pc(b.hit_pct)}</td><td>${esc(b.ratio)}</td><td>${pc(b.ci95_low_pct)}〜${pc(b.ci95_high_pct)}</td><td style="color:${verdictColor[b.verdict] || "inherit"};">${esc(b.verdict)}</td><td>${esc(b.suggested_factor)}</td><td>${pc(b.roi_pct)}</td></tr>`));
+      if ((t.by_ev_band || []).length) {
+        h += `<p style="margin-top:10px;"><strong>EV帯別(実購入): 想定回収率 vs 実績回収率</strong></p>`;
+        h += tbl(["EV帯", "件数", "的中率", "予想勝率", "想定回収率", "実績回収率"],
+          t.by_ev_band.map((b) => `<tr><td>${esc(b.band)}</td><td>${b.n}</td><td>${pc(b.hit_pct)}</td><td>${pc(b.mean_pred_pct)}</td><td>${pc(b.expected_roi_pct)}</td><td>${pc(b.roi_pct)}</td></tr>`));
+      }
+      if ((t.by_odds_band || []).length) {
+        h += `<p style="margin-top:10px;"><strong>オッズ帯別(実購入)</strong></p>`;
+        h += tbl(["オッズ帯", "件数", "的中率", "予想勝率", "実績回収率"],
+          t.by_odds_band.map((b) => `<tr><td>${esc(b.band)}</td><td>${b.n}</td><td>${pc(b.hit_pct)}</td><td>${pc(b.mean_pred_pct)}</td><td>${pc(b.roi_pct)}</td></tr>`));
+      }
+    }
+    const r = d.race || {};
+    h += `<p style="margin-top:14px;"><strong>② レース単位: AIの1着確率 vs 市場(オッズ)</strong></p>`;
+    if (r.n) {
+      h += tbl(["指標", "AI", "市場(オッズ)"], [
+        `<tr><td>logloss(小さいほど良い)</td><td>${esc(r.logloss_model)}</td><td>${esc(r.logloss_market)}</td></tr>`,
+        `<tr><td>Brier(小さいほど良い)</td><td>${esc(r.brier_model)}</td><td>${esc(r.brier_market)}</td></tr>`,
+        `<tr><td>本命が1着の率</td><td>${pc(r.top1_model_pct)}</td><td>${pc(r.top1_market_pct)}</td></tr>`,
+      ]);
+      h += `<p class="note">対象${r.n}レース(除外${r.skipped})。logloss差(市場−AI)=${esc(r.paired_logloss_gain)}、t値=${esc(r.paired_t)}(+2以上でAIが有意に良い、−2以下で有意に悪い)。最良の混合: AI重み${esc(r.blend_best_alpha)}(logloss ${esc(r.blend_best_logloss)})</p>`;
+      h += tbl(["AI重み", ...(r.blend_grid || []).map((g) => g.alpha)], [
+        `<tr><td>logloss</td>${(r.blend_grid || []).map((g) => `<td>${g.logloss}</td>`).join("")}</tr>`,
+      ]);
+      h += `<p style="margin-top:8px;"><strong>AIの1着確率の当たり具合(車単位)</strong></p>`;
+      h += tbl(["AI確率帯", "件数", "予想", "実績", "95%区間", "判定"],
+        (r.model_calibration || []).map((b) => `<tr><td>${esc(b.band)}</td><td>${b.n}</td><td>${pc(b.mean_pred_pct)}</td><td>${pc(b.hit_pct)}</td><td>${pc(b.ci95_low_pct)}〜${pc(b.ci95_high_pct)}</td><td style="color:${verdictColor[b.verdict] || "inherit"};">${esc(b.verdict)}</td></tr>`));
+    } else {
+      h += `<p class="note">比較できるレースがありません(結果確定済み・AI予想あり・3連単オッズありが必要)。</p>`;
+    }
+    h += `<p class="note" style="margin-top:10px;">${(d.caveats || []).map(esc).join("<br>")}<br>処理時間: 買い目${esc(d.timing_ms && d.timing_ms.tickets)}ms / レース${esc(d.timing_ms && d.timing_ms.races)}ms</p>`;
+    box.innerHTML = h;
+    const rb = document.getElementById("modelEvalRefreshBtn");
+    if (rb) rb.addEventListener("click", () => load(true));
+  }
+
+  async function load(refresh) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    box.style.display = "block";
+    box.textContent = "計算中...(初回はサーバー起動待ちで1分ほどかかることがあります)";
+    try {
+      let data = null, lastErr = null;
+      for (let attempt = 0; attempt < 3 && !data; attempt++) {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 90000);
+        try {
+          const res = await fetch(apiUrl(`/model-eval/summary?since=calibration_switch${refresh ? "&refresh=true" : ""}`), { signal: ctl.signal, cache: "no-store" });
+          if (res.status === 503 || res.status === 502 || res.status === 504) {
+            lastErr = new Error("サーバーが混み合っています(" + res.status + ")");
+            await new Promise((r) => setTimeout(r, 5000));
+            continue;
+          }
+          if (!res.ok) throw new Error("サーバーエラー(" + res.status + ")");
+          data = await res.json();
+        } catch (e) {
+          lastErr = e;
+          if (e.name !== "AbortError") break;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      if (!data) throw lastErr || new Error("取得できませんでした");
+      render(data);
+    } catch (e) {
+      box.textContent = "エラー: " + (e && e.message ? e.message : e);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  btn.addEventListener("click", () => load(false));
 })();
