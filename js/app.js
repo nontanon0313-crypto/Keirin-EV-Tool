@@ -3790,7 +3790,7 @@ document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
     }
     const rc = d.roi_check || {};
     if (Object.keys(rc).length) {
-      h += `<p style="margin-top:12px;"><strong>③ 実運用の収益構造(払戻は保存オッズ基準・公式払戻金ではありません)</strong></p>`;
+      h += `<p style="margin-top:12px;"><strong>③ 実運用の収益構造</strong></p>`;
       h += tbl(["区分", "件数", "的中", "回収率", "上位3的中を除く", "再集計の下側5%", "黒字になる確率", "最大的中の占有"],
         Object.entries(rc).map(([k, v]) => v.n
           ? `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${v.wins}</td><td>${pc(v.roi_pct)}</td><td>${pc(v.roi_excl_top3_pct)}</td><td>${pc(v.boot_roi_p05)}</td><td>${pc(v.boot_p_roi_over_100_pct)}</td><td>${pc(v.top1_share_pct)}</td></tr>`

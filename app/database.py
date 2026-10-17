@@ -664,6 +664,7 @@ def init_db():
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS actual_result VARCHAR(30)",
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS external_ref VARCHAR(100)",
         "ALTER TABLE races ADD COLUMN IF NOT EXISTS post_time TIMESTAMP",
+        "ALTER TABLE races ADD COLUMN IF NOT EXISTS payout_3t FLOAT",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_races_external_ref_unique ON races (external_ref) WHERE external_ref IS NOT NULL",
         "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS win_prob_raw FLOAT",
         "ALTER TABLE skipped_bets ADD COLUMN IF NOT EXISTS win_prob_raw FLOAT",

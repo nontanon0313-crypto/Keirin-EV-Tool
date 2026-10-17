@@ -341,6 +341,10 @@ def import_scraped_race(payload: dict, db: Session = Depends(get_db)):
                 race.actual_result = "-".join(parts)
         except Exception:
             warnings.append("結果の着順データの形式が想定外でした。手動でご確認ください")
+        from ..payout_calc import extract_trifecta_payout
+        _p3 = extract_trifecta_payout(result_payload.get("payouts"))
+        if _p3 is not None:
+            race.payout_3t = _p3  # 公式3連単払戻金(100円あたり)
     else:
         # 当日・未来のレースは結果が空で当然。過去日のレースだけ警告する
         from datetime import timedelta as _td, timezone as _tz
