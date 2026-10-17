@@ -62,6 +62,49 @@ def post(path, **kw):
     return None
 
 
+def fetch_missing_from_site():
+    """的中があるのに公式払戻金が未保存のレースを、結果ページから直接取得して送る。"""
+    sys.path.insert(0, str(HERE))
+    try:
+        from keirin_oddspark_scraper import parse_result
+    except Exception as e:
+        print(f"  結果ページの取得機能を読み込めません: {type(e).__name__}")
+        return
+    try:
+        r = requests.get(f"{API}/payouts/missing-wins", timeout=120)
+        r.raise_for_status()
+        d = r.json()
+    except Exception as e:
+        print(f"  未取得一覧の取得失敗: {type(e).__name__}")
+        return
+    refs, no_ref = [], 0
+    for t in d.get("tiers", []):
+        refs += t.get("refs", [])
+        no_ref += t.get("no_external_ref", 0)
+    refs = sorted(set(refs))
+    print(f"\n的中があるのに公式払戻が未保存: {len(refs)}レース(external_ref無しで取得不能 {no_ref}レース)")
+    got, fail = [], 0
+    for k, ref in enumerate(refs, 1):
+        try:
+            _, jo, day, no = ref.split(":")
+            res = parse_result(jo, day, int(no))
+            pays = [p for p in (res.get("payouts") or []) if p.get("賭式") == "3連単"]
+            y = yen(pays[0].get("払戻金")) if len(pays) == 1 else None
+            if y and y >= 100:
+                got.append({"external_ref": ref, "payout_3t": y})
+            else:
+                fail += 1
+        except Exception as e:
+            fail += 1
+            print(f"  取得失敗 {ref}: {type(e).__name__}")
+        if k % 10 == 0:
+            print(f"  取得 {k}/{len(refs)}")
+        time.sleep(1.0)
+    print(f"  取得できた {len(got)}件 / 失敗 {fail}件")
+    for i in range(0, len(got), CHUNK):
+        post("/payouts/backfill", json={"items": got[i:i + CHUNK]})
+
+
 def main():
     apply = "--apply" in sys.argv
     items, nd, bad = collect()
@@ -78,6 +121,8 @@ def main():
         print(f"  送信 {min(i + CHUNK, len(items))}/{len(items)}")
     for n, (f, u) in upd.items():
         print(f"  {n}: 一致レース{f} / 更新{u}")
+    if "--no-fetch" not in sys.argv:
+        fetch_missing_from_site()
     r = post("/payouts/resettle", params={"dry_run": "false" if apply else "true"})
     if r is None or r.status_code >= 400:
         print(f"  精算確認失敗 {getattr(r, 'status_code', None)} {getattr(r, 'text', '')[:200]}"); return 1

@@ -79,8 +79,14 @@ def _race_ids_for_since(db: Session, since_dt: Optional[datetime]) -> Optional[s
 
 def _load_settled_skips(db: Session, since_dt: Optional[datetime]) -> List[models.SkippedBet]:
     """結果が埋まった見送りのみ（ROI計算用）。購入と同じ race 集合で絞る。"""
+    # 列だけ読む(ORMオブジェクトを数十万件作るとメモリ不足になる)
     q = (
-        db.query(models.SkippedBet)
+        db.query(
+        models.SkippedBet.id, models.SkippedBet.race_id, models.SkippedBet.bet_type,
+        models.SkippedBet.combination, models.SkippedBet.win_prob_estimated, models.SkippedBet.win_prob_raw,
+        models.SkippedBet.ev_pct_estimated, models.SkippedBet.reason, models.SkippedBet.actual_result,
+        models.SkippedBet.actual_payout, models.SkippedBet.created_at,
+    )
         .filter(models.SkippedBet.actual_result.in_(("win", "lose")))
     )
     ids = _race_ids_for_since(db, since_dt)
@@ -93,7 +99,12 @@ def _load_settled_skips(db: Session, since_dt: Optional[datetime]) -> List[model
 
 def _load_all_skips(db: Session, since_dt: Optional[datetime]) -> List[models.SkippedBet]:
     """結果の有無を問わず見送り全件。"""
-    q = db.query(models.SkippedBet)
+    q = db.query(
+        models.SkippedBet.id, models.SkippedBet.race_id, models.SkippedBet.bet_type,
+        models.SkippedBet.combination, models.SkippedBet.win_prob_estimated, models.SkippedBet.win_prob_raw,
+        models.SkippedBet.ev_pct_estimated, models.SkippedBet.reason, models.SkippedBet.actual_result,
+        models.SkippedBet.actual_payout, models.SkippedBet.created_at,
+    )
     ids = _race_ids_for_since(db, since_dt)
     if ids is not None:
         if not ids:
@@ -2163,6 +2174,28 @@ def diagnostics_pick_to_bet_funnel(
     }
 
 
+def _call_endpoint(fn, **kw):
+    """エンドポイント関数を直接呼ぶ。Query()が既定値のままの引数を実際の既定値に解決する
+    (以前は min_ev_pct が Query オブジェクトのまま比較されて TypeError=500 になっていた)。
+    1つ失敗しても全体は返し、各診断の後にメモリを解放する。"""
+    import gc, inspect
+    from fastapi.params import Param
+    args = dict(kw)
+    for name, prm in inspect.signature(fn).parameters.items():
+        if name not in args and isinstance(prm.default, Param):
+            args[name] = prm.default.default
+    try:
+        return fn(**args)
+    except Exception as e:
+        try:
+            kw["db"].rollback()
+        except Exception:
+            pass
+        return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+    finally:
+        gc.collect()
+
+
 @router.get("/summary")
 def diagnostics_summary(
     since: Optional[str] = Query("calibration_switch"),
@@ -2170,21 +2203,21 @@ def diagnostics_summary(
 ):
     """主要診断を1発で返すハブ。"""
     return {
-        "ev_bands": diagnostics_ev_bands(since=since, db=db),
-        "raw_vs_calibrated": diagnostics_raw_vs_calibrated(since=since, db=db),
-        "filter_effectiveness": diagnostics_filter_effectiveness(since=since, db=db),
-        "odds_drift": diagnostics_odds_drift(since=since, db=db),
-        "stage_gate": diagnostics_stage_gate(since=since, db=db),
-        "bet_type_funnel": diagnostics_bet_type_funnel(since=since, db=db),
-        "prob_calibration_grid": diagnostics_prob_calibration_grid(since=since, db=db),
-        "ev_band_detail": diagnostics_ev_band_detail(since=since, db=db),
-        "discarded_hits": diagnostics_discarded_hits(since=since, db=db),
-        "mid_vs_high_ev": diagnostics_mid_vs_high_ev(since=since, db=db),
-        "stage_gate_off_virtual": diagnostics_stage_gate_off_virtual(since=since, db=db),
-        "ev_negative_recheck": diagnostics_ev_negative_recheck(since=since, db=db),
-        "race_plan_design": diagnostics_race_plan_design(),
-        "race_plan_rank_compare": diagnostics_race_plan_rank_compare(since=since, db=db),
-        "winning_capture": diagnostics_winning_capture(since=since, db=db),
+        "ev_bands": _call_endpoint(diagnostics_ev_bands, since=since, db=db),
+        "raw_vs_calibrated": _call_endpoint(diagnostics_raw_vs_calibrated, since=since, db=db),
+        "filter_effectiveness": _call_endpoint(diagnostics_filter_effectiveness, since=since, db=db),
+        "odds_drift": _call_endpoint(diagnostics_odds_drift, since=since, db=db),
+        "stage_gate": _call_endpoint(diagnostics_stage_gate, since=since, db=db),
+        "bet_type_funnel": _call_endpoint(diagnostics_bet_type_funnel, since=since, db=db),
+        "prob_calibration_grid": _call_endpoint(diagnostics_prob_calibration_grid, since=since, db=db),
+        "ev_band_detail": _call_endpoint(diagnostics_ev_band_detail, since=since, db=db),
+        "discarded_hits": _call_endpoint(diagnostics_discarded_hits, since=since, db=db),
+        "mid_vs_high_ev": _call_endpoint(diagnostics_mid_vs_high_ev, since=since, db=db),
+        "stage_gate_off_virtual": _call_endpoint(diagnostics_stage_gate_off_virtual, since=since, db=db),
+        "ev_negative_recheck": _call_endpoint(diagnostics_ev_negative_recheck, since=since, db=db),
+        "race_plan_design": _call_endpoint(diagnostics_race_plan_design, ),
+        "race_plan_rank_compare": _call_endpoint(diagnostics_race_plan_rank_compare, since=since, db=db),
+        "winning_capture": _call_endpoint(diagnostics_winning_capture, since=since, db=db),
         "reuse_note": (
             "過去サンプルの再利用: 既存Race/Entry/Oddsに対して"
             "race-plan再実行→confirm-resultし直せば、Purchase/Skippedを"

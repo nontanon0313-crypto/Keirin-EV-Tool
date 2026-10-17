@@ -217,3 +217,35 @@ def resettle(dry_run: bool = True):
         "tiers": out,
         "tier_errors": errors,
     }
+
+
+@router.get("/missing-wins")
+def missing_wins():
+    """的中(3連単)があるのに公式払戻金が未保存のレースの external_ref 一覧(全DB)。"""
+    P, R = models.Purchase, models.Race
+    out, errors = [], []
+    for name in _tier_names():
+        s, err = _open_tier(name)
+        if s is None:
+            if err != "not_configured":
+                errors.append({"name": name, "message": err})
+            continue
+        try:
+            rows = (
+                s.query(R.id, R.external_ref)
+                .join(P, P.race_id == R.id)
+                .filter(P.result == "win", P.bet_type == "3連単", R.payout_3t.is_(None))
+                .distinct()
+                .all()
+            )
+            out.append({
+                "name": name,
+                "refs": [ref for _, ref in rows if ref],
+                "no_external_ref": sum(1 for _, ref in rows if not ref),
+            })
+        except Exception as e:
+            s.rollback()
+            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
+        finally:
+            s.close()
+    return {"tiers": out, "tier_errors": errors}

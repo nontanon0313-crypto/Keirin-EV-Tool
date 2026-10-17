@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import exists, func, text as sa_text
 
 from .. import models
-from ..model_eval_calc import build_hints, race_eval, roi_hints, roi_report, ticket_eval
+from ..model_eval_calc import TicketAgg, build_hints, race_eval, roi_hints, roi_report
 
 router = APIRouter(prefix="/model-eval", tags=["model-eval"])
 
@@ -34,25 +34,34 @@ def _primary_session():
     return s
 
 
-def _ticket_rows(s, since_dt):
+def _feed_tickets(s, since_dt, agg):
+    """買い目の評価材料を agg に逐次追加する(行を溜めない)。見送りは id キーセットで分割読み。"""
     P, S = models.Purchase, models.SkippedBet
+    before = agg.n
     pq = s.query(
         P.win_prob_at_purchase, P.result, P.stake_amount, P.payout_amount,
         P.odds_at_purchase, P.ev_pct_at_purchase,
     ).filter(P.result != "pending")
     if since_dt is not None:
         pq = pq.filter(P.purchased_at >= since_dt)
-    rows = [
-        (wp, 1 if res == "win" else 0, float(st or 0), float(po or 0), od, ev)
-        for wp, res, st, po, od, ev in pq.all()
-    ]
-    sq = s.query(S.win_prob_estimated, S.actual_result, S.ev_pct_estimated).filter(
-        S.actual_result.isnot(None)
-    )
-    if since_dt is not None:
-        sq = sq.filter(S.created_at >= since_dt)
-    rows += [(wp, 1 if res == "win" else 0, 0.0, 0.0, None, ev) for wp, res, ev in sq.all()]
-    return rows
+    for wp, res, st, po, od, ev in pq.all():
+        agg.add(wp, res == "win", float(st or 0), float(po or 0), od, ev)
+    last = 0
+    while True:
+        sq = s.query(S.id, S.win_prob_estimated, S.actual_result, S.ev_pct_estimated).filter(
+            S.actual_result.isnot(None), S.id > last
+        )
+        if since_dt is not None:
+            sq = sq.filter(S.created_at >= since_dt)
+        rows = sq.order_by(S.id.asc()).limit(20000).all()
+        if not rows:
+            break
+        for sid, wp, res, ev in rows:
+            agg.add(wp, res == "win", 0.0, 0.0, None, ev)
+        last = rows[-1][0]
+        if len(rows) < 20000:
+            break
+    return agg.n - before
 
 
 def _roi_rows(s, since_dt, tier):
@@ -172,7 +181,8 @@ def model_eval_summary(
 
     since_dt = _parse_since_param(since) if since != "all" else None
     t0 = time.time()
-    trows, rrows, used, errors, roirows = [], [], [], [], []
+    agg = TicketAgg()
+    rrows, used, errors, roirows = [], [], [], []
     for name in _tier_names(tiers):
         s, err = _open_tier(name)
         if s is None:
@@ -180,12 +190,11 @@ def model_eval_summary(
                 errors.append({"name": name, "message": err})
             continue
         try:
-            tr = _ticket_rows(s, since_dt)
+            tr = _feed_tickets(s, since_dt, agg)
             rr = _race_rows(s, races, prob)
             roirows += _roi_rows(s, since_dt, name)
-            trows += tr
             rrows += rr
-            used.append({"name": name, "ticket_rows": len(tr), "race_rows": len(rr)})
+            used.append({"name": name, "ticket_rows": tr, "race_rows": len(rr)})
         except Exception as e:
             errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:120]}"})
         finally:
@@ -196,7 +205,7 @@ def model_eval_summary(
     if not used:
         raise HTTPException(status_code=503, detail=f"読めるDBがありません: {errors}")
     t1 = time.time()
-    ticket = ticket_eval(trows)
+    ticket = agg.finalize()
     race = race_eval(rrows)
     roi = roi_report(roirows)
     hints = build_hints(ticket, race) + roi_hints(roi)
@@ -214,7 +223,7 @@ def model_eval_summary(
         "hints": hints,
         "caveats": [
             "実運用(発走前)=購入の記録時刻が発走時刻より前。再投票(結果確定後)=過去レースを現行ロジックでやり直した分で、閾値をこのデータに合わせて決めた場合は楽観的になります。",
-            "払戻は、公式払戻金を保存済みのレースは公式値、未保存のレースは『保存済みオッズ×金額』で精算されています(scraper/backfill_payouts.py で公式値に揃えられます)。",
+            "回収率の払戻は『保存済みオッズ×金額』で計算されており、公式の払戻金ではありません(早い時刻のオッズは大穴ほど高く出やすい)。",
             "全DB合算の集計です(系統ごとにrace_idが別番号のため、レースは系統内で評価して合算しています)。",
             "買い目単位は同一レースの複数買い目が相関するため、見かけより有意性が低くなります。",
             "補正係数・混合比率は同じデータで求めた参考値です。反映前に別期間で確認してください。",

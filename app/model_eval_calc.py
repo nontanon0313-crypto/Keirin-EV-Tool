@@ -40,7 +40,7 @@ ODDS_EDGES = [0.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1e9]
 SHRINK_M = 100  # 補正案の縮約強さ(擬似サンプル数)
 
 
-def ticket_eval(rows):
+def _ticket_eval_rows(rows):
     """rows: iterable of (p, y, stake, payout, odds, ev_pct)。
     p=予想勝率(0-1), y=的中(1/0), stake>0なら実購入。"""
     data = [r for r in rows if r[0] is not None and 0 < r[0] <= 1]
@@ -344,3 +344,87 @@ def roi_hints(rep):
     if allc.get("roi_excl_top3_pct") is not None and allc["roi_excl_top3_pct"] < 100 <= (allc.get("roi_pct") or 0):
         h.append({"level": "要改善", "text": f"上位3的中を除くと回収率が{allc['roi_excl_top3_pct']}%に落ちます。利益が少数の超高配当に依存しています。"})
     return h
+
+
+class TicketAgg:
+    """買い目評価のストリーミング集計。見送り(数十万件)を行リストにせず逐次足し込んでメモリを一定に保つ。
+    実購入(stake>0)だけは少数なので保持し、EV帯・オッズ帯の集計に使う。"""
+
+    def __init__(self):
+        self.n = 0
+        self.wins = 0
+        self.sp = 0.0
+        self.sb = 0.0
+        self.sl = 0.0
+        self.bands = {}
+        self.buy = []
+
+    def add(self, p, y, stake, payout, odds, ev):
+        if p is None or not (0 < p <= 1):
+            return
+        yy = 1 if y else 0
+        self.n += 1
+        self.wins += yy
+        self.sp += p
+        self.sb += (p - yy) ** 2
+        self.sl += -math.log(max(p, _EPS)) if yy else -math.log(max(1 - p, _EPS))
+        b = self.bands.setdefault(_band(P_EDGES, p), [0, 0, 0.0, 0, 0.0, 0.0])
+        b[0] += 1
+        b[1] += yy
+        b[2] += p
+        if (stake or 0) > 0:
+            b[3] += 1
+            b[4] += stake
+            b[5] += (payout or 0)
+            self.buy.append((p, yy, stake, payout, odds, ev))
+
+    def finalize(self):
+        n = self.n
+        if n == 0:
+            return {"n": 0}
+        mean_p = self.sp / n
+        hit = self.wins / n
+        b0 = hit * (1 - hit)
+        ll0 = -(hit * math.log(max(hit, _EPS)) + (1 - hit) * math.log(max(1 - hit, _EPS))) if 0 < hit < 1 else None
+        brier = self.sb / n
+        overall = {
+            "n": n, "wins": self.wins,
+            "mean_pred_pct": round(mean_p * 100, 3), "hit_pct": round(hit * 100, 3),
+            "calibration_ratio": round(hit / mean_p, 3) if mean_p else None,
+            "brier": round(brier, 5),
+            "brier_skill_vs_const": round(1 - brier / b0, 4) if b0 > 0 else None,
+            "logloss": round(self.sl / n, 5), "logloss_const": round(ll0, 5) if ll0 is not None else None,
+        }
+        p_bands = []
+        for i in sorted(self.bands):
+            gn, gw, sp, bn, stake, payout = self.bands[i]
+            gp = sp / gn
+            lo, hi = wilson(gw, gn)
+            if gn < 30:
+                verdict = "サンプル少"
+            elif hi < gp:
+                verdict = "過大評価"
+            elif lo > gp:
+                verdict = "過小評価"
+            else:
+                verdict = "概ね一致"
+            post = (gw + SHRINK_M * gp) / (gn + SHRINK_M)
+            p_bands.append({
+                "band": _label(P_EDGES, i, "%", 100), "n": gn, "wins": gw,
+                "mean_pred_pct": round(gp * 100, 3), "hit_pct": round(gw / gn * 100, 3),
+                "ratio": round((gw / gn) / gp, 3) if gp else None,
+                "ci95_low_pct": round(lo * 100, 3), "ci95_high_pct": round(hi * 100, 3),
+                "verdict": verdict,
+                "suggested_factor": round(post / gp, 3) if (gp and gn >= 30) else None,
+                "buy_n": bn, "roi_pct": round(payout / stake * 100, 1) if stake > 0 else None,
+            })
+        sub = _ticket_eval_rows(self.buy) if self.buy else {}
+        return {"overall": overall, "by_pred_band": p_bands, "purchased": sub.get("purchased"),
+                "by_ev_band": sub.get("by_ev_band", []), "by_odds_band": sub.get("by_odds_band", [])}
+
+
+def ticket_eval(rows):
+    a = TicketAgg()
+    for r in rows:
+        a.add(*r)
+    return a.finalize()
