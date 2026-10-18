@@ -95,11 +95,7 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
                 final_odds = ov
         is_win = calc.judge_purchase_result(p.bet_type, p.combination, parsed_result)
         settlement_odds = final_odds if final_odds is not None else p.odds_at_purchase
-        _official = getattr(race, "payout_3t", None) if p.bet_type == "3連単" else None
-        if is_win and _official:
-            payout = round(p.stake_amount * _official / 100.0)  # 公式払戻金(100円あたり)で精算
-        else:
-            payout = round(p.stake_amount * settlement_odds) if (is_win and settlement_odds) else 0
+        payout = round(p.stake_amount * settlement_odds) if (is_win and settlement_odds) else 0
         result = "win" if is_win else "lose"
         # ORMには触らない（dirtyにすると commit 時に個別UPDATE が再発行される）
         purchase_rows.append((p.id, result, float(payout), final_odds))
@@ -109,7 +105,7 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
             "combination": p.combination,
             "result": result,
             "payout_amount": payout,
-            "payout_is_estimated": final_odds is None and not (is_win and _official),
+            "payout_is_estimated": final_odds is None,
         })
 
     skipped_list = (
@@ -123,9 +119,7 @@ def confirm_race_result(race_id: int, actual_result: str, db: Session = Depends(
         if is_win:
             actual_result_value = "win"
             ov = odds_map.get((s.bet_type, s.combination))
-            if s.bet_type == "3連単" and getattr(race, "payout_3t", None):
-                actual_payout_value = float(round(race.payout_3t))
-            elif ov:
+            if ov:
                 actual_payout_value = float(round(100.0 * ov))
             elif s.win_prob_estimated and s.win_prob_estimated > 0:
                 implied_odds = 1.0 / s.win_prob_estimated
@@ -734,9 +728,7 @@ def backfill_skip_results(payload: dict = None, db: Session = Depends(get_db)):
             s.actual_result = "win" if is_win else "lose"
             if is_win:
                 ov = odds_map.get((s.bet_type, s.combination))
-                if s.bet_type == "3連単" and getattr(race, "payout_3t", None):
-                    s.actual_payout = round(race.payout_3t)
-                elif ov:
+                if ov:
                     s.actual_payout = round(100.0 * ov)
                 elif s.win_prob_estimated and s.ev_pct_estimated is not None and s.win_prob_estimated > 0:
                     implied = (1 + s.ev_pct_estimated / 100) / s.win_prob_estimated

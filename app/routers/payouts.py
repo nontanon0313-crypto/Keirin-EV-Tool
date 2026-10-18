@@ -1,14 +1,13 @@
-"""公式払戻金(3連単)の保存と、既存の的中を公式払戻金で精算し直すAPI(全DB合算・冪等)。
+"""公式3連単払戻金(参考値)まわり。
 
-POST /payouts/backfill   : [{external_ref, payout_3t}] を races.payout_3t に保存
-POST /payouts/resettle   : dry_run=true で影響(回収率の前後)だけ確認 → dry_run=false で反映
+過去の不具合: 払戻一覧の『7番目=3連単』という決め打ちが9件のページで誤っており、その値で的中の払戻を
+上書きしてしまった。/payouts/restore で元(確定オッズ×購入額)へ戻し、誤った公式値を消去する。
 """
-from statistics import median
-
 from fastapi import APIRouter
 from sqlalchemy import func, text as sa_text
 
 from .. import models
+from ..payout_calc import restore_value_purchase, restore_value_skipped
 
 router = APIRouter(prefix="/payouts", tags=["payouts"])
 
@@ -47,8 +46,7 @@ def _tier_names():
     return list(dbmod._TIER_ORDER)
 
 
-def _values_update(s, table, cols_sql, rows, set_sql, chunk=400):
-    """rows: [(id, value)] を VALUES 付きUPDATE 1本/チャンクで書く。"""
+def _values_update(s, table, rows, set_sql, chunk=400):
     n = 0
     for i in range(0, len(rows), chunk):
         part = rows[i:i + chunk]
@@ -64,19 +62,11 @@ def _values_update(s, table, cols_sql, rows, set_sql, chunk=400):
     return n
 
 
-@router.post("/backfill")
-def backfill_payouts(payload: dict):
-    items = payload.get("items") or []
-    want = {}
-    for it in items:
-        ref = str(it.get("external_ref") or "")
-        try:
-            v = float(it.get("payout_3t"))
-        except (TypeError, ValueError):
-            continue
-        if ref and v >= 100:
-            want[ref] = v
-    refs = list(want)
+@router.post("/restore")
+def restore(dry_run: bool = True):
+    """誤った公式払戻金で書き換えられた購入・見送りの払戻を元へ戻し、races.payout_3t を消去する(全DB)。
+    dry_run=true は件数と回収率の前後だけ返す。冪等(2回実行しても同じ)。"""
+    P, R, S, O = models.Purchase, models.Race, models.SkippedBet, models.Odds
     out, errors = [], []
     for name in _tier_names():
         s, err = _open_tier(name)
@@ -85,116 +75,58 @@ def backfill_payouts(payload: dict):
                 errors.append({"name": name, "message": err})
             continue
         try:
-            found = updated = 0
-            todo = []
-            for i in range(0, len(refs), 500):
-                chunk = refs[i:i + 500]
-                for rid, ref, cur in (
-                    s.query(models.Race.id, models.Race.external_ref, models.Race.payout_3t)
-                    .filter(models.Race.external_ref.in_(chunk)).all()
-                ):
-                    found += 1
-                    if cur is None or abs(cur - want[ref]) > 0.5:
-                        todo.append((rid, want[ref]))
-            if todo:
-                updated = _values_update(s, "races", "", todo, "payout_3t = v.val")
+            stake_all = s.query(func.coalesce(func.sum(P.stake_amount), 0.0)).filter(
+                P.result != "pending", P.stake_amount > 0).scalar() or 0.0
+            pay_all = s.query(func.coalesce(func.sum(P.payout_amount), 0.0)).filter(
+                P.result != "pending", P.stake_amount > 0).scalar() or 0.0
+            pfix, delta = [], 0.0
+            for pid, st, cur, fo, oap, off in (
+                s.query(P.id, P.stake_amount, P.payout_amount, P.final_odds, P.odds_at_purchase, R.payout_3t)
+                .join(R, R.id == P.race_id)
+                .filter(P.result == "win", P.bet_type == "3連単", R.payout_3t.isnot(None))
+                .all()
+            ):
+                new = restore_value_purchase(st, cur, fo, oap, off)
+                if new is not None:
+                    pfix.append((pid, new))
+                    delta += new - float(cur or 0)
+            sk_rows = (
+                s.query(S.id, S.race_id, S.combination, S.actual_payout, R.payout_3t)
+                .join(R, R.id == S.race_id)
+                .filter(S.actual_result == "win", S.bet_type == "3連単", R.payout_3t.isnot(None))
+                .all()
+            )
+            sfix = []
+            if sk_rows:
+                rids = sorted({r[1] for r in sk_rows})
+                odds = {}
+                for i in range(0, len(rids), 500):
+                    for rid, comb, val in s.query(O.race_id, O.combination, O.odds_value).filter(
+                        O.race_id.in_(rids[i:i + 500]), O.bet_type == "3連単"
+                    ).all():
+                        odds[(rid, comb)] = val
+                for sid, rid, comb, cur, off in sk_rows:
+                    new = restore_value_skipped(cur, odds.get((rid, comb)), off)
+                    if new is not None:
+                        sfix.append((sid, new))
+            n_official = s.query(func.count(R.id)).filter(R.payout_3t.isnot(None)).scalar() or 0
+            rep = {
+                "name": name,
+                "purchases_to_restore": len(pfix),
+                "skipped_to_restore": len(sfix),
+                "races_with_official_to_clear": int(n_official),
+                "roi_before_pct": round(pay_all / stake_all * 100, 1) if stake_all else None,
+                "roi_after_pct": round((pay_all + delta) / stake_all * 100, 1) if stake_all else None,
+            }
+            if not dry_run:
+                if pfix:
+                    _values_update(s, "purchases", pfix, "payout_amount = v.val")
+                if sfix:
+                    _values_update(s, "skipped_bets", sfix, "actual_payout = v.val")
+                s.execute(sa_text("UPDATE races SET payout_3t = NULL WHERE payout_3t IS NOT NULL"))
                 s.commit()
-            out.append({"name": name, "races_found": found, "updated": updated})
-        except Exception as e:
-            s.rollback()
-            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
-        finally:
-            s.close()
-    return {"received": len(want), "tiers": out, "tier_errors": errors}
-
-
-def _resettle_tier(s, apply: bool):
-    P, R, S = models.Purchase, models.Race, models.SkippedBet
-    wins = (
-        s.query(P.id, P.race_id, P.stake_amount, P.payout_amount, R.payout_3t)
-        .join(R, R.id == P.race_id)
-        .filter(P.result == "win", P.bet_type == "3連単", R.payout_3t.isnot(None))
-        .all()
-    )
-    n_win_all = (
-        s.query(func.count(P.id)).filter(P.result == "win", P.bet_type == "3連単").scalar() or 0
-    )
-    stake_all = (
-        s.query(func.coalesce(func.sum(P.stake_amount), 0.0))
-        .filter(P.result != "pending", P.stake_amount > 0).scalar() or 0.0
-    )
-    pay_all = (
-        s.query(func.coalesce(func.sum(P.payout_amount), 0.0))
-        .filter(P.result != "pending", P.stake_amount > 0).scalar() or 0.0
-    )
-    old = new = 0.0
-    upd, ratios, worst = [], [], []
-    for pid, rid, st, po, off in wins:
-        newp = round(float(st or 0) * float(off) / 100.0)
-        old += float(po or 0)
-        new += newp
-        upd.append((pid, newp))
-        if newp > 0:
-            ratios.append(float(po or 0) / newp)
-        worst.append((float(po or 0) - newp, rid, float(st or 0), float(po or 0), newp))
-    worst.sort(reverse=True)
-    pay_after = pay_all - old + new
-    rep = {
-        "wins_total": int(n_win_all),
-        "wins_with_official": len(wins),
-        "coverage_pct": round(len(wins) / n_win_all * 100, 1) if n_win_all else None,
-        "stake_total": round(stake_all),
-        "payout_before": round(pay_all),
-        "payout_after": round(pay_after),
-        "roi_before_pct": round(pay_all / stake_all * 100, 1) if stake_all else None,
-        "roi_after_pct": round(pay_after / stake_all * 100, 1) if stake_all else None,
-        "stored_over_official_ratio": (
-            {
-                "median": round(median(ratios), 3),
-                "p10": round(sorted(ratios)[int(len(ratios) * 0.10)], 3),
-                "p90": round(sorted(ratios)[min(len(ratios) - 1, int(len(ratios) * 0.90))], 3),
-                "share_over_1_2_pct": round(sum(1 for r in ratios if r > 1.2) / len(ratios) * 100, 1),
-            } if ratios else None
-        ),
-        "biggest_overstatements": [
-            {"race_id": r, "stake": st, "stored_payout": po, "official_payout": npay}
-            for _, r, st, po, npay in worst[:5]
-        ],
-    }
-    if apply and upd:
-        _values_update(s, "purchases", "", upd, "payout_amount = v.val")
-        sk = (
-            s.query(S.id, R.payout_3t)
-            .join(R, R.id == S.race_id)
-            .filter(S.actual_result == "win", S.bet_type == "3連単", R.payout_3t.isnot(None))
-            .all()
-        )
-        if sk:
-            _values_update(s, "skipped_bets", "", [(i, round(o)) for i, o in sk], "actual_payout = v.val")
-        s.commit()
-        rep["applied"] = True
-    return rep
-
-
-@router.post("/resettle")
-def resettle(dry_run: bool = True):
-    out, errors = [], []
-    tot = {"stake": 0.0, "before": 0.0, "after": 0.0, "wins": 0, "wins_official": 0}
-    for name in _tier_names():
-        s, err = _open_tier(name)
-        if s is None:
-            if err != "not_configured":
-                errors.append({"name": name, "message": err})
-            continue
-        try:
-            rep = _resettle_tier(s, apply=not dry_run)
-            rep["name"] = name
+                rep["applied"] = True
             out.append(rep)
-            tot["stake"] += rep["stake_total"]
-            tot["before"] += rep["payout_before"]
-            tot["after"] += rep["payout_after"]
-            tot["wins"] += rep["wins_total"]
-            tot["wins_official"] += rep["wins_with_official"]
         except Exception as e:
             s.rollback()
             errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
@@ -206,92 +138,4 @@ def resettle(dry_run: bool = True):
             pr._purchase_stats_cache["value"] = None
         except Exception:
             pass
-    return {
-        "dry_run": dry_run,
-        "total": {
-            "stake": round(tot["stake"]), "payout_before": round(tot["before"]), "payout_after": round(tot["after"]),
-            "roi_before_pct": round(tot["before"] / tot["stake"] * 100, 1) if tot["stake"] else None,
-            "roi_after_pct": round(tot["after"] / tot["stake"] * 100, 1) if tot["stake"] else None,
-            "wins": tot["wins"], "wins_with_official": tot["wins_official"],
-        },
-        "tiers": out,
-        "tier_errors": errors,
-    }
-
-
-@router.get("/missing-wins")
-def missing_wins():
-    """的中(3連単)があるのに公式払戻金が未保存のレースの external_ref 一覧(全DB)。"""
-    P, R = models.Purchase, models.Race
-    out, errors = [], []
-    for name in _tier_names():
-        s, err = _open_tier(name)
-        if s is None:
-            if err != "not_configured":
-                errors.append({"name": name, "message": err})
-            continue
-        try:
-            rows = (
-                s.query(R.id, R.external_ref)
-                .join(P, P.race_id == R.id)
-                .filter(P.result == "win", P.bet_type == "3連単", R.payout_3t.is_(None))
-                .distinct()
-                .all()
-            )
-            out.append({
-                "name": name,
-                "refs": [ref for _, ref in rows if ref],
-                "no_external_ref": sum(1 for _, ref in rows if not ref),
-            })
-        except Exception as e:
-            s.rollback()
-            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
-        finally:
-            s.close()
-    return {"tiers": out, "tier_errors": errors}
-
-
-@router.get("/audit-wins")
-def audit_wins(limit: int = 30):
-    """的中(3連単)ごとに、公式オッズと、DBに保存された各オッズ項目を並べる(読み取りのみ)。"""
-    P, R, O = models.Purchase, models.Race, models.Odds
-    out, errors = [], []
-    for name in _tier_names():
-        s, err = _open_tier(name)
-        if s is None:
-            if err != "not_configured":
-                errors.append({"name": name, "message": err})
-            continue
-        try:
-            rows = (
-                s.query(P.id, P.race_id, P.combination, P.stake_amount, P.payout_amount,
-                        P.odds_at_purchase, P.final_odds, R.payout_3t, R.external_ref)
-                .join(R, R.id == P.race_id)
-                .filter(P.result == "win", P.bet_type == "3連単", R.payout_3t.isnot(None))
-                .all()
-            )
-            ids = sorted({r[1] for r in rows})
-            tbl = {}
-            if ids:
-                for rid, comb, val in s.query(O.race_id, O.combination, O.odds_value).filter(
-                    O.race_id.in_(ids), O.bet_type == "3連単"
-                ).all():
-                    tbl[(rid, comb)] = val
-            for pid, rid, comb, stake, pay, oap, fo, off3, ref in rows:
-                off = (off3 or 0) / 100.0
-                tv = tbl.get((rid, comb))
-                out.append({
-                    "tier": name, "race_id": rid, "ref": ref, "combo": comb, "stake": stake,
-                    "official_odds": off, "odds_table": tv, "odds_at_purchase": oap, "final_odds": fo,
-                    "payout_saved": pay,
-                    "ratio_table": round(tv / off, 2) if (tv and off) else None,
-                    "ratio_at_purchase": round(oap / off, 2) if (oap and off) else None,
-                    "ratio_final": round(fo / off, 2) if (fo and off) else None,
-                })
-        except Exception as e:
-            s.rollback()
-            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
-        finally:
-            s.close()
-    out.sort(key=lambda x: -(max(x["ratio_table"] or 0, x["ratio_at_purchase"] or 0, x["ratio_final"] or 0)))
-    return {"n": len(out), "items": out[:max(1, min(limit, 200))], "tier_errors": errors}
+    return {"dry_run": dry_run, "tiers": out, "tier_errors": errors}
