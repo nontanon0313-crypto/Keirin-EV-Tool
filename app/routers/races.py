@@ -1382,6 +1382,62 @@ def delete_race(race_id: int, db: Session = Depends(get_db)):
     return {"deleted": True, "race_id": race_id}
 
 
+
+@router.get("/missing-ai/targets")
+def missing_ai_targets(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+    after_race_id: int = None,
+    db: Session = Depends(get_db),
+):
+    """AI勝率(ai/blended)が無いレース。date_from/date_to は YYYY-MM 可。"""
+    from sqlalchemy import exists, or_
+
+    from_dt = _parse_race_date_param(date_from)
+    to_dt = _parse_race_date_param(date_to)
+    to_exclusive = None
+    if to_dt is not None and date_to and len(date_to.strip()) == 7:
+        y, m = to_dt.year, to_dt.month
+        to_exclusive = datetime(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+    elif to_dt is not None:
+        to_exclusive = to_dt + timedelta(days=1)
+
+    M = models
+    has_ai = exists().where(
+        (M.Entry.race_id == M.Race.id)
+        & or_(M.Entry.blended_win_prob.isnot(None), M.Entry.ai_win_prob.isnot(None))
+    )
+    q = (
+        db.query(M.Race.id, M.Race.venue_name, M.Race.race_number, M.Race.race_date)
+        .filter(\~has_ai)
+        .filter(exists().where(M.Entry.race_id == M.Race.id))
+    )
+    if from_dt is not None:
+        q = q.filter(M.Race.race_date.isnot(None)).filter(M.Race.race_date >= from_dt)
+    if to_exclusive is not None:
+        q = q.filter(M.Race.race_date.isnot(None)).filter(M.Race.race_date < to_exclusive)
+    if after_race_id is not None:
+        q = q.filter(M.Race.id > after_race_id)
+    total = q.count()
+    rows = q.order_by(M.Race.id.asc()).limit(max(0, min(int(limit or 0), 2000))).all()
+    return {
+        "total": total,
+        "date_from": date_from,
+        "date_to": date_to,
+        "after_race_id": after_race_id,
+        "races": [
+            {
+                "id": rid,
+                "venue_name": v,
+                "race_number": n,
+                "race_date": d.strftime("%Y-%m-%d") if d else None,
+            }
+            for rid, v, n, d in rows
+        ],
+    }
+
+
 @router.get("/missing-plan/targets")
 def missing_plan_targets(
     limit: int = 100,
