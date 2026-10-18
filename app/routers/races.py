@@ -1392,7 +1392,7 @@ def missing_ai_targets(
     db: Session = Depends(get_db),
 ):
     """AI勝率(ai/blended)が無いレース。date_from/date_to は YYYY-MM 可。"""
-    from sqlalchemy import exists, or_
+    from sqlalchemy import exists, or_, not_
 
     from_dt = _parse_race_date_param(date_from)
     to_dt = _parse_race_date_param(date_to)
@@ -1410,7 +1410,7 @@ def missing_ai_targets(
     )
     q = (
         db.query(M.Race.id, M.Race.venue_name, M.Race.race_number, M.Race.race_date)
-        .filter(\~has_ai)
+        .filter(not_(has_ai))
         .filter(exists().where(M.Entry.race_id == M.Race.id))
     )
     if from_dt is not None:
