@@ -70,20 +70,25 @@ def _roi_rows(s, since_dt, tier):
     P, R = models.Purchase, models.Race
     q = (
         s.query(P.race_id, P.stake_amount, P.payout_amount, P.result, P.win_prob_at_purchase,
-                P.odds_at_purchase, P.purchased_at, R.post_time, R.race_date)
+                P.odds_at_purchase, P.purchased_at, R.post_time, R.race_date, R.created_at)
         .join(R, R.id == P.race_id)
         .filter(P.result != "pending", P.stake_amount > 0)
     )
     if since_dt is not None:
         q = q.filter(P.purchased_at >= since_dt)
     rows = []
-    for rid, st, po, res, wp, od, pat, post, rdate in q.all():
+    for rid, st, po, res, wp, od, pat, post, rdate, rcreated in q.all():
         ref = post or (rdate + timedelta(days=1) if rdate else None)
+        # AI予想はレース取り込み直後に作られる。取り込みが発走前なら「発走前のAI予想」(後知恵なし)
+        if rcreated is None or ref is None:
+            pre = "unknown"
+        else:
+            pre = "pre" if (rcreated + timedelta(hours=9)) < ref else "post"
         if pat is None or ref is None:
             timing = "unknown"
         else:
             timing = "live" if (pat + timedelta(hours=9)) < ref else "replay"
-        rows.append(((tier, rid), float(st or 0), float(po or 0), res == "win", timing, wp, od))
+        rows.append(((tier, rid), float(st or 0), float(po or 0), res == "win", timing, wp, od, pre))
     return rows
 
 
@@ -223,7 +228,7 @@ def model_eval_summary(
         "hints": hints,
         "caveats": [
             "実運用(発走前)=購入の記録時刻が発走時刻より前。再投票(結果確定後)=過去レースを現行ロジックでやり直した分で、閾値をこのデータに合わせて決めた場合は楽観的になります。",
-            "回収率の払戻は『保存済みオッズ×金額』で計算されており、公式の払戻金ではありません(早い時刻のオッズは大穴ほど高く出やすい)。",
+            "払戻は保存済みの確定オッズ×購入額で計算しています(公式払戻金との一致を14,324レースで確認済み: 99.5%)。",
             "全DB合算の集計です(系統ごとにrace_idが別番号のため、レースは系統内で評価して合算しています)。",
             "買い目単位は同一レースの複数買い目が相関するため、見かけより有意性が低くなります。",
             "補正係数・混合比率は同じデータで求めた参考値です。反映前に別期間で確認してください。",

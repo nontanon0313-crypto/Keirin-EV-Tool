@@ -281,9 +281,14 @@ def _roi_group(rows, boots=1000, seed=7):
         if wins and stake:
             out[f"roi_excl_top{k}_pct"] = round((payout - sum(wins[:k])) / stake * 100, 1)
     out["top1_share_pct"] = round(wins[0] / payout * 100, 1) if wins and payout else None
+    # 市場が正しい(控除率25%)場合の期待的中数 = Σ 0.75/オッズ。実際の的中がこの何倍かを見る
+    exp_hits = sum(0.75 / r[4] for r in rows if len(r) > 4 and r[4])
+    if exp_hits > 0:
+        out["market_expected_hits"] = round(exp_hits, 1)
+        out["hits_vs_market_x"] = round(len(wins) / exp_hits, 1)
     # レース単位ブートストラップ
     by = {}
-    for c, st, po, w in rows:
+    for c, st, po, w, *_ in rows:
         a = by.setdefault(c, [0.0, 0.0])
         a[0] += st
         a[1] += po
@@ -313,7 +318,7 @@ def roi_report(rows, min_p=0.02, min_odds=125.0):
     """rows: (cluster, stake, payout, win, timing, p, odds)  timing: live | replay | unknown
     live=発走前に記録(実運用)、replay=結果確定後の再投票(バックテスト)。"""
     def sel(f):
-        return [(r[0], r[1], r[2], r[3]) for r in rows if f(r)]
+        return [(r[0], r[1], r[2], r[3], r[6]) for r in rows if f(r)]
     cond = lambda r: r[5] is not None and r[6] is not None and r[5] >= min_p and r[6] >= min_odds
     groups = {
         "全購入": sel(lambda r: True),
@@ -322,6 +327,8 @@ def roi_report(rows, min_p=0.02, min_odds=125.0):
         f"運用条件(予想{min_p*100:g}%以上かつ{min_odds:g}倍以上)": sel(cond),
         "運用条件・実運用(発走前)": sel(lambda r: cond(r) and r[4] == "live"),
         "運用条件・再投票(結果確定後)": sel(lambda r: cond(r) and r[4] == "replay"),
+        "運用条件・AI予想が発走前のレース": sel(lambda r: cond(r) and len(r) > 7 and r[7] == "pre"),
+        "運用条件・AI予想が発走後のレース": sel(lambda r: cond(r) and len(r) > 7 and r[7] == "post"),
     }
     return {k: _roi_group(v) for k, v in groups.items()}
 
@@ -341,8 +348,23 @@ def roi_hints(rep):
             h.append({"level": "注意", "text": f"運用条件の回収率は、レースを入れ替えて再集計すると下側5%点が{allc['boot_roi_p05']}%(100%未満)です。黒字と断定できる水準ではありません(黒字になる確率{allc['boot_p_roi_over_100_pct']}%)。"})
         else:
             h.append({"level": "良好", "text": f"運用条件の回収率は、下側5%点でも{allc['boot_roi_p05']}%と100%を超えています(黒字になる確率{allc['boot_p_roi_over_100_pct']}%)。"})
+    x = allc.get("hits_vs_market_x")
+    if x is not None and x >= 3:
+        h.append({"level": "要改善", "text": f"運用条件の的中は{allc['wins']}件で、市場が正しい場合の期待({allc.get('market_expected_hits')}件)の{x}倍です。これほどの差は、本当の優位性か、データ・ロジックの不備(結果を知った後の情報の混入など)のどちらかで、AIが1着確率で市場に負けている事実とも整合しません。原因の特定が先です。"})
+    pre = rep.get("運用条件・AI予想が発走前のレース", {})
+    post = rep.get("運用条件・AI予想が発走後のレース", {})
+    if pre.get("n", 0) >= 100 and post.get("n", 0) >= 100:
+        if pre.get("hits_vs_market_x") is not None and post.get("hits_vs_market_x") is not None:
+            h.append({"level": "参考", "text": f"AI予想が発走前のレース: 市場期待の{pre['hits_vs_market_x']}倍(回収率{pre.get('roi_pct')}%、{pre['n']}件)/ 発走後のレース: {post['hits_vs_market_x']}倍(回収率{post.get('roi_pct')}%、{post['n']}件)。後者だけが突出していれば、結果を知った後の情報が混入した疑いがあります。"})
+    elif pre.get("n", 0) < 100:
+        h.append({"level": "注意", "text": f"AI予想が発走前だったレースの運用条件の購入は{pre.get('n', 0)}件のみで、発走前と発走後の比較はまだできません。"})
     if allc.get("roi_excl_top3_pct") is not None and allc["roi_excl_top3_pct"] < 100 <= (allc.get("roi_pct") or 0):
         h.append({"level": "要改善", "text": f"上位3的中を除くと回収率が{allc['roi_excl_top3_pct']}%に落ちます。利益が少数の超高配当に依存しています。"})
+    if x is not None and x >= 3:
+        for it in h:
+            if it["text"].startswith("運用条件の回収率は、下側5%点でも"):
+                it["level"] = "参考"
+                it["text"] += "※市場期待を大きく超えているため、原因の確認が済むまでこの数字は信用しないでください。"
     return h
 
 

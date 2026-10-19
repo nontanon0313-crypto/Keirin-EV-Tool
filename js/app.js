@@ -3791,9 +3791,9 @@ document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
     const rc = d.roi_check || {};
     if (Object.keys(rc).length) {
       h += `<p style="margin-top:12px;"><strong>③ 実運用の収益構造</strong></p>`;
-      h += tbl(["区分", "件数", "的中", "回収率", "上位3的中を除く", "再集計の下側5%", "黒字になる確率", "最大的中の占有"],
+      h += tbl(["区分", "件数", "的中", "回収率", "上位3的中を除く", "再集計の下側5%", "黒字になる確率", "最大的中の占有", "市場期待の的中数", "実的中/期待"],
         Object.entries(rc).map(([k, v]) => v.n
-          ? `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${v.wins}</td><td>${pc(v.roi_pct)}</td><td>${pc(v.roi_excl_top3_pct)}</td><td>${pc(v.boot_roi_p05)}</td><td>${pc(v.boot_p_roi_over_100_pct)}</td><td>${pc(v.top1_share_pct)}</td></tr>`
+          ? `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${v.wins}</td><td>${pc(v.roi_pct)}</td><td>${pc(v.roi_excl_top3_pct)}</td><td>${pc(v.boot_roi_p05)}</td><td>${pc(v.boot_p_roi_over_100_pct)}</td><td>${pc(v.top1_share_pct)}</td><td>${esc(v.market_expected_hits)}</td><td>${v.hits_vs_market_x == null ? "-" : esc(v.hits_vs_market_x) + "倍"}</td></tr>`
           : `<tr><td>${esc(k)}</td><td>0</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td></tr>`));
     }
     const t = d.ticket || {};
