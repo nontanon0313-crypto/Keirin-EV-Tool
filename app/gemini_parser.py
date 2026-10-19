@@ -19,114 +19,114 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# gemini-2.0-flash(2026/6廃止)→gemini-2.5-flash(新規ユーザー利用不可)と立て続けに使えなくなったため、
-# 2026年8月時点で新規ユーザーも無料枠で使える正式版モデルに変更。
-# 無料枠: 30 RPM / 1500 RPD、課金不要、画像入力対応(2026年8月確認)
-MODEL_NAME = "gemini-3.1-flash-lite"
+# 複数モデルをローテーション。無料枠(RPD/RPM)はモデル系統ごとに別枠のことが多い。
+# 環境変数 GEMINI_MODEL_POOL=model1,model2 で上書き可。
+_DEFAULT_POOL = [
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
+    "gemini-2.0-flash-lite",
+]
+_env_pool = (os.environ.get("GEMINI_MODEL_POOL") or "").strip()
+MODEL_CANDIDATES = [x.strip() for x in _env_pool.split(",") if x.strip()] or list(_DEFAULT_POOL)
+MODEL_NAME = MODEL_CANDIDATES[0]  # 互換: 既定の先頭
 
-# 無料枠のレート制限(1分あたりのリクエスト数)に達した場合の自動リトライ設定
-MAX_RETRIES = 3
-DEFAULT_RETRY_WAIT_SECONDS = 20
+# 同一モデル内の短時間リトライ
+MAX_RETRIES = 2
+DEFAULT_RETRY_WAIT_SECONDS = 15
+
+# プロセス内でモデルを回す(429時に次へ)
+_model_index = 0
+_exhausted_models = set()
 
 
-def _call_with_retry(model, contents, generation_config):
-    """無料枠のレート制限(429)に達した場合、少し待って自動リトライする。"""
+def _next_model_name(prefer: str = None) -> str:
+    global _model_index
+    n = len(MODEL_CANDIDATES)
+    if n == 0:
+        raise RuntimeError("Gemini モデル候補が空です")
+    start = 0
+    if prefer and prefer in MODEL_CANDIDATES:
+        start = MODEL_CANDIDATES.index(prefer)
+    for i in range(n):
+        name = MODEL_CANDIDATES[(start + i) % n]
+        if name not in _exhausted_models:
+            _model_index = MODEL_CANDIDATES.index(name)
+            return name
+    # 全モデルが exhausted 扱いでも、日次枠リセットを期待して先頭から再試行
+    _exhausted_models.clear()
+    _model_index = 0
+    return MODEL_CANDIDATES[0]
+
+
+def _mark_exhausted(name: str) -> None:
+    _exhausted_models.add(name)
+
+
+def _call_with_retry(model, contents, generation_config, model_name: str = None):
+    """同一モデルで短リトライ後、別モデルへフォールバックする。"""
+    name = model_name or getattr(model, "model_name", None) or MODEL_NAME
     last_error = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            return model.generate_content(contents, generation_config=generation_config)
-        except ResourceExhausted as e:
-            last_error = e
-            wait_seconds = DEFAULT_RETRY_WAIT_SECONDS
-            # エラーメッセージにretry_delayが含まれていれば、その秒数を優先して待つ
+    tried = set()
+    while True:
+        if name in tried and len(tried) >= len(MODEL_CANDIDATES):
+            break
+        tried.add(name)
+        active = model if (model_name is None and name == (getattr(model, "model_name", None) or MODEL_NAME)) else genai.GenerativeModel(name)
+        for attempt in range(MAX_RETRIES):
             try:
-                if hasattr(e, "retry_delay") and e.retry_delay:
-                    wait_seconds = e.retry_delay.seconds + 1
-            except Exception:
-                pass
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(wait_seconds)
+                return active.generate_content(contents, generation_config=generation_config)
+            except ResourceExhausted as e:
+                last_error = e
+                wait_seconds = DEFAULT_RETRY_WAIT_SECONDS
+                try:
+                    if hasattr(e, "retry_delay") and e.retry_delay:
+                        wait_seconds = int(getattr(e.retry_delay, "seconds", 0) or 0) + 1
+                except Exception:
+                    pass
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(min(wait_seconds, 60))
+                    continue
+                _mark_exhausted(name)
+                break
+            except Exception as e:
+                # モデル非対応・404 相当は次モデルへ
+                msg = str(e).lower()
+                last_error = e
+                if any(k in msg for k in ("not found", "not supported", "invalid model", "404")):
+                    _mark_exhausted(name)
+                    break
+                raise
+        # 次のモデル
+        prev = name
+        name = _next_model_name(prefer=None)
+        # prefer を進めたいので exhausted を避けた次を取る
+        for cand in MODEL_CANDIDATES:
+            if cand not in _exhausted_models and cand not in tried:
+                name = cand
+                break
+        else:
+            # 未試行が無い
+            if len(tried) >= len(MODEL_CANDIDATES):
+                break
+            name = _next_model_name()
+        if name == prev and name in _exhausted_models:
+            # 進まないなら終了
+            remaining = [c for c in MODEL_CANDIDATES if c not in tried]
+            if not remaining:
+                break
+            name = remaining[0]
+        model = genai.GenerativeModel(name)
+
     raise RuntimeError(
-        f"Gemini APIの無料枠レート制限に達し、{MAX_RETRIES}回リトライしても失敗しました。"
-        f"時間を空けて再度お試しください。詳細: {last_error}"
+        f"Gemini APIの無料枠制限に達し、候補モデル {MODEL_CANDIDATES} でも失敗しました。最後のエラー: {last_error}"
     )
 
-# 画面の種類ごとに抽出してほしい項目を指示する共通プロンプト
-EXTRACTION_PROMPT = """
-あなたは競輪(自転車競技のギャンブル)アプリのスクリーンショットを解析するアシスタントです。
-渡された画像から、以下のJSON形式で情報を抽出してください。
 
-重要なルール:
-- 特定のアプリの固定フォーマットを前提にせず、画面に表示されている内容から柔軟に読み取ってください
-- 読み取れない項目は null にしてください。憶測で埋めないでください
-- 数値は数値型で、パーセントは0-100のfloatで出力してください(例: 88.9% -> 88.9)
-- 出力は有効なJSONのみ。説明文やMarkdownのコードブロック記号は付けないでください
+def _get_model():
+    return genai.GenerativeModel(_next_model_name())
 
-出力するJSONスキーマ:
-{
-  "screen_type": "出走表基本情報 | 出走表直近成績 | 出走表勝率 | 前検コメント | 並び予想 | オッズ | 投票シート | 不明 のいずれか",
-  "source_app": "アプリ名が推測できれば(例: tipstar)。不明ならnull",
-  "venue_name": "競輪場名。不明ならnull",
-  "race_number": "レース番号(整数)。不明ならnull",
-  "grade": "GI/GII/GIII/F1/F2等。不明ならnull",
-  "race_stage": "初日特選 | 予選 | 二次予選 | 選抜 | 準々決勝 | 準決勝 | 決勝 | オッズなど、同じグレード内での
-    ステージ(格)。レース名・見出し・タグ等から読み取れれば入れる。読み取れなければnull",
-  "event_title": "開催名。不明ならnull",
-  "deadline_time": "締切時刻の文字列(例: 16:54)。不明ならnull",
-  "weather": "天候(晴/曇/雨/雪等)。画面に表示があれば。無ければnull",
-  "temperature_c": "気温(℃、float)。画面に表示があれば。無ければnull",
-  "lines": "ライン(連携)構成。「並び予想」等の欄に、車番のグループが「・」等の区切り記号で
-    区切られて表示されていることが多い(例:「537・42・1・6」なら[5,3,7]が1ライン、[4,2]が1ライン、
-    [1]が単騎、[6]が単騎)。各グループ内の並び順は先行→番手→3番手を表す。
-    これを読み取り、車番の配列のリストに変換する。例: [[5,3,7],[4,2],[1],[6]]。
-    該当する表示が画面に無ければnull(空配列ではなくnullにする)",
-  "entries": [
-    {
-      "waku_number": "枠番(整数)",
-      "car_number": "車番(整数)",
-      "player_name": "選手名",
-      "region": "地区",
-      "player_class": "級班(例: L1)",
-      "age": "年齢(整数)",
-      "period": "期別",
-      "evaluation_rank": "評価(クラウン等)",
-      "race_score": "競走得点(float)",
-      "leg_style": "脚質",
-      "s_count": "S回数(整数)",
-      "h_count": "H(逃げ)回数(整数)",
-      "b_count": "B(まくり)回数(整数)",
-      "kimarite_nige": "決まり手-逃(整数)",
-      "kimarite_makuri": "決まり手-捲(整数)",
-      "kimarite_sashi": "決まり手-差(整数)",
-      "kimarite_mark": "決まり手-マーク(整数)",
-      "finish_1st": "1着回数(整数)",
-      "finish_2nd": "2着回数(整数)",
-      "finish_3rd": "3着回数(整数)",
-      "app_win_rate": "勝率%(float)",
-      "app_2nd_rate": "2連対率%(float)",
-      "app_3rd_rate": "3連対率%(float)",
-      "gear_ratio": "ギア倍数(float)",
-      "line_group": "ライン構成に関する情報があれば(参考情報、主要な取得先は上記linesフィールド)",
-      "pre_race_comment": "選手の前検コメント・直前コメント等があれば、その内容をそのまま(要約せず)。無ければnull"
-    }
-  ],
-  "odds_list": [
-    {
-      "bet_type": "2車単 | 2車複 | 2枠単 | 2枠複 | ワイド | 3連単 | 3連複",
-      "combination": "車番の組み合わせ。着順ありは矢印区切りをハイフンに変換(例: 1→2→3 は 1-2-3)",
-      "odds_value": "オッズ倍率(float)",
-      "popularity_rank": "人気順位(整数)。分かれば",
-      "total_vote_amount": "その買い目への投票総額(円、float)。画面に「票数」「投票口数」等の表示があれば円換算して算出(1票=100円が一般的)。表示が無ければnull"
-    }
-  ]
-}
-
-画面に写っていない項目のセクション(例: オッズ画面ならentriesが空)は、空配列にしてください。
-
-重要: オッズ画面の場合、画面に写っている行を1行たりとも省略せず、見えている分は全て抽出してください。
-「代表的な数行だけ」のような要約や間引きは絶対にしないでください。
-数十〜100件以上の行が写っている場合でも、写っている全行をodds_listに含めてください。
-"""
 
 
 def _image_to_part(image_bytes: bytes, mime_type: str = "image/png"):
@@ -141,7 +141,7 @@ def parse_screenshot(image_bytes: bytes, mime_type: str = "image/png") -> dict:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY が設定されていません(Renderの環境変数を確認してください)")
 
-    model = genai.GenerativeModel(MODEL_NAME)
+    model = _get_model()
     response = _call_with_retry(
         model,
         [EXTRACTION_PROMPT, _image_to_part(image_bytes, mime_type)],
@@ -259,7 +259,7 @@ def simulate_race_development(
 
 出力は予想文章のみ。JSON形式にせず、日本語の文章でそのまま出力してください。
 """
-    model = genai.GenerativeModel(MODEL_NAME)
+    model = _get_model()
     response = _call_with_retry(model, prompt, generation_config={})
     return response.text.strip()
 
@@ -366,7 +366,7 @@ def estimate_ai_win_probabilities(
 選手データ:
 {json.dumps(entries, ensure_ascii=False, indent=2)}
 """
-    model = genai.GenerativeModel(MODEL_NAME)
+    model = _get_model()
     response = _call_with_retry(
         model,
         prompt,
