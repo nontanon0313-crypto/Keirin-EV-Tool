@@ -450,3 +450,41 @@ def ticket_eval(rows):
     for r in rows:
         a.add(*r)
     return a.finalize()
+
+
+MKT_EDGES = [0.0, 20.0, 50.0, 100.0, 125.0, 200.0, 500.0, 1e12]
+
+
+def market_calibration(rows, n_races):
+    """全オッズ(結果確定済みレースの全組み合わせ)で、市場の確率が当たっているかを見る。
+    rows: [(band_index, n_combos, sum_inv_odds, hits, sum_hit_odds)] を帯ごとに合算済みで渡す。
+    expected = k × Σ(1/オッズ)。k は『全体の期待的中数=レース数』になる係数(控除率に相当)。
+    flat_roi = その帯の全組み合わせを均等に買った場合の回収率(=Σ的中オッズ/組み合わせ数)。"""
+    tot_inv = sum(r[2] for r in rows)
+    if n_races <= 0 or tot_inv <= 0:
+        return {"n_races": n_races, "bands": []}
+    k = n_races / tot_inv
+    bands = []
+    for bi, n, inv, hits, hit_odds in sorted(rows, key=lambda r: r[0]):
+        exp = k * inv
+        lo = max(0.0, hits - 1.96 * math.sqrt(max(hits, 1))) / exp if exp > 0 else None
+        hi = (hits + 1.96 * math.sqrt(max(hits, 1))) / exp if exp > 0 else None
+        ratio = hits / exp if exp > 0 else None
+        if n < 1000 or exp < 5:
+            verdict = "サンプル少"
+        elif hi is not None and hi < 1:
+            verdict = "市場は過大評価(当たりにくい)"
+        elif lo is not None and lo > 1:
+            verdict = "市場は過小評価(当たりやすい)"
+        else:
+            verdict = "市場は概ね正確"
+        bands.append({
+            "band": (f"{MKT_EDGES[bi]:g}〜{MKT_EDGES[bi + 1]:g}倍" if MKT_EDGES[bi + 1] < 1e11 else f"{MKT_EDGES[bi]:g}倍以上"),
+            "n_combos": int(n), "expected_hits": round(exp, 1), "actual_hits": int(hits),
+            "ratio": round(ratio, 3) if ratio is not None else None,
+            "ratio_ci_low": round(lo, 3) if lo is not None else None,
+            "ratio_ci_high": round(hi, 3) if hi is not None else None,
+            "flat_roi_pct": round(hit_odds / n * 100, 1) if n else None,
+            "verdict": verdict,
+        })
+    return {"n_races": int(n_races), "takeout_factor_k": round(k, 4), "bands": bands}

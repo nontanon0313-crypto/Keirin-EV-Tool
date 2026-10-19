@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import exists, func, text as sa_text
 
 from .. import models
-from ..model_eval_calc import TicketAgg, build_hints, race_eval, roi_hints, roi_report
+from ..model_eval_calc import TicketAgg, build_hints, race_eval, roi_hints, roi_report, MKT_EDGES, market_calibration
 
 router = APIRouter(prefix="/model-eval", tags=["model-eval"])
 
@@ -273,3 +273,82 @@ def ensure_indexes(tiers: str = "all"):
             except Exception as e:
                 errors.append({"tier": name, "index": ix, "error": f"{type(e).__name__}: {str(e)[:160]}"})
     return {"ok": not errors, "created_or_existing": done, "errors": errors}
+
+
+_MKT_CACHE = {}
+_MKT_TTL = 1800
+
+
+@router.get("/market-calibration")
+def market_calibration_api(tiers: str = "all", refresh: bool = False):
+    """市場(オッズ)全体の当たり具合。結果確定済みレースの『全組み合わせ』を対象にするので、
+    投票プランが選んだ買い目の偏り(選択バイアス)を含まない。読み取りのみ。"""
+    from sqlalchemy import case, exists, literal_column
+
+    tiers = "primary" if tiers == "primary" else "all"
+    now = time.time()
+    hit = _MKT_CACHE.get(tiers)
+    if hit and not refresh and now - hit[0] < _MKT_TTL:
+        return {**hit[1], "cache_hit": True}
+
+    R, O = models.Race, models.Odds
+    nb = len(MKT_EDGES) - 1
+    band = case(*[(O.odds_value < MKT_EDGES[i + 1], i) for i in range(nb - 1)], else_=nb - 1)
+    is_hit = O.combination == R.actual_result
+    merged, n_races, used, errors = {}, 0, [], []
+    for name in _tier_names(tiers):
+        s, err = _open_tier(name)
+        if s is None:
+            if err != "not_configured":
+                errors.append({"name": name, "message": err})
+            continue
+        try:
+            s.execute(sa_text("SET LOCAL statement_timeout = 90000"))
+            has_odds = exists().where((O.race_id == R.id) & (O.bet_type == "3連単"))
+            nr = (
+                s.query(func.count(R.id))
+                .filter(R.actual_result.isnot(None), R.actual_result != "", has_odds)
+                .scalar()
+                or 0
+            )
+            rows = (
+                s.query(
+                    band, func.count(O.id), func.sum(1.0 / O.odds_value),
+                    func.sum(case((is_hit, 1), else_=0)), func.sum(case((is_hit, O.odds_value), else_=0.0)),
+                )
+                .join(R, R.id == O.race_id)
+                .filter(R.actual_result.isnot(None), R.actual_result != "", O.bet_type == "3連単", O.odds_value > 0)
+                .group_by(literal_column("1"))
+                .all()
+            )
+            for bi, n, inv, h, ho in rows:
+                a = merged.setdefault(int(bi), [0, 0.0, 0, 0.0])
+                a[0] += int(n)
+                a[1] += float(inv or 0)
+                a[2] += int(h or 0)
+                a[3] += float(ho or 0)
+            n_races += int(nr)
+            used.append({"name": name, "races": int(nr), "combos": int(sum(r[1] for r in rows))})
+        except Exception as e:
+            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
+        finally:
+            try:
+                s.rollback()
+                s.close()
+            except Exception:
+                pass
+    if not used:
+        raise HTTPException(status_code=503, detail=f"読めるDBがありません: {errors}")
+    res = market_calibration([(bi, a[0], a[1], a[2], a[3]) for bi, a in merged.items()], n_races)
+    out = {
+        "tiers": used, "tier_errors": errors, **res,
+        "note": [
+            "結果確定済みレースの3連単の全組み合わせが対象です(投票プランが選んだ買い目ではなく、市場全体)。",
+            "期待的中数 = k × Σ(1/オッズ)。kは全体で『期待的中数=レース数』になる係数(控除率に相当)。",
+            "全組み合わせ均等買いの回収率が100%未満なら、その帯は市場に負けます(控除率の分)。",
+            "帯が多いため、偶然の判定ぶれ(5%程度)があります。判定は傾向で見てください。",
+        ],
+        "cache_hit": False,
+    }
+    _MKT_CACHE[tiers] = (now, out)
+    return out

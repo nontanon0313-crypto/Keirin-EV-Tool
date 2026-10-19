@@ -3878,3 +3878,45 @@ document.getElementById("saveSettingsBtn")?.addEventListener("click", () => {
   }
   btn.addEventListener("click", () => load(false));
 })();
+
+// ---------- 📊 市場(全オッズ)の較正(検証タブ) ----------
+(function () {
+  const btn = document.getElementById("loadMarketCalBtn");
+  const box = document.getElementById("marketCalResult");
+  if (!btn || !box) return;
+  const esc = (v) => String(v ?? "-").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const vc = { "市場は過大評価(当たりにくい)": "#ef4444", "市場は過小評価(当たりやすい)": "#22c55e", "市場は概ね正確": "#94a3b8", "サンプル少": "#94a3b8" };
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    box.style.display = "block";
+    box.textContent = "集計中...(全オッズを集計するため1分ほどかかります)";
+    try {
+      let data = null, lastErr = null;
+      for (let attempt = 0; attempt < 3 && !data; attempt++) {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 120000);
+        try {
+          const res = await fetch(apiUrl("/model-eval/market-calibration"), { signal: ctl.signal, cache: "no-store" });
+          if ([502, 503, 504].includes(res.status)) { lastErr = new Error("サーバーが混み合っています(" + res.status + ")"); await new Promise((r) => setTimeout(r, 5000)); continue; }
+          if (!res.ok) throw new Error("サーバーエラー(" + res.status + ")");
+          data = await res.json();
+        } catch (e) { lastErr = e; if (e.name !== "AbortError") break; } finally { clearTimeout(timer); }
+      }
+      if (!data) throw lastErr || new Error("取得できませんでした");
+      let h = `<p><strong>📊 市場(全オッズ)の当たり具合</strong> ${data.cache_hit ? "(キャッシュ)" : ""}</p>`;
+      h += `<p class="note">結果確定済み${esc(data.n_races)}レースの3連単の全組み合わせが対象(投票プランの選択を含まない市場全体)。控除率に相当する係数 k=${esc(data.takeout_factor_k)}</p>`;
+      h += `<div style="overflow-x:auto;"><table><tr><th>オッズ帯</th><th>組み合わせ数</th><th>期待的中数</th><th>実的中数</th><th>実/期待</th><th>95%区間</th><th>全組み合わせ均等買いの回収率</th><th>判定</th></tr>`;
+      for (const b of data.bands || []) {
+        h += `<tr><td>${esc(b.band)}</td><td>${b.n_combos}</td><td>${esc(b.expected_hits)}</td><td>${b.actual_hits}</td><td>${esc(b.ratio)}</td><td>${esc(b.ratio_ci_low)}〜${esc(b.ratio_ci_high)}</td><td>${esc(b.flat_roi_pct)}%</td><td style="color:${vc[b.verdict] || "inherit"};">${esc(b.verdict)}</td></tr>`;
+      }
+      h += `</table></div><p class="note" style="margin-top:8px;">${(data.note || []).map(esc).join("<br>")}</p>`;
+      if ((data.tier_errors || []).length) h += `<p class="note">読めなかったDB: ${esc(JSON.stringify(data.tier_errors))}</p>`;
+      box.innerHTML = h;
+    } catch (e) {
+      box.textContent = "エラー: " + (e && e.message ? e.message : e);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
