@@ -350,7 +350,7 @@ def roi_hints(rep):
             h.append({"level": "良好", "text": f"運用条件の回収率は、下側5%点でも{allc['boot_roi_p05']}%と100%を超えています(黒字になる確率{allc['boot_p_roi_over_100_pct']}%)。"})
     x = allc.get("hits_vs_market_x")
     if x is not None and x >= 3:
-        h.append({"level": "要改善", "text": f"運用条件の的中は{allc['wins']}件で、市場が正しい場合の期待({allc.get('market_expected_hits')}件)の{x}倍です。これほどの差は、本当の優位性か、データ・ロジックの不備(結果を知った後の情報の混入など)のどちらかで、AIが1着確率で市場に負けている事実とも整合しません。原因の特定が先です。"})
+        h.append({"level": "参考", "text": f"運用条件の的中は市場の期待の{x}倍です。プランは市場の見立てと食い違う買い目を選ぶため、市場より当たりやすいのは選び方の結果として自然で、市場の正しさの指標ではありません。AI自身の予想的中率との差(①の購入分)と、📊市場(全オッズ)の較正を合わせて見てください。"})
     pre = rep.get("運用条件・AI予想が発走前のレース", {})
     post = rep.get("運用条件・AI予想が発走後のレース", {})
     if pre.get("n", 0) >= 100 and post.get("n", 0) >= 100:
@@ -360,11 +360,6 @@ def roi_hints(rep):
         h.append({"level": "注意", "text": f"AI予想が発走前だったレースの運用条件の購入は{pre.get('n', 0)}件のみで、発走前と発走後の比較はまだできません。"})
     if allc.get("roi_excl_top3_pct") is not None and allc["roi_excl_top3_pct"] < 100 <= (allc.get("roi_pct") or 0):
         h.append({"level": "要改善", "text": f"上位3的中を除くと回収率が{allc['roi_excl_top3_pct']}%に落ちます。利益が少数の超高配当に依存しています。"})
-    if x is not None and x >= 3:
-        for it in h:
-            if it["text"].startswith("運用条件の回収率は、下側5%点でも"):
-                it["level"] = "参考"
-                it["text"] += "※市場期待を大きく超えているため、原因の確認が済むまでこの数字は信用しないでください。"
     return h
 
 
