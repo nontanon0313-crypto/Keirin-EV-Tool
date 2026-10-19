@@ -19,113 +19,122 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# 複数モデルをローテーション。無料枠(RPD/RPM)はモデル系統ごとに別枠のことが多い。
-# 環境変数 GEMINI_MODEL_POOL=model1,model2 で上書き可。
+
+# 複数モデルを順番に試す。例外型に依存せず、メッセージ/コードで枠切れ判定する。
+# GEMINI_MODEL_POOL=model1,model2 で上書き可。
 _DEFAULT_POOL = [
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash",
+    "gemini-2.0-flash",
     "gemini-flash-latest",
-    "gemini-2.0-flash-lite",
 ]
 _env_pool = (os.environ.get("GEMINI_MODEL_POOL") or "").strip()
 MODEL_CANDIDATES = [x.strip() for x in _env_pool.split(",") if x.strip()] or list(_DEFAULT_POOL)
-MODEL_NAME = MODEL_CANDIDATES[0]  # 互換: 既定の先頭
+MODEL_NAME = MODEL_CANDIDATES[0]
 
-# 同一モデル内の短時間リトライ
 MAX_RETRIES = 2
-DEFAULT_RETRY_WAIT_SECONDS = 15
+DEFAULT_RETRY_WAIT_SECONDS = 12
 
-# プロセス内でモデルを回す(429時に次へ)
-_model_index = 0
-_exhausted_models = set()
-
-
-def _next_model_name(prefer: str = None) -> str:
-    global _model_index
-    n = len(MODEL_CANDIDATES)
-    if n == 0:
-        raise RuntimeError("Gemini モデル候補が空です")
-    start = 0
-    if prefer and prefer in MODEL_CANDIDATES:
-        start = MODEL_CANDIDATES.index(prefer)
-    for i in range(n):
-        name = MODEL_CANDIDATES[(start + i) % n]
-        if name not in _exhausted_models:
-            _model_index = MODEL_CANDIDATES.index(name)
-            return name
-    # 全モデルが exhausted 扱いでも、日次枠リセットを期待して先頭から再試行
-    _exhausted_models.clear()
-    _model_index = 0
-    return MODEL_CANDIDATES[0]
+# 直近で成功したモデルを優先（プロセス内）
+_last_ok_model = None
 
 
-def _mark_exhausted(name: str) -> None:
-    _exhausted_models.add(name)
+def _is_quota_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    keys = (
+        "resourceexhausted",
+        "resource exhausted",
+        "quota",
+        "rate limit",
+        "rate_limit",
+        "429",
+        "too many requests",
+        "exceeded",
+        "無料枠",
+        "レート制限",
+    )
+    if any(k in msg for k in keys):
+        return True
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    try:
+        if int(code) == 429:
+            return True
+    except Exception:
+        pass
+    # grpc code
+    try:
+        if getattr(e, "grpc_status_code", None) is not None and int(e.grpc_status_code) == 8:
+            return True  # RESOURCE_EXHAUSTED
+    except Exception:
+        pass
+    return isinstance(e, ResourceExhausted)
+
+
+def _is_invalid_model_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(
+        k in msg
+        for k in (
+            "not found",
+            "is not found",
+            "not supported",
+            "invalid model",
+            "unknown model",
+            "404",
+        )
+    )
 
 
 def _call_with_retry(model, contents, generation_config, model_name: str = None):
-    """同一モデルで短リトライ後、別モデルへフォールバックする。"""
-    name = model_name or getattr(model, "model_name", None) or MODEL_NAME
-    last_error = None
-    tried = set()
-    while True:
-        if name in tried and len(tried) >= len(MODEL_CANDIDATES):
-            break
-        tried.add(name)
-        active = model if (model_name is None and name == (getattr(model, "model_name", None) or MODEL_NAME)) else genai.GenerativeModel(name)
+    """全候補モデルを順に試す。枠切れ/未提供は次へ。"""
+    global _last_ok_model
+    errors = []
+    # 成功実績のあるモデルを先頭に
+    order = list(MODEL_CANDIDATES)
+    if _last_ok_model in order:
+        order.remove(_last_ok_model)
+        order.insert(0, _last_ok_model)
+    if model_name and model_name in order:
+        order.remove(model_name)
+        order.insert(0, model_name)
+
+    for name in order:
+        active = genai.GenerativeModel(name)
         for attempt in range(MAX_RETRIES):
             try:
-                return active.generate_content(contents, generation_config=generation_config)
-            except ResourceExhausted as e:
-                last_error = e
-                wait_seconds = DEFAULT_RETRY_WAIT_SECONDS
-                try:
-                    if hasattr(e, "retry_delay") and e.retry_delay:
-                        wait_seconds = int(getattr(e.retry_delay, "seconds", 0) or 0) + 1
-                except Exception:
-                    pass
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(min(wait_seconds, 60))
-                    continue
-                _mark_exhausted(name)
-                break
+                resp = active.generate_content(contents, generation_config=generation_config)
+                _last_ok_model = name
+                return resp
             except Exception as e:
-                # モデル非対応・404 相当は次モデルへ
-                msg = str(e).lower()
-                last_error = e
-                if any(k in msg for k in ("not found", "not supported", "invalid model", "404")):
-                    _mark_exhausted(name)
+                if _is_quota_error(e):
+                    wait = DEFAULT_RETRY_WAIT_SECONDS
+                    try:
+                        if hasattr(e, "retry_delay") and e.retry_delay:
+                            wait = int(getattr(e.retry_delay, "seconds", 0) or 0) + 1
+                    except Exception:
+                        pass
+                    errors.append(f"{name}:quota:{e}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(min(max(wait, 5), 45))
+                        continue
+                    break  # 次モデルへ
+                if _is_invalid_model_error(e):
+                    errors.append(f"{name}:invalid:{e}")
                     break
-                raise
-        # 次のモデル
-        prev = name
-        name = _next_model_name(prefer=None)
-        # prefer を進めたいので exhausted を避けた次を取る
-        for cand in MODEL_CANDIDATES:
-            if cand not in _exhausted_models and cand not in tried:
-                name = cand
-                break
-        else:
-            # 未試行が無い
-            if len(tried) >= len(MODEL_CANDIDATES):
-                break
-            name = _next_model_name()
-        if name == prev and name in _exhausted_models:
-            # 進まないなら終了
-            remaining = [c for c in MODEL_CANDIDATES if c not in tried]
-            if not remaining:
-                break
-            name = remaining[0]
-        model = genai.GenerativeModel(name)
+                # それ以外は即失敗（プロンプト/認証など）
+                raise RuntimeError(f"Gemini({name}) 呼び出し失敗: {e}") from e
 
     raise RuntimeError(
-        f"Gemini APIの無料枠制限に達し、候補モデル {MODEL_CANDIDATES} でも失敗しました。最後のエラー: {last_error}"
+        "Gemini全モデルで失敗(枠切れまたは未提供)。試行: "
+        + " | ".join(errors[-12:])
     )
 
 
 def _get_model():
-    return genai.GenerativeModel(_next_model_name())
+    name = _last_ok_model or MODEL_NAME
+    return genai.GenerativeModel(name)
+
 
 
 
