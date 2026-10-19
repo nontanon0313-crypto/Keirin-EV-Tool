@@ -23,11 +23,11 @@ if GEMINI_API_KEY:
 # 複数モデルを順番に試す。例外型に依存せず、メッセージ/コードで枠切れ判定する。
 # GEMINI_MODEL_POOL=model1,model2 で上書き可。
 _DEFAULT_POOL = [
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",   # free: 500 RPD (model別)
+    "gemini-3.5-flash-lite",   # 2.5-lite 後継
+    "gemini-3.5-flash",
+    "gemini-3.8-flash",        # free: 20 RPD 程度のことが多い
+    "gemini-3.8-flash-lite",
 ]
 _env_pool = (os.environ.get("GEMINI_MODEL_POOL") or "").strip()
 MODEL_CANDIDATES = [x.strip() for x in _env_pool.split(",") if x.strip()] or list(_DEFAULT_POOL)
