@@ -5554,6 +5554,11 @@ def _merge_tier_stats(tier_results):
         sum(pc * roi for pc, roi in roi_weights) / sum(pc for pc, _ in roi_weights)
         if roi_weights else None
     )
+    # 正しい合算: 払戻合計÷投資合計(投資額の違う系統を件数の重みで平均しない)
+    _stake = sum(float(r.get("real_stake_total") or 0) for _, r in ok)
+    _pay = sum(float(r.get("real_payout_total") or 0) for _, r in ok)
+    if _stake > 0 and all(r.get("real_stake_total") is not None for _, r in ok):
+        overall_roi = _pay / _stake * 100
 
     win_weights = []
     for _, r in ok:
@@ -5565,6 +5570,10 @@ def _merge_tier_stats(tier_results):
         sum(tb * wr for tb, wr in win_weights) / sum(tb for tb, _ in win_weights)
         if win_weights else None
     )
+    _wins = sum(int(r.get("real_win_count") or 0) for _, r in ok)
+    _den = sum(int(r.get("real_win_denominator") or 0) for _, r in ok)
+    if _den > 0 and all(r.get("real_win_denominator") is not None for _, r in ok):
+        overall_wr = _wins / _den * 100
 
     avg_bets = round(real_purchase_count / n_races, 2) if n_races else None
     biggest = max(ok, key=lambda x: int(x[1].get("total_bets") or 0))[1]
@@ -6558,6 +6567,11 @@ def _compute_purchase_stats(db: Session, since_dt=None):
         "expected_roi_pct": expected_roi_pct,
         "expected_profit_total": expected_profit_total,
         "overall_win_rate_pct": overall_win_rate_pct,
+        # 全DB合算(_merge_tier_stats)で正確に合算するための元データ
+        "real_stake_total": total_stake,
+        "real_payout_total": total_payout,
+        "real_win_count": overall_win_count,
+        "real_win_denominator": len(purchased_only_for_stats),
         "predicted_win_rate_pct": predicted_win_rate_pct,
         "expected_win_rate_pct": expected_win_rate_pct,
         "avg_odds_weighted": avg_odds_weighted,
