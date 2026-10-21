@@ -352,3 +352,46 @@ def market_calibration_api(tiers: str = "all", refresh: bool = False):
     }
     _MKT_CACHE[tiers] = (now, out)
     return out
+
+
+@router.get("/v1-tickets")
+def v1_tickets(since: Optional[str] = "calibration_switch", tiers: str = "all"):
+    """v1(現行モデル)の実購入(結果確定済み)を、レース識別子つきで返す(読み取りのみ・全DB合算)。
+    学習モデルなど別モデルとの『同じレース・同じ買い目』比較用。"""
+    from .purchases import _parse_since_param
+
+    since = since or "calibration_switch"
+    since_dt = _parse_since_param(since) if since != "all" else None
+    P, R = models.Purchase, models.Race
+    out, used, errors = [], [], []
+    for name in _tier_names(tiers):
+        s, err = _open_tier(name)
+        if s is None:
+            if err != "not_configured":
+                errors.append({"name": name, "message": err})
+            continue
+        try:
+            q = (
+                s.query(P.combination, P.bet_type, P.stake_amount, P.odds_at_purchase, P.win_prob_at_purchase,
+                        P.result, P.payout_amount, R.external_ref)
+                .join(R, R.id == P.race_id)
+                .filter(P.result != "pending", P.stake_amount > 0)
+            )
+            if since_dt is not None:
+                q = q.filter(P.purchased_at >= since_dt)
+            n0 = len(out)
+            for cmb, bt, st, od, wp, res, po, ref in q.all():
+                out.append({"tier": name, "combination": cmb, "bet_type": bt, "stake_amount": st, "odds_at_purchase": od,
+                            "win_prob_at_purchase": wp, "result": res, "payout_amount": po, "external_ref": ref})
+            used.append({"name": name, "tickets": len(out) - n0})
+        except Exception as e:
+            errors.append({"name": name, "message": f"{type(e).__name__}: {str(e)[:150]}"})
+        finally:
+            try:
+                s.rollback(); s.close()
+            except Exception:
+                pass
+    if not used:
+        raise HTTPException(status_code=503, detail=f"読めるDBがありません: {errors}")
+    return {"since": since, "since_resolved": since_dt.isoformat() if since_dt else None, "tiers": used,
+            "tier_errors": errors, "tickets": out}
