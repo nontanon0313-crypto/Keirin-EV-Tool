@@ -7098,6 +7098,19 @@ def update_skipped_result(skipped_id: int, actual_result: str, actual_payout: fl
     return obj
 
 
+
+
+@router.get("/all-record-race-ids")
+def all_record_race_ids(db: Session = Depends(get_db)):
+    """購入記録と見送り記録の区別なく、レース番号の統一集合を返す（フィルタなし全件）。"""
+    from sqlalchemy import union_all, select
+    p = select(models.Purchase.race_id).where(models.Purchase.race_id.isnot(None))
+    s = select(models.SkippedBet.race_id).where(models.SkippedBet.race_id.isnot(None))
+    u = union_all(p, s).subquery()
+    rows = db.execute(select(u.c.race_id).distinct()).all()
+    return sorted([int(r[0]) for r in rows if r[0] is not None])
+
+
 @router.get("/skipped/stats")
 def skipped_stats(db: Session = Depends(get_db)):
     """見送りが正しかったか(機会損失/機会回避)を集計する。"""
