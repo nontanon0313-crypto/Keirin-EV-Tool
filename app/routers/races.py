@@ -1371,6 +1371,17 @@ def get_race(race_id: int, db: Session = Depends(get_db)):
 
 
 
+
+@router.get("/{race_id}/odds")
+def get_race_odds(race_id: int, bet_type: Optional[str] = None, db: Session = Depends(get_db)):
+    race = db.query(models.Race).get(race_id)
+    if not race:
+        raise HTTPException(404, "レースが見つかりません")
+    q = db.query(models.Odds).filter(models.Odds.race_id == race_id)
+    if bet_type:
+        q = q.filter(models.Odds.bet_type == bet_type)
+    return [{"bet_type": o.bet_type, "combination": o.combination, "odds_value": float(o.odds_value or 0)} for o in q.order_by(models.Odds.bet_type, models.Odds.combination).all()]
+
 @router.delete("/{race_id}")
 def delete_race(race_id: int, db: Session = Depends(get_db)):
     """レースを削除する(選手・オッズ・期待値結果も連動して削除される)。誤って作成したレースのやり直し用。"""
