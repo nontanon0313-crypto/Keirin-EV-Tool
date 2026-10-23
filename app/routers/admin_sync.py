@@ -6,7 +6,9 @@ import subprocess
 import sys
 from pathlib import Path as PathLib
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+from sqlalchemy.orm import Session
+from ..database import get_db
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
