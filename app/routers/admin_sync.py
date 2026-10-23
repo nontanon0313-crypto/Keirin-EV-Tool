@@ -166,3 +166,19 @@ def compare_db_counts(
                 "supabase_minus_neon": gap,
             }
     return {"ok": True, "tables": out}
+
+
+@router.get("/new-schema-status")
+def new_schema_status(db: Session = Depends(get_db)):
+    """新設計の6テーブルが存在し、行数が取れるかを返す。"""
+    from sqlalchemy import text
+    tables = ["race_results", "race_info", "race_odds", "assumptions", "verification", "aggregation_cache"]
+    result = {}
+    for t in tables:
+        try:
+            n = db.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar()
+            result[t] = {"exists": True, "count": n}
+        except Exception as e:
+            db.rollback()
+            result[t] = {"exists": False, "error": str(e)[:100]}
+    return result
