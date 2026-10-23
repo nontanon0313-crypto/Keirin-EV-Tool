@@ -647,6 +647,7 @@ def init_db():
     if engine is None:
         return
 
+    from . import models_new  # noqa: F401 — 新設計テーブルを Base.metadata に登録
     Base.metadata.create_all(bind=engine)
 
     migrations = [
