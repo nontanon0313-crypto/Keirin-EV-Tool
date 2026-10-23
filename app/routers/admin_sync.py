@@ -184,3 +184,38 @@ def new_schema_status(db: Session = Depends(get_db)):
             db.rollback()
             result[t] = {"exists": False, "error": str(e)[:100]}
     return result
+
+
+@router.post("/ensure-new-schema-all-tiers")
+def ensure_new_schema_all_tiers():
+    """3つのDB全てに新設計6テーブルを強制作成する。
+    新テーブル追加・カラム変更後に必ず叩く（docs/新設計_仕様.md 参照）。
+    """
+    from sqlalchemy import text
+    from .. import database as dbmod
+    from ..database import Base
+    from .. import models_new  # noqa: F401 — Base.metadata に新テーブルを登録
+
+    tables = ["race_results", "race_info", "race_odds",
+              "assumptions", "verification", "aggregation_cache"]
+    results = {}
+    for name in dbmod._TIER_ORDER:
+        try:
+            if not dbmod._ensure_tier(name):
+                results[name] = {"ok": False, "error": "engine not available"}
+                continue
+            eng = dbmod._engines[name]
+            Base.metadata.create_all(bind=eng)
+            with eng.connect() as conn:
+                counts = {}
+                for t in tables:
+                    try:
+                        n = conn.execute(text(f"SELECT COUNT(*) FROM {t}")).scalar()
+                        counts[t] = n
+                    except Exception as e:
+                        conn.rollback()
+                        counts[t] = f"error: {str(e)[:80]}"
+            results[name] = {"ok": True, "counts": counts}
+        except Exception as e:
+            results[name] = {"ok": False, "error": str(e)[:200]}
+    return results
