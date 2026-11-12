@@ -1,6 +1,6 @@
 import json, glob, os, sys
 import numpy as np
-from venue_region import venue_region
+from venue_region import venue_region, player_region
 
 # 級班: A級/S級/L級(ガールズ) × 1班/2班/3班。全角表記ゆれも吸収
 GRADE_CLASSES = {
@@ -67,21 +67,21 @@ def rider_features(r, line_map, pos_map, race_scores, venue_name=None):
         WAKU_CLASSES.get(safe_int(r.get("枠番")), -1),
         # 地元フラグ (地区一致=1, 不一致=0, 不明=-1)
         _is_local(r, venue_name),
-        # コメント特徴
-        _comment_features(r.get("コメント") or ""),
+        # コメント特徴 (6次元を展開)
+        *_comment_features(r.get("コメント") or ""),
     ]
 
 def _is_local(r, venue_name):
-    """選手の地区と会場の地区が一致すれば1, 不一致なら0, 不明なら-1。"""
+    """選手の広域地区と会場の広域地区が一致すれば1, 不一致なら0, 不明なら-1。"""
     if not venue_name:
         return -1
-    region = venue_region(venue_name)
-    if not region:
+    venue_reg = venue_region(venue_name)
+    if not venue_reg:
         return -1
-    player_region = (r.get("地区") or "").strip()
-    if not player_region:
+    player_reg = player_region(r.get("地区") or "")
+    if not player_reg:
         return -1
-    return 1 if player_region == region else 0
+    return 1 if player_reg == venue_reg else 0
 
 def _comment_features(c):
     """コメントを特徴量化。(6次元)"""
