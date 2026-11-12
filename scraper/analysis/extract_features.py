@@ -1,5 +1,6 @@
 import json, glob, os, sys
 import numpy as np
+from venue_region import venue_region
 
 # 級班: A級/S級/L級(ガールズ) × 1班/2班/3班。全角表記ゆれも吸収
 GRADE_CLASSES = {
@@ -39,7 +40,7 @@ def extract_one_race(path):
             pos_map[int(car)] = pos
     return riders, line_map, pos_map, d
 
-def rider_features(r, line_map, pos_map, race_scores):
+def rider_features(r, line_map, pos_map, race_scores, venue_name=None):
     """1選手の特徴ベクトル(20次元)。"""
     car = safe_int(r.get("車番"))
     score = safe_float(r.get("競走得点"))
@@ -64,4 +65,32 @@ def rider_features(r, line_map, pos_map, race_scores):
         LEG_STYLES.get(r.get("脚質"), -1),
         GRADE_CLASSES.get(r.get("級班"), -1),
         WAKU_CLASSES.get(safe_int(r.get("枠番")), -1),
+        # 地元フラグ (地区一致=1, 不一致=0, 不明=-1)
+        _is_local(r, venue_name),
+        # コメント特徴
+        _comment_features(r.get("コメント") or ""),
+    ]
+
+def _is_local(r, venue_name):
+    """選手の地区と会場の地区が一致すれば1, 不一致なら0, 不明なら-1。"""
+    if not venue_name:
+        return -1
+    region = venue_region(venue_name)
+    if not region:
+        return -1
+    player_region = (r.get("地区") or "").strip()
+    if not player_region:
+        return -1
+    return 1 if player_region == region else 0
+
+def _comment_features(c):
+    """コメントを特徴量化。(6次元)"""
+    c = c.strip()
+    return [
+        1 if "自力自在" in c else 0,
+        1 if ("自力" in c and "自力自在" not in c) else 0,
+        1 if "番手" in c else 0,
+        1 if (("君" in c or "さん" in c) and "自力" not in c and "番手" not in c) else 0,
+        len(c),
+        1 if not c else 0,
     ]
