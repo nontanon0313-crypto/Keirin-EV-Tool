@@ -72,24 +72,31 @@ def process_race_v2(path):
 def main():
     files = sorted(glob.glob('scraper/data*/2026*.json'))
     print(f"対象ファイル: {len(files)}")
-    BOUNDARY = '20260920'  # 検証開始日
-    train_X, train_y = [], []
-    test_X, test_y = [], []
+    all_X, all_y = [], []
     n_err = 0
     for i, f in enumerate(files):
-        day = os.path.basename(f)[:8]
         r = process_race_v2(f)
         if r is None:
             n_err += 1
             continue
         X, y1, y2, y3, rid = r
-        if day < BOUNDARY:
-            train_X.append(X); train_y.append((y1, y2, y3))
-        else:
-            test_X.append(X); test_y.append((y1, y2, y3))
+        all_X.append(X); all_y.append((y1, y2, y3))
         if (i+1) % 2000 == 0:
-            print(f"  {i+1}/{len(files)}  成功{len(train_X)+len(test_X)}  失敗{n_err}")
-    if not train_X or not test_X:
+            print(f"  {i+1}/{len(files)}  成功{len(all_X)}  失敗{n_err}")
+    if not all_X:
+        print("ERROR: 有効データが空")
+        return
+    all_X = np.array(all_X, dtype=np.float32)
+    all_y = np.array(all_y, dtype=np.int32)
+    n_total = len(all_X)
+    rng = np.random.default_rng(42)
+    perm = rng.permutation(n_total)
+    n_train = int(n_total * 0.8)
+    train_idx = perm[:n_train]
+    test_idx = perm[n_train:]
+    train_X, train_y = all_X[train_idx], all_y[train_idx]
+    test_X, test_y = all_X[test_idx], all_y[test_idx]
+    if len(train_X) == 0 or len(test_X) == 0:
         print("ERROR: 訓練/検証データが空")
         return
     train_X = np.array(train_X, dtype=np.float32)
