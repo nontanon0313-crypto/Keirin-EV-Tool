@@ -28,7 +28,7 @@ def extract_one_race(path):
     except Exception:
         return None
     riders = d['entry'].get('riders', [])
-    if len(riders) < 7:
+    if len(riders) < 5:
         return None
     lines = d['entry'].get('lines') or []
     if not lines:
