@@ -1,6 +1,9 @@
 import json, glob, os, sys
 import numpy as np
-sys.path.insert(0, 'scraper/analysis')
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, _ROOT)
 from extract_features import extract_one_race, rider_features
 from venue_region import venue_region
 
