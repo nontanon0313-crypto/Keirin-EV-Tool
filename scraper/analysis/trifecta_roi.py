@@ -11,6 +11,7 @@ _ROOT = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, _ROOT)
 from train_softmax import forward
+from train_mlp import forward as forward_mlp
 from build_dataset import build_X2, build_X3
 
 MAX_CARS = 9
@@ -95,3 +96,37 @@ def trifecta_ev(probs_cars, odds_table, stake=100):
         rows.append((k, p, odds_table[k], ev))
     rows.sort(key=lambda r: r[3], reverse=True)
     return rows
+
+def _fwd(W, X, mask):
+    """W が dict なら MLP、ndarray なら線形。"""
+    if isinstance(W, dict):
+        P, _ = forward_mlp(X, W, mask)
+        return P
+    return forward(X, W, mask)
+
+
+def predict_race_probs_mixed(X, mask, scores, line_ids, line_pos, W1, W2, W3,
+                              top_k_a=None, prob_floor=1e-10):
+    """W1/W2/W3 それぞれが dict (MLP) か ndarray (linear) か自動判定して計算。"""
+    P1 = _fwd(W1, X[None], mask[None])[0]
+    a_order = [int(a) for a in np.argsort(-P1) if mask[a] > 0]
+    if top_k_a is not None:
+        a_order = a_order[:top_k_a]
+    probs = {}
+    for a in a_order:
+        if P1[a] < prob_floor:
+            continue
+        X2, mask2 = build_X2(X, scores, line_ids, line_pos, mask, a)
+        P2 = _fwd(W2, X2[None], mask2[None])[0]
+        for b in np.where(mask2 > 0)[0]:
+            b = int(b)
+            if P2[b] < prob_floor:
+                continue
+            X3, mask3 = build_X3(X, scores, line_ids, line_pos, mask, a, b)
+            P3 = _fwd(W3, X3[None], mask3[None])[0]
+            for c in np.where(mask3 > 0)[0]:
+                c = int(c)
+                if P3[c] < prob_floor:
+                    continue
+                probs[(a, b, c)] = float(P1[a] * P2[b] * P3[c])
+    return probs
