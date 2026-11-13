@@ -95,7 +95,7 @@ def rider_features(r, line_map, pos_map, race_scores, venue_name=None,
         _is_local(r, venue_name),
         *_comment_features(r.get("コメント") or ""),
         # 追加3次元: 今場所前場所（平均着順・連対率・特異マーカー率）
-        *_parse_kyo_basho(r.get("今場所前場所")),
+        *_line_dynamics_features(r, line_map, pos_map, ctx.get("score_by_car", {})),
     ]
 
 def _split_kyo_prev(s):
@@ -150,6 +150,39 @@ def _parse_kyo_basho(s):
     rentai = sum(1 for v in numerics if v <= 2) / len(numerics) if numerics else 0.0
     abnormal = markers / total
     return avg_fin, rentai, abnormal
+
+
+def _line_dynamics_features(r, line_map, pos_map, score_by_car):
+    """ライン力学の3特徴（A, B, C）:
+    A: 自ライン先頭の競走得点 - 自分の競走得点
+    B: 同ラインで自分より競走得点が高い選手数
+    C: 自分の車番±1に他ラインの先頭車がいるか (0/1)
+    """
+    car = safe_int(r.get("車番"))
+    score = safe_float(r.get("競走得点"))
+    line_id = line_map.get(car, -1)
+    if line_id < 0 or not score_by_car:
+        return 0.0, 0.0, 0.0
+    leader_car = None
+    for c, lid in line_map.items():
+        if lid == line_id and pos_map.get(c) == 0:
+            leader_car = c
+            break
+    a_val = 0.0
+    if leader_car is not None:
+        a_val = score_by_car.get(leader_car, 0.0) - score
+    b_val = 0
+    for c, lid in line_map.items():
+        if lid == line_id and c != car:
+            if score_by_car.get(c, -999) > score:
+                b_val += 1
+    c_val = 0.0
+    my_line = line_map.get(car, -1)
+    for nb in (car - 1, car + 1):
+        if nb in line_map and pos_map.get(nb) == 0 and line_map[nb] != my_line:
+            c_val = 1.0
+            break
+    return float(a_val), float(b_val), c_val
 
 
 def _race_ctx(d):

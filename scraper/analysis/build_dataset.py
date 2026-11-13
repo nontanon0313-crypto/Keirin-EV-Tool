@@ -139,6 +139,7 @@ def process_race_v2(path):
     order = [int(r['車番']) for r in sorted(results, key=lambda x: int(x['着順']))[:3]]
     scores_list = _safe_scores(riders)
     race_ctx = _race_ctx(d)
+    race_ctx["score_by_car"] = {int(r['車番']): s for r, s in zip(riders, scores_list)}
     try:
         feats = np.array([rider_features(r, line_map, pos_map, scores_list, venue_name=venue, race_ctx=race_ctx) for r in riders], dtype=np.float32)
     except Exception:
