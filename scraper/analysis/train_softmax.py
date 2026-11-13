@@ -12,8 +12,16 @@ def load_data():
     te_X = (te['X'] - mean) / std
     tr_X = tr_X * tr['mask'][..., None]
     te_X = te_X * te['mask'][..., None]
-    return {'X': tr_X, 'mask': tr['mask'], 'n': tr['n'], 'y': tr['y']}, \
-           {'X': te_X, 'mask': te['mask'], 'n': te['n'], 'y': te['y']}
+    # X2: 27次元部分のみ標準化。28〜31列は関係特徴でスケール済み（pos_diff等）→ 標準化対象外
+    tr_X2 = tr['X2'].copy(); te_X2 = te['X2'].copy()
+    tr_X2[:, :, :27] = ((tr['X2'][:, :, :27] - mean) / std) * tr['mask2'][..., None]
+    te_X2[:, :, :27] = ((te['X2'][:, :, :27] - mean) / std) * te['mask2'][..., None]
+    tr_X2 = tr_X2 * tr['mask2'][..., None]
+    te_X2 = te_X2 * te['mask2'][..., None]
+    return ({'X': tr_X, 'mask': tr['mask'], 'n': tr['n'], 'y': tr['y'],
+             'X2': tr_X2, 'mask2': tr['mask2'], 'y2': tr['y2']},
+            {'X': te_X, 'mask': te['mask'], 'n': te['n'], 'y': te['y'],
+             'X2': te_X2, 'mask2': te['mask2'], 'y2': te['y2']})
 
 def softmax_masked(scores, mask):
     """scores:(N,L), mask:(N,L)。パディング位置は確率0。"""
