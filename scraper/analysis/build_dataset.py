@@ -6,28 +6,112 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, _ROOT)
 from extract_features import extract_one_race, rider_features
 from venue_region import venue_region
+from app.keirin_data import JO_CODE_TO_VENUE
+
+MAX_CARS = 9
+
+
+def jo_to_venue(jo_code):
+    return JO_CODE_TO_VENUE.get(str(jo_code))
+
+
+def _safe_scores(riders):
+    out = []
+    for r in riders:
+        try:
+            out.append(float(r['競走得点']))
+        except Exception:
+            out.append(0.0)
+    return out
+
+
+def _line_arrays(riders, line_map, pos_map):
+    cars = np.zeros(MAX_CARS, dtype=np.int32)
+    line_ids = np.full(MAX_CARS, -1, dtype=np.int32)
+    line_pos = np.full(MAX_CARS, -1, dtype=np.int32)
+    for i, r in enumerate(riders):
+        car = int(r['車番'])
+        cars[i] = car
+        line_ids[i] = line_map.get(car, -1)
+        line_pos[i] = pos_map.get(car, -1)
+    return cars, line_ids, line_pos
+
+
+def build_X2(X, scores, line_ids, line_pos, mask, a_slot):
+    """2着モデル入力（9スロット固定）。
+    a_slot = 1着車のスロット番号（実績でも予測でもよい）。
+    X2[a_slot] は mask2=0、それ以外の有効スロットは mask2=1。
+    X2[:, 27:31] は a_slot を基準とした関係特徴。
+    """
+    X2 = np.zeros((MAX_CARS, 31), dtype=np.float32)
+    mask2 = np.zeros(MAX_CARS, dtype=np.float32)
+    if mask[a_slot] <= 0:
+        return X2, mask2
+    a_line = int(line_ids[a_slot])
+    a_score = float(scores[a_slot])
+    a_pos = int(line_pos[a_slot])
+    for i in range(MAX_CARS):
+        if mask[i] <= 0 or i == a_slot:
+            continue
+        sl = 1.0 if (int(line_ids[i]) == a_line and a_line >= 0) else 0.0
+        pd = float(int(line_pos[i]) - a_pos) if (a_pos >= 0 and int(line_pos[i]) >= 0) else 0.0
+        sd = float(scores[i] - a_score)
+        X2[i, :27] = X[i, :27]
+        X2[i, 27] = sl
+        X2[i, 28] = pd
+        X2[i, 29] = sd
+        X2[i, 30] = float(a_line)
+        mask2[i] = 1.0
+    return X2, mask2
+
+
+def build_X3(X, scores, line_ids, line_pos, mask, a_slot, b_slot):
+    """3着モデル入力（9スロット固定）。
+    a_slot = 1着車, b_slot = 2着車 のスロット番号（実績でも予測でもよい）。
+    """
+    X3 = np.zeros((MAX_CARS, 35), dtype=np.float32)
+    mask3 = np.zeros(MAX_CARS, dtype=np.float32)
+    if mask[a_slot] <= 0 or mask[b_slot] <= 0:
+        return X3, mask3
+    a_line = int(line_ids[a_slot]); a_score = float(scores[a_slot]); a_pos = int(line_pos[a_slot])
+    b_line = int(line_ids[b_slot]); b_score = float(scores[b_slot]); b_pos = int(line_pos[b_slot])
+    for i in range(MAX_CARS):
+        if mask[i] <= 0 or i == a_slot or i == b_slot:
+            continue
+        sl1 = 1.0 if (int(line_ids[i]) == a_line and a_line >= 0) else 0.0
+        pd1 = float(int(line_pos[i]) - a_pos) if (a_pos >= 0 and int(line_pos[i]) >= 0) else 0.0
+        sd1 = float(scores[i] - a_score)
+        sl2 = 1.0 if (int(line_ids[i]) == b_line and b_line >= 0) else 0.0
+        pd2 = float(int(line_pos[i]) - b_pos) if (b_pos >= 0 and int(line_pos[i]) >= 0) else 0.0
+        sd2 = float(scores[i] - b_score)
+        X3[i, :27] = X[i, :27]
+        X3[i, 27] = sl1; X3[i, 28] = pd1; X3[i, 29] = sd1; X3[i, 30] = float(a_line)
+        X3[i, 31] = sl2; X3[i, 32] = pd2; X3[i, 33] = sd2; X3[i, 34] = float(b_line)
+        mask3[i] = 1.0
+    return X3, mask3
+
 
 def process_race(path):
-    """1レースを処理。成功: (X_7x27, y_1着idx, y_2着idx, y_3着idx, race_id) 失敗: None"""
+    """旧API（互換用、7車固定）。"""
     res = extract_one_race(path)
-    if not res: return None
+    if not res:
+        return None
     riders, line_map, pos_map, d = res
     jo = d.get('jo_code', '')
     kai = d.get('kaisai_bi', '')
     rno = d.get('race_no', 0)
-    venue = venue_region(jo)  # 会場名は別途、jo_code→venueに置換要
+    venue = venue_region(jo)
     results = d.get('result', {}).get('results', [])
-    if not results or len(results) < 3: return None
+    if not results or len(results) < 3:
+        return None
     order = [int(r['車番']) for r in sorted(results, key=lambda x: int(x['着順']))[:3]]
-    scores = []
-    for r in riders:
-        try: scores.append(float(r['競走得点']))
-        except: scores.append(0.0)
+    scores = _safe_scores(riders)
     try:
         X = np.array([rider_features(r, line_map, pos_map, scores, venue_name=venue) for r in riders], dtype=np.float32)
-    except Exception as e:
+    except Exception:
         return None
-    if X.shape != (7, 27): return None
+    if X.shape != (7, 27):
+        return None
     car_to_idx = {int(r['車番']): i for i, r in enumerate(riders)}
     try:
         y1, y2, y3 = [car_to_idx[c] for c in order]
@@ -35,120 +119,113 @@ def process_race(path):
         return None
     return X, y1, y2, y3, f"oddspark:{jo}:{kai}:{rno}"
 
-from app.keirin_data import JO_CODE_TO_VENUE
-
-def jo_to_venue(jo_code):
-    return JO_CODE_TO_VENUE.get(str(jo_code))
-
-MAX_CARS = 9
 
 def process_race_v2(path):
     res = extract_one_race(path)
-    if not res: return None
+    if not res:
+        return None
     riders, line_map, pos_map, d = res
-    if not (5 <= len(riders) <= MAX_CARS): return None
+    n = len(riders)
+    if not (5 <= n <= MAX_CARS):
+        return None
     jo = str(d.get('jo_code', ''))
     kai = str(d.get('kaisai_bi', ''))
     rno = d.get('race_no', 0)
     venue = jo_to_venue(jo)
-    if not venue: return None
+    if not venue:
+        return None
     results = d.get('result', {}).get('results', [])
-    if not results or len(results) < 3: return None
+    if not results or len(results) < 3:
+        return None
     order = [int(r['車番']) for r in sorted(results, key=lambda x: int(x['着順']))[:3]]
-    scores = []
-    for r in riders:
-        try: scores.append(float(r['競走得点']))
-        except: scores.append(0.0)
+    scores_list = _safe_scores(riders)
     try:
-        feats = np.array([rider_features(r, line_map, pos_map, scores, venue_name=venue) for r in riders], dtype=np.float32)
+        feats = np.array([rider_features(r, line_map, pos_map, scores_list, venue_name=venue) for r in riders], dtype=np.float32)
     except Exception:
         return None
-    if feats.shape != (len(riders), 27): return None
-    n = len(riders)
+    if feats.shape != (n, 27):
+        return None
+
     X = np.zeros((MAX_CARS, 27), dtype=np.float32)
     mask = np.zeros(MAX_CARS, dtype=np.float32)
     X[:n] = feats
     mask[:n] = 1.0
+
+    cars, line_ids, line_pos = _line_arrays(riders, line_map, pos_map)
+    scores = np.zeros(MAX_CARS, dtype=np.float32)
+    scores[:n] = scores_list
+
     car_to_idx = {int(r['車番']): i for i, r in enumerate(riders)}
     try:
         y1, y2, y3 = [car_to_idx[c] for c in order]
     except KeyError:
         return None
-    # 2着用データ: 1着を除いた8車、+1着との関係特徴4つ
-    X2 = np.zeros((MAX_CARS, 31), dtype=np.float32)
-    mask2 = np.zeros(MAX_CARS, dtype=np.float32)
-    win_car = int(riders[y1]['車番'])
-    win_line = line_map.get(win_car, -1)
-    win_score = scores[y1]
-    win_pos = pos_map.get(win_car, -1)
-    j = 0
-    y2_relidx = -1
-    for i, r in enumerate(riders):
-        if i == y1: continue
-        car = int(r['車番'])
-        same_line = 1.0 if line_map.get(car) == win_line and win_line >= 0 else 0.0
-        pos_diff = (pos_map.get(car, -1) - win_pos) if win_pos >= 0 and pos_map.get(car) is not None else 0.0
-        score_diff = scores[i] - win_score
-        X2[j, :27] = X[i, :27]
-        X2[j, 27] = same_line
-        X2[j, 28] = pos_diff
-        X2[j, 29] = score_diff
-        X2[j, 30] = win_line  # 1着のラインID
-        mask2[j] = 1.0
-        if i == y2: y2_relidx = j
-        j += 1
-    return X, mask, y1, y2, y3, X2, mask2, y2_relidx, n, f"oddspark:{jo}:{kai}:{rno}"
+
+    X2, mask2 = build_X2(X, scores, line_ids, line_pos, mask, y1)
+    X3, mask3 = build_X3(X, scores, line_ids, line_pos, mask, y1, y2)
+
+    return {
+        'X': X, 'mask': mask, 'n': n, 'y': (y1, y2, y3),
+        'X2': X2, 'mask2': mask2, 'y2': y2,
+        'X3': X3, 'mask3': mask3, 'y3': y3,
+        'cars': cars, 'scores': scores,
+        'line_ids': line_ids, 'line_pos': line_pos,
+        'race_id': f"oddspark:{jo}:{kai}:{rno}",
+    }
+
 
 def main():
     files = sorted(glob.glob('scraper/data*/2026*.json'))
     print(f"対象ファイル: {len(files)}")
-    all_X, all_mask, all_n, all_y = [], [], [], []
-    all_X2, all_mask2, all_y2 = [], [], []
+    keys_arr = ['X', 'mask', 'n', 'X2', 'mask2', 'y2', 'X3', 'mask3', 'y3',
+                'cars', 'scores', 'line_ids', 'line_pos']
+    all_d = {k: [] for k in keys_arr}
+    all_y, all_race_ids = [], []
     n_err = 0
     for i, f in enumerate(files):
         r = process_race_v2(f)
         if r is None:
             n_err += 1
             continue
-        X, mask, y1, y2, y3, X2, mask2, y2_relidx, n, rid = r
-        all_X.append(X); all_mask.append(mask); all_n.append(n); all_y.append((y1, y2, y3))
-        all_X2.append(X2); all_mask2.append(mask2); all_y2.append(y2_relidx)
-        if (i+1) % 2000 == 0:
-            print(f"  {i+1}/{len(files)}  成功{len(all_X)}  失敗{n_err}")
-    if not all_X:
+        for k in keys_arr:
+            all_d[k].append(r[k])
+        all_y.append(r['y'])
+        all_race_ids.append(r['race_id'])
+        if (i + 1) % 2000 == 0:
+            print(f"  {i+1}/{len(files)}  成功{len(all_y)}  失敗{n_err}")
+    if not all_y:
         print("ERROR: 有効データが空")
         return
-    all_X = np.array(all_X, dtype=np.float32)
-    all_mask = np.array(all_mask, dtype=np.float32)
-    all_n = np.array(all_n, dtype=np.int32)
-    all_y = np.array(all_y, dtype=np.int32)
-    all_X2 = np.array(all_X2, dtype=np.float32)
-    all_mask2 = np.array(all_mask2, dtype=np.float32)
-    all_y2 = np.array(all_y2, dtype=np.int32)
-    n_total = len(all_X)
+    arrays = {k: np.array(v) for k, v in all_d.items()}
+    arrays['y'] = np.array(all_y, dtype=np.int32)
+    arrays['mask'] = arrays['mask'].astype(np.float32)
+    arrays['mask2'] = arrays['mask2'].astype(np.float32)
+    arrays['mask3'] = arrays['mask3'].astype(np.float32)
+    arrays['n'] = arrays['n'].astype(np.int32)
+    arrays['y2'] = arrays['y2'].astype(np.int32)
+    arrays['y3'] = arrays['y3'].astype(np.int32)
+    arrays['cars'] = arrays['cars'].astype(np.int32)
+    arrays['scores'] = arrays['scores'].astype(np.float32)
+    arrays['line_ids'] = arrays['line_ids'].astype(np.int32)
+    arrays['line_pos'] = arrays['line_pos'].astype(np.int32)
+
+    n_total = len(arrays['y'])
     rng = np.random.default_rng(42)
     perm = rng.permutation(n_total)
     n_train = int(n_total * 0.8)
-    train_idx = perm[:n_train]
-    test_idx = perm[n_train:]
-    train_X, train_mask, train_n, train_y = all_X[train_idx], all_mask[train_idx], all_n[train_idx], all_y[train_idx]
-    test_X, test_mask, test_n, test_y = all_X[test_idx], all_mask[test_idx], all_n[test_idx], all_y[test_idx]
-    train_X2, train_mask2, train_y2 = all_X2[train_idx], all_mask2[train_idx], all_y2[train_idx]
-    test_X2, test_mask2, test_y2 = all_X2[test_idx], all_mask2[test_idx], all_y2[test_idx]
-    if len(train_X) == 0 or len(test_X) == 0:
-        print("ERROR: 訓練/検証データが空")
-        return
-    train_X = np.array(train_X, dtype=np.float32)
-    test_X = np.array(test_X, dtype=np.float32)
-    train_y = np.array(train_y, dtype=np.int32)
-    test_y = np.array(test_y, dtype=np.int32)
+    tr_idx = perm[:n_train]
+    te_idx = perm[n_train:]
+
     out_dir = 'scraper/analysis/data'
     os.makedirs(out_dir, exist_ok=True)
-    np.savez_compressed(f'{out_dir}/train.npz', X=train_X, mask=train_mask, n=train_n, y=train_y, X2=train_X2, mask2=train_mask2, y2=train_y2)
-    np.savez_compressed(f'{out_dir}/test.npz', X=test_X, mask=test_mask, n=test_n, y=test_y, X2=test_X2, mask2=test_mask2, y2=test_y2)
-    print(f"\n訓練: X{train_X.shape} y{train_y.shape}")
-    print(f"検証: X{test_X.shape} y{test_y.shape}")
+    tr = {k: arrays[k][tr_idx] for k in arrays}
+    te = {k: arrays[k][te_idx] for k in arrays}
+    np.savez_compressed(f'{out_dir}/train.npz', **tr)
+    np.savez_compressed(f'{out_dir}/test.npz', **te)
+    print(f"\n訓練: X{tr['X'].shape} y{tr['y'].shape}")
+    print(f"検証: X{te['X'].shape} y{te['y'].shape}")
     print(f"保存: {out_dir}/train.npz, test.npz")
+
 
 if __name__ == '__main__':
     main()
