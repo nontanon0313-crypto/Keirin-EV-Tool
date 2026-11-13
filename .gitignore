@@ -5,3 +5,7 @@ __pycache__/
 scraper/data/
 scraper/pipeline_progress.json
 ~/
+
+# 派生物（build_dataset.py から再生成可能）— 追跡除外
+scraper/analysis/data/train.npz
+scraper/analysis/data/test.npz

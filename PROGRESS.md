@@ -431,3 +431,11 @@
 - SW: HTML/JS を network-first に変更
 - 購入記録ボタン listener をガード
 - SW 更新時のリロード処理を追加
+
+### D. 3連単合成の再構築（2026-11-13）
+- X2/X3 を相対インデックス方式から **9スロット固定方式** へ変更。`cars`（スロット→車番写像）を NPZ に追加保存。
+- `build_X2(a_slot)` / `build_X3(a_slot, b_slot)` を関数化し、**訓練と推論で同一関数**を通す。train-serving skew（関係特徴を実 y1/y2 基準で訓練し予測 y1 で使う不整合）を構造的に排除。
+- `trifecta_roi.py` は `P(a,b,c) = P1(a) · P2(b|a) · P3(c|a,b)` の条件付き連鎖で実装。スモークテスト: 確率和 1.000000、平均的中率 3.151%（過去 39% 異常値の再発なし）。
+- 3着モデル再学習: 対数損失 1.4381 / Top1 40.33% / Top3 80.25%（9スロット固定版）。
+- **誤コミット記録**: `train.npz` / `test.npz` を一度コミットに含めた。`git rm --cached` で追跡除外 + `.gitignore` 追記。詳細は `AI_WORK_RULES.md` の「再発防止記録」参照。
+- **次の作業**: `trifecta_roi.py` の `trifecta_ev()` にオッズ表を接続し、backtest で EV 上位買い目の ROI を実測。`odds_table` の供給元（`scraper/data*/2026*.json` の `result.payouts` か、`fetch_upcoming_odds.py` 経由か）を確定する。
