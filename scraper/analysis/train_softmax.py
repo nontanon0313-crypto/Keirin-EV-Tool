@@ -12,16 +12,16 @@ def load_data():
     te_X = (te['X'] - mean) / std
     tr_X = tr_X * tr['mask'][..., None]
     te_X = te_X * te['mask'][..., None]
-    # X2: 27次元部分のみ標準化。28〜31列は関係特徴でスケール済み（pos_diff等）→ 標準化対象外
+    # X2: 30次元基本部分のみ標準化。31列目以降は関係特徴でスケール済み → 標準化対象外
     tr_X2 = tr['X2'].copy(); te_X2 = te['X2'].copy()
-    tr_X2[:, :, :27] = ((tr['X2'][:, :, :27] - mean) / std) * tr['mask2'][..., None]
-    te_X2[:, :, :27] = ((te['X2'][:, :, :27] - mean) / std) * te['mask2'][..., None]
+    tr_X2[:, :, :30] = ((tr['X2'][:, :, :30] - mean[:30]) / std[:30]) * tr['mask2'][..., None]
+    te_X2[:, :, :30] = ((te['X2'][:, :, :30] - mean[:30]) / std[:30]) * te['mask2'][..., None]
     tr_X2 = tr_X2 * tr['mask2'][..., None]
     te_X2 = te_X2 * te['mask2'][..., None]
-    # X3: 27次元部分のみ標準化。28〜35列は関係特徴
+    # X3: 30次元基本部分のみ標準化。31列目以降は関係特徴
     tr_X3 = tr['X3'].copy(); te_X3 = te['X3'].copy()
-    tr_X3[:, :, :27] = ((tr['X3'][:, :, :27] - mean) / std) * tr['mask3'][..., None]
-    te_X3[:, :, :27] = ((te['X3'][:, :, :27] - mean) / std) * te['mask3'][..., None]
+    tr_X3[:, :, :30] = ((tr['X3'][:, :, :30] - mean[:30]) / std[:30]) * tr['mask3'][..., None]
+    te_X3[:, :, :30] = ((te['X3'][:, :, :30] - mean[:30]) / std[:30]) * te['mask3'][..., None]
     tr_X3 = tr_X3 * tr['mask3'][..., None]
     te_X3 = te_X3 * te['mask3'][..., None]
     return ({'X': tr_X, 'mask': tr['mask'], 'n': tr['n'], 'y': tr['y'],

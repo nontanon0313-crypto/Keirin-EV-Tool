@@ -4,7 +4,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, _ROOT)
-from extract_features import extract_one_race, rider_features
+from extract_features import extract_one_race, rider_features, _race_ctx
 from venue_region import venue_region
 from app.keirin_data import JO_CODE_TO_VENUE
 
@@ -38,12 +38,11 @@ def _line_arrays(riders, line_map, pos_map):
 
 
 def build_X2(X, scores, line_ids, line_pos, mask, a_slot):
-    """2着モデル入力（9スロット固定）。
+    """2着モデル入力（9スロット固定、30次元基本 + 関係4 = 34次元）。
     a_slot = 1着車のスロット番号（実績でも予測でもよい）。
     X2[a_slot] は mask2=0、それ以外の有効スロットは mask2=1。
-    X2[:, 27:31] は a_slot を基準とした関係特徴。
     """
-    X2 = np.zeros((MAX_CARS, 31), dtype=np.float32)
+    X2 = np.zeros((MAX_CARS, 34), dtype=np.float32)
     mask2 = np.zeros(MAX_CARS, dtype=np.float32)
     if mask[a_slot] <= 0:
         return X2, mask2
@@ -56,20 +55,20 @@ def build_X2(X, scores, line_ids, line_pos, mask, a_slot):
         sl = 1.0 if (int(line_ids[i]) == a_line and a_line >= 0) else 0.0
         pd = float(int(line_pos[i]) - a_pos) if (a_pos >= 0 and int(line_pos[i]) >= 0) else 0.0
         sd = float(scores[i] - a_score)
-        X2[i, :27] = X[i, :27]
-        X2[i, 27] = sl
-        X2[i, 28] = pd
-        X2[i, 29] = sd
-        X2[i, 30] = float(a_line)
+        X2[i, :30] = X[i, :30]
+        X2[i, 30] = sl
+        X2[i, 31] = pd
+        X2[i, 32] = sd
+        X2[i, 33] = float(a_line)
         mask2[i] = 1.0
     return X2, mask2
 
 
 def build_X3(X, scores, line_ids, line_pos, mask, a_slot, b_slot):
-    """3着モデル入力（9スロット固定）。
+    """3着モデル入力（9スロット固定、30次元基本 + 関係8 = 38次元）。
     a_slot = 1着車, b_slot = 2着車 のスロット番号（実績でも予測でもよい）。
     """
-    X3 = np.zeros((MAX_CARS, 35), dtype=np.float32)
+    X3 = np.zeros((MAX_CARS, 38), dtype=np.float32)
     mask3 = np.zeros(MAX_CARS, dtype=np.float32)
     if mask[a_slot] <= 0 or mask[b_slot] <= 0:
         return X3, mask3
@@ -84,9 +83,9 @@ def build_X3(X, scores, line_ids, line_pos, mask, a_slot, b_slot):
         sl2 = 1.0 if (int(line_ids[i]) == b_line and b_line >= 0) else 0.0
         pd2 = float(int(line_pos[i]) - b_pos) if (b_pos >= 0 and int(line_pos[i]) >= 0) else 0.0
         sd2 = float(scores[i] - b_score)
-        X3[i, :27] = X[i, :27]
-        X3[i, 27] = sl1; X3[i, 28] = pd1; X3[i, 29] = sd1; X3[i, 30] = float(a_line)
-        X3[i, 31] = sl2; X3[i, 32] = pd2; X3[i, 33] = sd2; X3[i, 34] = float(b_line)
+        X3[i, :30] = X[i, :30]
+        X3[i, 30] = sl1; X3[i, 31] = pd1; X3[i, 32] = sd1; X3[i, 33] = float(a_line)
+        X3[i, 34] = sl2; X3[i, 35] = pd2; X3[i, 36] = sd2; X3[i, 37] = float(b_line)
         mask3[i] = 1.0
     return X3, mask3
 
@@ -139,14 +138,15 @@ def process_race_v2(path):
         return None
     order = [int(r['車番']) for r in sorted(results, key=lambda x: int(x['着順']))[:3]]
     scores_list = _safe_scores(riders)
+    race_ctx = _race_ctx(d)
     try:
-        feats = np.array([rider_features(r, line_map, pos_map, scores_list, venue_name=venue) for r in riders], dtype=np.float32)
+        feats = np.array([rider_features(r, line_map, pos_map, scores_list, venue_name=venue, race_ctx=race_ctx) for r in riders], dtype=np.float32)
     except Exception:
         return None
-    if feats.shape != (n, 27):
+    if feats.shape != (n, 30):
         return None
 
-    X = np.zeros((MAX_CARS, 27), dtype=np.float32)
+    X = np.zeros((MAX_CARS, 30), dtype=np.float32)
     mask = np.zeros(MAX_CARS, dtype=np.float32)
     X[:n] = feats
     mask[:n] = 1.0

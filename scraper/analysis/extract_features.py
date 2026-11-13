@@ -2,16 +2,28 @@ import json, glob, os, sys
 import numpy as np
 from venue_region import venue_prefecture
 
-# 級班: A級/S級/L級(ガールズ) × 1班/2班/3班。全角表記ゆれも吸収
 GRADE_CLASSES = {
     "A級1班": 0, "A級2班": 1, "A級3班": 2,
     "S級1班": 3, "S級2班": 4,
     "L級1班": 5,
     "Ａ１": 0, "Ａ２": 1, "Ａ３": 2, "Ｓ１": 3, "Ｓ２": 4,
 }
-# 脚質: 逃/追/両の3種類のみ
 LEG_STYLES = {"逃": 0, "追": 1, "両": 2}
 WAKU_CLASSES = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5}
+
+# 追加: レースグレード
+RACE_GRADE = {
+    "F1": 0, "F2": 1,
+    "G1": 2, "G2": 3, "G3": 4,
+    "GP": 5,
+}
+# 追加: レース種別（race_name から推定）
+def _race_type(race_name):
+    rn = str(race_name or "")
+    if "決勝" in rn: return 2
+    if "準決" in rn or "準々" in rn: return 1
+    if "予選" in rn or "一般" in rn or "特選" in rn: return 0
+    return -1
 
 def safe_float(v, default=0.0):
     try: return float(v)
@@ -22,7 +34,6 @@ def safe_int(v, default=0):
     except (ValueError, TypeError): return default
 
 def extract_one_race(path):
-    """1レース分を読み、出走選手とライン情報を返す。"""
     try:
         d = json.load(open(path, encoding='utf-8'))
     except Exception:
@@ -40,8 +51,22 @@ def extract_one_race(path):
             pos_map[int(car)] = pos
     return riders, line_map, pos_map, d
 
-def rider_features(r, line_map, pos_map, race_scores, venue_name=None):
-    """1選手の特徴ベクトル(20次元)。"""
+def _recent_stats(r):
+    """直近着順 {1着,2着,3着,着外} から率を計算。"""
+    rec = r.get("直近着順")
+    if not isinstance(rec, dict):
+        return 0.0, 0.0, 0.0
+    n1 = safe_int(rec.get("1着"))
+    n2 = safe_int(rec.get("2着"))
+    n3 = safe_int(rec.get("3着"))
+    no = safe_int(rec.get("着外"))
+    tot = n1 + n2 + n3 + no
+    if tot <= 0: return 0.0, 0.0, 0.0
+    return n1/tot, (n1+n2)/tot, (n1+n2+n3)/tot
+
+def rider_features(r, line_map, pos_map, race_scores, venue_name=None,
+                   race_ctx=None):
+    """1選手の特徴ベクトル(34次元)。race_ctx はレース単位の付加特徴（全選手同値）。"""
     car = safe_int(r.get("車番"))
     score = safe_float(r.get("競走得点"))
     race_mean = np.mean(race_scores)
@@ -49,6 +74,8 @@ def rider_features(r, line_map, pos_map, race_scores, venue_name=None):
     line_id = line_map.get(car, -1)
     line_pos = pos_map.get(car, 99)
     line_size = sum(1 for v in line_map.values() if v == line_id) if line_id >= 0 else 1
+    r1, r12, r123 = _recent_stats(r)
+    ctx = race_ctx or {}
     return [
         score,
         safe_float(r.get("勝率")) / 100,
@@ -65,14 +92,87 @@ def rider_features(r, line_map, pos_map, race_scores, venue_name=None):
         LEG_STYLES.get(r.get("脚質"), -1),
         GRADE_CLASSES.get(r.get("級班"), -1),
         WAKU_CLASSES.get(safe_int(r.get("枠番")), -1),
-        # 地元フラグ (地区一致=1, 不一致=0, 不明=-1)
         _is_local(r, venue_name),
-        # コメント特徴 (6次元を展開)
         *_comment_features(r.get("コメント") or ""),
+        # 追加3次元: 今場所前場所（平均着順・連対率・特異マーカー率）
+        *_parse_kyo_basho(r.get("今場所前場所")),
     ]
 
+def _split_kyo_prev(s):
+    """今場所前場所 を 今場所部 / 前場所部 に分割。"""
+    VENUE_CHARS = set('ＦＧＰＬｆｇｐｌFGPLfgpl')
+    if not s: return '', ''
+    s = s.strip()
+    tokens = s.split()
+    venue_idxs = []
+    for i, tok in enumerate(tokens):
+        if len(tok) >= 3 and any(c in VENUE_CHARS for c in tok):
+            venue_idxs.append(i)
+    if len(venue_idxs) >= 2:
+        i2 = venue_idxs[1]
+        return ' '.join(tokens[:i2]), ' '.join(tokens[i2:])
+    return s, ''
+
+
+def _parse_kyo_basho(s):
+    """前場所部分のみをパースして3次元を返す（今場所は未来情報のため除外）。
+    Slot1: 平均着順（数値着順 1-9 のみの平均。0件なら 0）
+    Slot2: 連対率（1-2着の割合。0件なら 0）
+    Slot3: 特異マーカー率（S/H/B/落/途欠/病/補 等の割合）
+    """
+    if not s or not isinstance(s, str):
+        return 0.0, 0.0, 0.0
+    _, prev = _split_kyo_prev(s)
+    if not prev:
+        return 0.0, 0.0, 0.0
+    trans = str.maketrans(
+        '０１２３４５６７８９ＦＧＰＬｆｇｐｌＳＨＢ',
+        '0123456789FGPLfgplSHB'
+    )
+    s2 = prev.translate(trans)
+    tokens = s2.split()
+    VENUE_CHARS = set('FGPLfgpl')
+    numerics = []
+    markers = 0
+    for tok in tokens:
+        if any(c in VENUE_CHARS for c in tok):
+            continue
+        if tok.isdigit():
+            v = int(tok)
+            if 1 <= v <= 9:
+                numerics.append(v)
+                continue
+        markers += 1
+    total = len(numerics) + markers
+    if total == 0:
+        return 0.0, 0.0, 0.0
+    avg_fin = float(sum(numerics)) / len(numerics) if numerics else 0.0
+    rentai = sum(1 for v in numerics if v <= 2) / len(numerics) if numerics else 0.0
+    abnormal = markers / total
+    return avg_fin, rentai, abnormal
+
+
+def _race_ctx(d):
+    """レース単位の付加特徴。全選手で同値。"""
+    entry = d.get('entry', {})
+    grade = entry.get('grade', '')
+    rn = entry.get('race_name', '')
+    post_iso = entry.get('post_time_iso', '')
+    hour = -1
+    if post_iso and 'T' in post_iso:
+        try:
+            hour = int(post_iso.split('T')[1][:2])
+        except (ValueError, IndexError):
+            pass
+    race_no = safe_int(d.get('race_no', 0))
+    return {
+        "race_grade": RACE_GRADE.get(str(grade), -1),
+        "race_type": _race_type(rn),
+        "post_hour": hour,
+        "is_last_race": 1 if race_no >= 11 else 0,
+    }
+
 def _is_local(r, venue_name):
-    """選手の出身地(地区=都道府県)とバンク所在地(都道府県)が一致すれば1, 不一致0, 不明-1。"""
     if not venue_name:
         return -1
     pref = venue_prefecture(venue_name)
@@ -84,7 +184,6 @@ def _is_local(r, venue_name):
     return 1 if player_pref == pref else 0
 
 def _comment_features(c):
-    """コメントを特徴量化。(6次元)"""
     c = c.strip()
     return [
         1 if "自力自在" in c else 0,
