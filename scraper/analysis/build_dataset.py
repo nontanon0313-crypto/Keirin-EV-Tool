@@ -209,6 +209,7 @@ def main():
     arrays['scores'] = arrays['scores'].astype(np.float32)
     arrays['line_ids'] = arrays['line_ids'].astype(np.int32)
     arrays['line_pos'] = arrays['line_pos'].astype(np.int32)
+    arrays['race_id'] = np.array(all_race_ids, dtype='U40')
 
     n_total = len(arrays['y'])
     rng = np.random.default_rng(42)
