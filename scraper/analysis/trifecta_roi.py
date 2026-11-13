@@ -34,6 +34,8 @@ def load_inference_data(npz_path, norm_path,
         'line_ids': d['line_ids'].astype(np.int32),
         'line_pos': d['line_pos'].astype(np.int32),
     }
+    if 'race_id' in d.files:
+        out['race_id'] = d['race_id']
     if w1_path:
         out['W1'] = np.load(w1_path)
     if w2_path:
