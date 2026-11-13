@@ -18,10 +18,18 @@ def load_data():
     te_X2[:, :, :27] = ((te['X2'][:, :, :27] - mean) / std) * te['mask2'][..., None]
     tr_X2 = tr_X2 * tr['mask2'][..., None]
     te_X2 = te_X2 * te['mask2'][..., None]
+    # X3: 27次元部分のみ標準化。28〜35列は関係特徴
+    tr_X3 = tr['X3'].copy(); te_X3 = te['X3'].copy()
+    tr_X3[:, :, :27] = ((tr['X3'][:, :, :27] - mean) / std) * tr['mask3'][..., None]
+    te_X3[:, :, :27] = ((te['X3'][:, :, :27] - mean) / std) * te['mask3'][..., None]
+    tr_X3 = tr_X3 * tr['mask3'][..., None]
+    te_X3 = te_X3 * te['mask3'][..., None]
     return ({'X': tr_X, 'mask': tr['mask'], 'n': tr['n'], 'y': tr['y'],
-             'X2': tr_X2, 'mask2': tr['mask2'], 'y2': tr['y2']},
+             'X2': tr_X2, 'mask2': tr['mask2'], 'y2': tr['y2'],
+             'X3': tr_X3, 'mask3': tr['mask3'], 'y3': tr['y3']},
             {'X': te_X, 'mask': te['mask'], 'n': te['n'], 'y': te['y'],
-             'X2': te_X2, 'mask2': te['mask2'], 'y2': te['y2']})
+             'X2': te_X2, 'mask2': te['mask2'], 'y2': te['y2'],
+             'X3': te_X3, 'mask3': te['mask3'], 'y3': te['y3']})
 
 def softmax_masked(scores, mask):
     """scores:(N,L), mask:(N,L)。パディング位置は確率0。"""
