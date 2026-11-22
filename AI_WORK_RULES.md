@@ -76,3 +76,12 @@
   - 長い処理は `cat > file.py <<'PY' ... PY` を避け、`python3 file.py` で実行
   - 出力は `> ~/.keirin_logs/xxx.txt 2>&1` に逃がし、`tail -N` で表示（Termux の出力切捨て対策）
   - `/tmp/` は使わない（Termux で権限なし）。`~/.keirin_logs/` に統一
+
+## 再発防止記録（追加）
+### 2026-11-14: if False else チェーンと関数未実行
+- 事象: patch_mlp2layer_b.py で dW1b に if False else を多用した壊れた式を残し、py_compile のみで通過させた。実行時 ValueError で発覚。
+- 原因: 推測式を if False で隠す、関数を実行せず py_compile で済ませる。
+- 再発防止: 後回しの式を if False で埋めない。新関数は必ず数値微分で勾配チェック実行。
+### 2026-11-14: 診断出力の切捨て見落とし
+- 事象: grep の空出力を Termux 切捨てと疑わず、未確認のまま次へ進んだ。
+- 再発防止: すべての診断コマンドは > ファイル 2>&1; cat で出力確保。

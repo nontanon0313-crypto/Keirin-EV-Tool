@@ -5,7 +5,7 @@ from train_softmax import load_data, logloss_1st, accuracy_top1
 from train_mlp import train_mlp, forward
 
 
-def main(layer):
+def main(layer, h1=32, h2=None):
     tr, te = load_data()
     if layer == '1st':
         X_tr, y_tr, m_tr = tr['X'], tr['y'][:,0], tr['mask']
@@ -23,8 +23,13 @@ def main(layer):
         raise ValueError(layer)
 
     print('Layer=%s  X_tr=%s  X_te=%s' % (layer, X_tr.shape, X_te.shape))
-    params = train_mlp(X_tr, y_tr, m_tr, X_te, y_te, m_te)
+    params = train_mlp(X_tr, y_tr, m_tr, X_te, y_te, m_te, H=h1, H2=h2)
+    if h2 is not None:
+        out = out.replace('.npz', f'_h{h1}_{h2}.npz')
+    else:
+        out = out.replace('.npz', f'_h{h1}.npz')
     np.savez(f'{_HERE}/data/{out}', **params)
+    print(f'saved: {out}')
     P_te, _ = forward(X_te, params, m_te)
     print(f'=== MLP {layer} 最終 ===')
     print(f'log loss: {logloss_1st(P_te, y_te):.4f}')
@@ -32,4 +37,7 @@ def main(layer):
 
 
 if __name__ == '__main__':
-    main(sys.argv[1])
+    layer = sys.argv[1]
+    h1 = int(sys.argv[2]) if len(sys.argv) > 2 else 32
+    h2 = int(sys.argv[3]) if len(sys.argv) > 3 else None
+    main(layer, h1=h1, h2=h2)
