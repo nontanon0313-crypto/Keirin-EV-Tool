@@ -41,9 +41,13 @@ def load_odds_and_implied(race_id):
 
 def main():
     data = load_inference_data('scraper/analysis/data/test.npz','scraper/analysis/data/norm.npz')
+    import sys as _sys
+    w2_file = _sys.argv[1] if len(_sys.argv) > 1 else 'W_2nd_mlp.npz'
+    w3_file = _sys.argv[2] if len(_sys.argv) > 2 else 'W_3rd_mlp.npz'
     W1 = dict(np.load('scraper/analysis/data/W_1st_mlp.npz'))
-    W2 = dict(np.load('scraper/analysis/data/W_2nd_mlp.npz'))
-    W3 = dict(np.load('scraper/analysis/data/W_3rd_mlp.npz'))
+    W2 = dict(np.load(f'scraper/analysis/data/{w2_file}'))
+    W3 = dict(np.load(f'scraper/analysis/data/{w3_file}'))
+    print(f'W2={w2_file} W3={w3_file}')
     N = len(data['y'])
 
     ll_model = []; ll_market = []
